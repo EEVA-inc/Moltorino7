@@ -9,6 +9,7 @@
 #include "providers/moltorino/MoltorinoSupporterBadges.hpp"
 #include "providers/twitch/TwitchAccount.hpp"
 #include "singletons/Paths.hpp"
+#include "singletons/Settings.hpp"
 #include "singletons/WindowManager.hpp"
 #include "util/PostToThread.hpp"
 #include "widgets/Window.hpp"
@@ -113,6 +114,33 @@ QString savedClientId()
     }
 
     return id;
+}
+
+bool activityHeartbeatsEnabled()
+{
+    const auto *settings = getSettings();
+    return settings->transmitPresence && settings->sendActivityHeartbeats;
+}
+
+bool heartbeatAccountHidden()
+{
+    const auto *settings = getSettings();
+    return !settings->sendActivityHeartbeats ||
+           settings->hideAccountInHeartbeats;
+}
+
+QString heartbeatMode()
+{
+    const auto *settings = getSettings();
+    if (!settings->sendActivityHeartbeats)
+    {
+        return QStringLiteral("disabled");
+    }
+    if (settings->hideAccountInHeartbeats)
+    {
+        return QStringLiteral("anonymous");
+    }
+    return QStringLiteral("normal");
 }
 
 QString formatBytes(qint64 bytes)
@@ -374,19 +402,46 @@ void MoltorinoPresence::init()
         getApp()->getAccounts()->twitch.currentUserChanged.connect([this] {
             this->sendHeartbeat(true);
         });
+    this->transmitPresenceConnection_ =
+        getSettings()->transmitPresence.connect([this](bool) {
+            this->applyHeartbeatSettings(true);
+        }, false);
+    this->activityHeartbeatConnection_ =
+        getSettings()->sendActivityHeartbeats.connect([this](bool) {
+            this->applyHeartbeatSettings(true);
+        }, false);
+    this->heartbeatAccountConnection_ =
+        getSettings()->hideAccountInHeartbeats.connect([this](bool) {
+            this->applyHeartbeatSettings(true);
+        }, false);
 
     this->connectBadgeSocket();
 }
 
 void MoltorinoPresence::startHeartbeat()
 {
+    this->connectBadgeSocket();
+    this->applyHeartbeatSettings(true);
+}
+
+void MoltorinoPresence::applyHeartbeatSettings(bool sendNow)
+{
+    if (!activityHeartbeatsEnabled())
+    {
+        this->heartbeatTimer_.stop();
+        this->heartbeatQueued_ = false;
+        return;
+    }
+
     if (!this->heartbeatTimer_.isActive())
     {
         this->heartbeatTimer_.start();
     }
 
-    this->sendHeartbeat(true);
-    this->connectBadgeSocket();
+    if (sendNow)
+    {
+        this->sendHeartbeat(true);
+    }
 }
 
 bool MoltorinoPresence::shouldShowUpdateButton() const
@@ -433,6 +488,13 @@ void MoltorinoPresence::installAvailableUpdate()
 
 void MoltorinoPresence::sendHeartbeat(bool force)
 {
+    if (!activityHeartbeatsEnabled())
+    {
+        this->heartbeatTimer_.stop();
+        this->heartbeatQueued_ = false;
+        return;
+    }
+
     if (this->heartbeatInFlight_)
     {
         this->heartbeatQueued_ = this->heartbeatQueued_ || force;
@@ -447,7 +509,10 @@ void MoltorinoPresence::sendHeartbeat(bool force)
         .json(this->makePayload())
         .onSuccess([this](const NetworkResult &result) {
             this->heartbeatInFlight_ = false;
-            this->handleServerReply(result.parseJson());
+            if (activityHeartbeatsEnabled())
+            {
+                this->handleServerReply(result.parseJson());
+            }
 
             if (this->heartbeatQueued_)
             {
@@ -652,11 +717,17 @@ QJsonObject MoltorinoPresence::makePayload() const
     payload.insert(QStringLiteral("internalBuild"),
                    Version::instance().internalVersion());
     payload.insert(QStringLiteral("sentAt"), now.toString(Qt::ISODate));
+    payload.insert(QStringLiteral("heartbeatMode"), heartbeatMode());
     payload.insert(QStringLiteral("status"),
                    QGuiApplication::applicationState() == Qt::ApplicationActive
                        ? QStringLiteral("active")
                        : QStringLiteral("background"));
-    payload.insert(QStringLiteral("activeAccount"), this->activeAccount());
+
+    if (!heartbeatAccountHidden())
+    {
+        payload.insert(QStringLiteral("activeAccount"), this->activeAccount());
+    }
+
     return payload;
 }
 

@@ -49,6 +49,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <memory>
 
 namespace {
 
@@ -138,7 +139,7 @@ QString formatMoltorinoAuthSummary(const MoltorinoAuthSummary &summary)
 
     if (summary.invalidAccountCount > 0)
     {
-        text += QString(" %1 saved %2 %3 refresh or re-auth.")
+        text += QString(" %1 saved %2 %3 refresh or sign in again.")
                     .arg(summary.invalidAccountCount)
                     .arg(summary.invalidAccountCount == 1 ? "account"
                                                           : "accounts")
@@ -434,7 +435,8 @@ private:
                 readOnlyItem(QString::number(modAccessCount(account))));
 
             auto status = account.valid ? QString("Valid")
-                                        : QString("Needs refresh or re-auth");
+                                        : QString(
+                                              "Needs refresh or sign in again");
             if (!account.lastError.trimmed().isEmpty())
             {
                 status = account.lastError;
@@ -1090,8 +1092,8 @@ MoltorinoPage::MoltorinoPage()
 
     SettingWidget::checkbox("Move Pin actions to Moderate menu",
                             s.movePinToModerateMenu)
-        ->setTooltip("Put Pin and Unpin inside the Moderate submenu when "
-                     "right-clicking a message.")
+        ->setTooltip("Put Pin and Unpin inside the Moderate submenu in the "
+                     "message menu.")
         ->addTo(*view);
 
     view->addDropdown<int>(
@@ -1314,7 +1316,7 @@ MoltorinoPage::MoltorinoPage()
         ->addTo(*view);
 
     view->addDropdown<int>(
-            "Auto-dismiss resolved banners",
+            "Auto dismiss resolved banners",
             {"Never", "After 10 seconds", "After 30 seconds",
              "After 60 seconds", "After 2 minutes", "After 5 minutes",
              "After 10 minutes"},
@@ -1448,7 +1450,7 @@ MoltorinoPage::MoltorinoPage()
     SettingWidget::checkbox("Hide unavailable mod commands",
                             s.hideUnavailableModCommands)
         ->setTooltip(
-            "Hide moderator-only commands from tab completion when they are "
+            "Hide moderator only commands from tab completion when they are "
             "not available in the current channel.")
         ->addTo(*view);
 
@@ -1496,7 +1498,7 @@ MoltorinoPage::MoltorinoPage()
     view->addTitle("Moderation");
     view->addDescription("Moderation tools and chat safety options.");
 
-    SettingWidget::checkbox("Show repeated-message counters",
+    SettingWidget::checkbox("Show repeated message counters",
                             s.enableRepeatedMessageDetector)
         ->setTooltip("Show repeated or very similar messages with an inline "
                      "counter such as x2, x3, or x4.")
@@ -1510,7 +1512,7 @@ MoltorinoPage::MoltorinoPage()
 
     SettingWidget::checkbox("Show counters in usercards",
                             s.repeatedMessagesShowInUsercards)
-        ->setTooltip("Show already-detected repeat counters beside cached "
+        ->setTooltip("Show already detected repeat counters beside cached "
                      "messages in usercards.")
         ->addTo(*view);
 
@@ -1577,7 +1579,7 @@ MoltorinoPage::MoltorinoPage()
 
     SettingWidget::colorButton("Counter color",
                                s.repeatedMessagesCounterColor)
-        ->setTooltip("Text color for the inline repeated-message counter.")
+        ->setTooltip("Text color for the inline repeated message counter.")
         ->addTo(*view);
 
     view->addDropdown<int>(
@@ -1705,9 +1707,9 @@ MoltorinoPage::MoltorinoPage()
         ->setTooltip("Color for messages sent from iOS.")
         ->addTo(*view);
 
-    SettingWidget::checkbox("Show Translate message in right-click menu",
+    SettingWidget::checkbox("Show Translate message in message menu",
                             s.showTranslateMessageContextAction)
-        ->setTooltip("Add a right-click action for translating chat messages.")
+        ->setTooltip("Add a menu action for translating chat messages.")
         ->addTo(*view);
 
     SettingWidget::dropdown("Translate messages to",
@@ -1719,6 +1721,42 @@ MoltorinoPage::MoltorinoPage()
     SettingWidget::checkbox("Show translated indicator",
                             s.showTranslatedMessageIndicator)
         ->setTooltip("Show muted (translated) text after translated messages.")
+        ->addTo(*view);
+
+    SettingWidget::checkbox("Send activity heartbeats",
+                            s.sendActivityHeartbeats)
+        ->setTooltip("Send a small periodic heartbeat with app version, "
+                     "platform, status, and update-check info.")
+        ->addTo(*view);
+
+    auto heartbeatConfirming = std::make_shared<bool>(false);
+    s.sendActivityHeartbeats.connect(
+        [this, &s, heartbeatConfirming](const bool enabled) {
+            if (enabled || *heartbeatConfirming)
+            {
+                return;
+            }
+
+            *heartbeatConfirming = true;
+            const auto answer = QMessageBox::warning(
+                this, "Disable heartbeats?",
+                "If you turn this off, Moltorino will stop sending "
+                "activity heartbeats and automatic update checks may stop "
+                "working.\n\nDo you still want to turn it off?",
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (answer != QMessageBox::Yes)
+            {
+                s.sendActivityHeartbeats = true;
+            }
+            *heartbeatConfirming = false;
+        },
+        this->managedConnections_, false);
+
+    SettingWidget::checkbox("Hide my account in heartbeats",
+                            s.hideAccountInHeartbeats)
+        ->setTooltip("Keep update/status heartbeats enabled, but leave out "
+                     "your Twitch account details.")
+        ->conditionallyEnabledBy(s.sendActivityHeartbeats)
         ->addTo(*view);
 
     view->addTitle("Usercards");
@@ -1777,7 +1815,7 @@ MoltorinoPage::MoltorinoPage()
     SettingWidget::checkbox("Always load more messages when possible",
                             s.alwaysLoadMoreUsercardMessages)
         ->setTooltip(
-            "Start lazy-loading older usercard messages without clicking the load button.")
+            "Start lazy loading older usercard messages without clicking the load button.")
         ->addTo(*view);
     SettingWidget::checkbox(
         "Show mod/unmod and vip/unvip buttons as a lead mod",
@@ -1823,7 +1861,7 @@ MoltorinoPage::MoltorinoPage()
     hideToTrayWidget->addTo(*view);
 
     auto *notifyWidget = SettingWidget::checkbox(
-                             "Show notifications for sound-enabled highlights",
+                             "Show notifications for sound enabled highlights",
                              s.trayNotifyOnSoundHighlights)
                              ->setTooltip(
                                  "Only highlight rules with Play sound enabled "
@@ -1834,7 +1872,7 @@ MoltorinoPage::MoltorinoPage()
 #endif
 
     view->addTitle("Fun");
-    view->addDescription("fun");
+    view->addDescription("Spam, pyramid, and playful chat command options.");
 
     SettingWidget::intInput("Delay between /spam and /pyramid messages",
                             s.spamCommandIntervalMs,
@@ -1842,7 +1880,7 @@ MoltorinoPage::MoltorinoPage()
                              .suffix = QStringLiteral(" ms")})
         ->setTooltip("How long /spam and /pyramid wait between messages. "
                      "Lower values are faster, but Twitch may still "
-                     "rate-limit accounts that are not mod, VIP, or "
+                     "rate limit accounts that are not mod, VIP, or "
                      "broadcaster in the channel.")
         ->addTo(*view);
 
@@ -1860,9 +1898,9 @@ MoltorinoPage::MoltorinoPage()
 
     SettingWidget::checkbox("Send message as warnings",
                             s.sendMessageAsWarnings)
-        ->setTooltip("#freebrody")
+        ->setTooltip("Send eligible messages through the warning style "
+                     "message flow instead of the normal chat path.")
         ->addTo(*view);
-    view->addDescription("#freebrody");
 
     view->addTitle("Miscellaneous");
     auto *miscDesc = new SignalLabel(this);

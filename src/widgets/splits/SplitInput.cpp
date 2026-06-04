@@ -2083,6 +2083,11 @@ void SplitInput::installTextEditEvents()
                                 }
                                 auto *mc = dynamic_cast<MultiChannel *>(
                                     this->split_->getChannel().get());
+                                if (mc == nullptr ||
+                                    i >= mc->channels().size())
+                                {
+                                    return;
+                                }
                                 mc->setActiveChannelIndex(i);
                                 getApp()
                                     ->getWindows()

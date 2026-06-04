@@ -1052,6 +1052,10 @@ public:
     BoolSetting confirmUnfollowFromSplitHeader{
         "/moltorino/confirmUnfollowFromSplitHeader", true};
     BoolSetting transmitPresence{"/moltorino/client/runtime", true};
+    BoolSetting sendActivityHeartbeats{
+        "/moltorino/client/sendActivityHeartbeats", true};
+    BoolSetting hideAccountInHeartbeats{
+        "/moltorino/client/hideAccountInHeartbeats", false};
     BoolSetting trayHideOnClose{"/moltorino/tray/hideOnClose",
 #ifdef Q_OS_MACOS
                                 false
