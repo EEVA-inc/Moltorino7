@@ -3,6 +3,7 @@
 #include "Application.hpp"
 #include "common/QLogging.hpp"
 #include "controllers/accounts/AccountController.hpp"
+#include "controllers/recording/ChatRecordingMessage.hpp"
 #include "messages/MessageBuilder.hpp"
 #include "providers/kick/KickAccount.hpp"
 #include "providers/kick/KickApi.hpp"
@@ -16,6 +17,7 @@
 #include "util/PostToThread.hpp"
 
 #include <QPointer>
+#include <QRegularExpression>
 
 #include <utility>
 
@@ -43,6 +45,33 @@ T stringSwitch(std::string_view provided, std::string_view match, T &&value,
 }
 
 namespace chatterino {
+
+namespace {
+QString recordingKickText(QString text)
+{
+    static const QRegularExpression emote(R"(\[emote:\d+:([^\]]+)\])");
+    return text.replace(emote, "\\1");
+}
+
+void appendRecordedKickEvent(KickChannel *channel, const MessagePtr &message,
+                             QJsonObject metadata = {}, QString text = {})
+{
+    if (!message)
+    {
+        return;
+    }
+    recording::deliverLive(
+        message,
+        [&] {
+            return recording::normalizeMessage(*channel, *message, text,
+                                               metadata);
+        },
+        [&] {
+            channel->addMessage(message, MessageContext::Original);
+        });
+}
+
+}
 
 KickChatServer::KickChatServer()
     : liveController_(*this)
@@ -266,12 +295,36 @@ void KickChatServer::onChatMessage(KickChannel *channel, BoostJsonObject data)
             getApp()->getTwitch()->getMentionsChannel()->addMessage(
                 msg, MessageContext::Original);
         }
-        channel->addMessage(msg, MessageContext::Original);
+        recording::deliverLive(
+            msg,
+            [&] {
+                const auto original = data["content"].toQString();
+                auto record = recording::normalizeMessage(
+                    *channel, *msg, recordingKickText(original),
+                    {{"originalContent", original}});
+                auto author = record.value("author").toObject();
+                author.insert("displayName",
+                              data["sender"]["username"].toQString());
+                author.insert("id",
+                              QString::number(data["sender"]["id"].toUint64()));
+                record.insert("author", author);
+                return record;
+            },
+            [&] {
+                channel->addMessage(msg, MessageContext::Original);
+            });
     }
 }
 
 void KickChatServer::onUserBanned(KickChannel *channel, BoostJsonObject data)
 {
+    recording::publicEvent(
+        *channel,
+        {{"kind", "userTimedOut"},
+         {"targetUserId", QString::number(data["user"]["id"].toUint64())},
+         {"targetUser", data["user"]["username"].toQString()},
+         {"durationMinutes", static_cast<qint64>(data["duration"].toInt64())},
+         {"text", "User banned or timed out"}});
     auto now = QDateTime::currentDateTime();
     auto msg = KickMessageBuilder::makeTimeoutMessage(channel, now, data);
     if (msg)
@@ -292,6 +345,12 @@ void KickChatServer::onUserBanned(KickChannel *channel, BoostJsonObject data)
 
 void KickChatServer::onUserUnbanned(KickChannel *channel, BoostJsonObject data)
 {
+    recording::publicEvent(
+        *channel,
+        {{"kind", "userUnbanned"},
+         {"targetUserId", QString::number(data["user"]["id"].toUint64())},
+         {"targetUser", data["user"]["username"].toQString()},
+         {"text", "User unbanned"}});
     auto msg = KickMessageBuilder::makeUntimeoutMessage(channel, data);
     if (msg)
     {
@@ -313,6 +372,10 @@ void KickChatServer::onMessageDeleted(KickChannel *channel,
                                       BoostJsonObject data)
 {
     auto messageID = data["message"]["id"].toQString();
+    recording::publicEvent(*channel, {{"kind", "messageDeleted"},
+                                     {"id", "delete:" + messageID},
+                                     {"targetMessageId", messageID},
+                                     {"text", "Message deleted"}});
     auto msg = channel->findMessageByID(messageID);
     if (!msg)
     {
@@ -330,6 +393,8 @@ void KickChatServer::onMessageDeleted(KickChannel *channel,
 void KickChatServer::onChatroomClear(KickChannel *channel,
                                      BoostJsonObject )
 {
+    recording::publicEvent(*channel,
+                           {{"kind", "chatCleared"}, {"text", "Chat cleared"}});
     auto now = QDateTime::currentDateTime();
     auto clear = KickMessageBuilder::makeClearChatMessage(now, {});
     channel->disableAllMessages();
@@ -339,21 +404,25 @@ void KickChatServer::onChatroomClear(KickChannel *channel,
 void KickChatServer::onPinnedMessageCreatedEvent(KickChannel *channel,
                                                  BoostJsonObject data)
 {
-    channel->addMessage(KickMessageBuilder::makePinnedMessage(channel, data),
-                        MessageContext::Original);
+    appendRecordedKickEvent(
+        channel, KickMessageBuilder::makePinnedMessage(channel, data),
+        {{"kind", "messagePinned"}});
 }
 
 void KickChatServer::onPinnedMessageDeletedEvent(KickChannel *channel,
                                                  BoostJsonObject )
 {
     channel->addSystemMessage(u"The pinned message was unpinned."_s);
+    recording::publicEvent(
+        *channel, {{"kind", "messageUnpinned"}, {"text", "Message unpinned"}});
 }
 
 void KickChatServer::onStreamHostEvent(KickChannel *channel,
                                        BoostJsonObject data)
 {
-    channel->addMessage(KickMessageBuilder::makeHostMessage(channel, data),
-                        MessageContext::Original);
+    appendRecordedKickEvent(channel,
+                            KickMessageBuilder::makeHostMessage(channel, data),
+                            {{"kind", "streamHosted"}});
 }
 
 void KickChatServer::onSubscriptionEvent(KickChannel *channel,
@@ -364,9 +433,16 @@ void KickChatServer::onSubscriptionEvent(KickChannel *channel,
     if (first)
     {
         MessageBuilder::triggerHighlights(channel, first, alert);
-        channel->addMessage(first, MessageContext::Original);
+        appendRecordedKickEvent(
+            channel, first,
+            {{"kind", "subscriptionMessage"},
+             {"months", static_cast<qint64>(data["months"].toInt64())}},
+            recordingKickText(data["custom_message"].toQString()));
     }
-    channel->addMessage(second, MessageContext::Original);
+    appendRecordedKickEvent(
+        channel, second,
+        {{"kind", "subscription"},
+         {"months", static_cast<qint64>(data["months"].toInt64())}});
 }
 
 void KickChatServer::onGiftedSubscriptionEvent(KickChannel *channel,
@@ -375,7 +451,13 @@ void KickChatServer::onGiftedSubscriptionEvent(KickChannel *channel,
     auto msg = KickMessageBuilder::makeGiftedSubscriptionMessage(channel, data);
     if (msg)
     {
-        channel->addMessage(msg, MessageContext::Original);
+        appendRecordedKickEvent(
+            channel, msg,
+            {{"kind", "giftedSubscriptions"},
+             {"giftCount",
+              static_cast<double>(data["gifted_usernames"].toArray().size())},
+             {"totalGifts",
+              static_cast<double>(data["gifter_total"].toUint64())}});
     }
 }
 
@@ -385,7 +467,13 @@ void KickChatServer::onRewardRedeemedEvent(KickChannel *channel,
     auto msg = KickMessageBuilder::makeRewardRedeemedMessage(channel, data);
     if (msg)
     {
-        channel->addMessage(msg, MessageContext::Original);
+        const auto input = recordingKickText(data["user_input"].toQString());
+        appendRecordedKickEvent(
+            channel, msg,
+            {{"kind", "rewardRedeemed"},
+             {"reward", data["reward_title"].toQString()},
+             {"userInput", input}},
+            msg->messageText + (input.isEmpty() ? QString{} : ": " + input));
     }
 }
 
@@ -395,7 +483,14 @@ void KickChatServer::onKicksGiftedEvent(KickChannel *channel,
     auto msg = KickMessageBuilder::makeKicksGiftedMessage(channel, data);
     if (msg)
     {
-        channel->addMessage(msg, MessageContext::Original);
+        const auto input = recordingKickText(data["message"].toQString());
+        appendRecordedKickEvent(
+            channel, msg,
+            {{"kind", "kicksGifted"},
+             {"gift", data["gift"]["name"].toQString()},
+             {"kicks", static_cast<double>(data["gift"]["amount"].toUint64())},
+             {"userInput", input}},
+            msg->messageText + (input.isEmpty() ? QString{} : ": " + input));
     }
 }
 
@@ -470,6 +565,8 @@ void KickChatServer::onJoin(uint64_t roomID) const
         return;
     }
     existing->addSystemMessage("joined");
+    recording::publicEvent(*existing,
+                           {{"kind", "connected"}, {"text", "Chat connected"}});
 }
 
 std::shared_ptr<const EmoteMap> KickChatServer::globalEmotes() const

@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/tiktok-login">
+        <file alias="logo.png">../../../resources/icon.png</file>
+    </qresource>
+</RCC>

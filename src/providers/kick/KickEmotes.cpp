@@ -2,21 +2,13 @@
 
 #include "messages/Image.hpp"
 
-#include <boost/unordered/unordered_flat_map.hpp>
+#include <QCache>
 
 namespace {
 
 using namespace chatterino;
 
-struct StringViewHash : std::hash<QStringView> {
-    using is_transparent = std::true_type;
-};
-
-template <typename T>
-using StringMap =
-    boost::unordered_flat_map<QString, T, StringViewHash, std::equal_to<>>;
-
-StringMap<EmotePtr> CACHE;
+QCache<QString, EmotePtr> CACHE(4096);
 
 }
 
@@ -24,14 +16,13 @@ namespace chatterino {
 
 EmotePtr KickEmotes::emoteForID(QStringView id, QStringView name)
 {
-    auto it = CACHE.find(id);
-    if (it != CACHE.end())
+    auto idStr = id.toString();
+    if (const auto *cached = CACHE.object(idStr))
     {
-        return it->second;
+        return *cached;
     }
 
     auto nameStr = name.toString();
-    auto idStr = id.toString();
     QString tooltip = nameStr.toHtmlEscaped() % u"<br>Kick Emote";
     auto emote = std::make_shared<const Emote>(Emote{
         .name = {std::move(nameStr)},
@@ -40,7 +31,7 @@ EmotePtr KickEmotes::emoteForID(QStringView id, QStringView name)
         .tooltip = {std::move(tooltip)},
         .id = {idStr},
     });
-    CACHE.emplace(idStr, emote);
+    CACHE.insert(idStr, new EmotePtr(emote));
     return emote;
 }
 

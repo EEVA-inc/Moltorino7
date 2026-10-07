@@ -17,15 +17,19 @@
 #include "providers/kick/KickApi.hpp"
 #include "providers/kick/KickChatServer.hpp"
 #include "providers/kick/KickLiveUpdates.hpp"
+#include "providers/kick/KickMessageBuilder.hpp"
 #include "providers/seventv/eventapi/Dispatch.hpp"
 #include "providers/seventv/SeventvAPI.hpp"
 #include "providers/seventv/SeventvEmotes.hpp"
 #include "providers/seventv/SeventvEventAPI.hpp"
 #include "providers/twitch/TwitchIrcServer.hpp"
 #include "singletons/Settings.hpp"
+#include "util/BoostJsonWrap.hpp"
 #include "util/FormatTime.hpp"
 #include "util/Helpers.hpp"
 #include "util/PostToThread.hpp"
+
+#include <algorithm>
 
 using namespace Qt::Literals::StringLiterals;
 using namespace std::chrono_literals;
@@ -36,7 +40,8 @@ KickChannel::KickChannel(const QString &name)
     : Channel(name.toLower(), Type::Kick)
     , ChannelChatters(static_cast<Channel &>(*this))
     , displayName_(name)
-    , slug_(KickApi::slugify(this->getName()))
+    , slug_(this->getName())
+    , channelAvatar_(std::make_shared<ChannelAvatarSource>())
     , seventvEmotes_(std::make_shared<const EmoteMap>())
 {
     this->setMentionFlag(MessageElementFlag::KickUsername);
@@ -90,6 +95,7 @@ std::pair<std::shared_ptr<MessageThread>, MessagePtr>
         {
             return {existing, existing->root()};
         }
+        this->threads_.erase(existingIt);
     }
 
     auto msg = this->findMessageByID(messageID);
@@ -105,6 +111,16 @@ std::pair<std::shared_ptr<MessageThread>, MessagePtr>
 
     auto thread = std::make_shared<MessageThread>(msg);
     this->threads_[messageID] = thread;
+
+    constexpr size_t THREAD_SWEEP_MIN_SIZE = 512;
+    constexpr size_t THREAD_SWEEP_INTERVAL = 256;
+    if (this->threads_.size() >= THREAD_SWEEP_MIN_SIZE &&
+        this->threads_.size() % THREAD_SWEEP_INTERVAL == 0)
+    {
+        std::erase_if(this->threads_, [](const auto &entry) {
+            return entry.second.expired();
+        });
+    }
     return {thread, msg};
 }
 
@@ -363,22 +379,21 @@ bool KickChannel::isLive() const
     return this->streamData_.isLive;
 }
 
-void KickChannel::updateStreamData(const KickChannelInfo &info)
+bool KickChannel::updateLiveStatus(bool live, const QString &title)
 {
-    assert(info.userID == this->userID());
-
-    bool changed = false;
-    if (this->streamData_.isLive != info.stream.isLive)
+    const bool titleChanged = this->streamData_.title != title;
+    const bool liveChanged = this->streamData_.isLive != live;
+    this->streamData_.title = title;
+    if (liveChanged)
     {
-        changed = true;
-        this->streamData_.isLive = info.stream.isLive;
+        this->streamData_.isLive = live;
 
         if (this->streamData_.isLive)
         {
             this->addMessage(
                 MessageBuilder::makeLiveMessage(
                     this->getDisplayName(), QString::number(this->userID()),
-                    info.streamTitle,
+                    title,
                     {MessageFlag::System,
                      MessageFlag::DoNotTriggerNotification}),
                 MessageContext::Original);
@@ -392,11 +407,17 @@ void KickChannel::updateStreamData(const KickChannelInfo &info)
         }
         this->liveStatusChanged.invoke();
     }
-    if (this->streamData_.title != info.streamTitle)
+    if (titleChanged || liveChanged)
     {
-        changed = true;
-        this->streamData_.title = info.streamTitle;
+        this->streamDataChanged.invoke();
     }
+    return liveChanged;
+}
+
+void KickChannel::updateStreamData(const KickChannelInfo &info)
+{
+    assert(info.userID == this->userID());
+    bool changed = this->updateLiveStatus(info.stream.isLive, info.streamTitle);
     if (this->streamData_.category != info.category.name)
     {
         changed = true;
@@ -466,6 +487,35 @@ void KickChannel::setSendWait(std::chrono::seconds waitTime)
     }
 }
 
+EmotePtr KickChannel::getSubBadge(unsigned months)
+{
+    auto cIt = this->subBadges_.find(months);
+    if (cIt != this->subBadges_.end())
+    {
+        return cIt->second;
+    }
+    auto baseIt = this->subBadgeImages_.upper_bound(months);
+    if (baseIt == this->subBadgeImages_.begin())
+    {
+        return {};
+    }
+    --baseIt;
+
+    const auto name = months == 1 ? u"Subscriber for 1 month"_s
+                                 : u"Subscriber for %1 months"_s.arg(months);
+    auto emote = std::make_shared<const Emote>(Emote{
+        .name = {name},
+        .images = ImageSet{baseIt->second},
+        .tooltip = Tooltip{name},
+    });
+    if (this->subBadges_.size() >= 512)
+    {
+        this->subBadges_.clear();
+    }
+    this->subBadges_.emplace(months, emote);
+    return emote;
+}
+
 void KickChannel::messageRemovedFromStart(const MessagePtr &msg)
 {
     if (msg->replyThread)
@@ -499,7 +549,10 @@ void KickChannel::resolveChannelInfo()
                 return;
             }
 
+            self->initSubBadges(res->subBadges);
             self->slug_ = res->slug;
+            self->channelAvatar_->setAvatarUrl(
+                res->user.profilePictureURL.value_or(QString{}));
             self->setUserInfo(UserInit{
                 .roomID = res->chatroom.roomID,
                 .userID = res->user.userID,
@@ -511,6 +564,10 @@ void KickChannel::resolveChannelInfo()
             {
                 self->displayNameChanged.invoke();
             }
+            if (res->isLive)
+            {
+                self->updateLiveStatus(*res->isLive, res->streamTitle);
+            }
 
             self->updateRoomModes(RoomModes{
                 .subscribersMode = res->chatroom.subscribersMode,
@@ -518,6 +575,7 @@ void KickChannel::resolveChannelInfo()
                 .slowModeDuration = res->chatroom.slowModeDuration,
                 .followersModeDuration = res->chatroom.followersModeDuration,
             });
+            self->loadChannelHistory();
         });
 }
 
@@ -683,7 +741,7 @@ void KickChannel::updateSevenTVActivity()
         return;
     }
 
-    this->nextSeventvActivity_ = this->nextSeventvActivity_.addSecs(300);
+    this->nextSeventvActivity_ = QDateTime::currentDateTimeUtc().addSecs(300);
 
     qCDebug(chatterinoSeventv) << "Sending activity in" << this->getName();
 
@@ -853,6 +911,63 @@ void KickChannel::emitSendWait()
     {
         this->sendWaitUpdate.invoke(formatTime(remaining, 2));
     }
+}
+
+void KickChannel::initSubBadges(
+    std::span<const KickPrivateChannelSubBadge> infos)
+{
+    this->subBadges_.clear();
+    this->subBadgeImages_.clear();
+    for (const auto &info : infos)
+    {
+        this->subBadgeImages_.emplace(
+            info.months, Image::fromAutoscaledUrl({info.badgeImageUrl}, 18));
+    }
+}
+
+void KickChannel::loadChannelHistory()
+{
+    if (!getSettings()->loadTwitchMessageHistoryOnConnect)
+    {
+        return;
+    }
+    KickApi::privateChannelHistory(
+        this->channelID_, [weak = this->weakFromThis()](const auto &res) {
+            auto self = weak.lock();
+            if (!self)
+            {
+                return;
+            }
+            if (!res)
+            {
+                qCWarning(chatterinoKick)
+                    << *self << "Failed to load channel history" << res.error();
+                return;
+            }
+            BoostJsonObject obj(*res);
+            std::vector<MessagePtr> messages;
+            auto arr = obj["data"]["messages"].toArray();
+            if (arr.empty())
+            {
+                return;
+            }
+            for (auto i = static_cast<qsizetype>(arr.size() - 1); i >= 0; --i)
+            {
+                auto msg = arr.at(static_cast<size_t>(i));
+                if (msg["type"].toStringView() != "message")
+                {
+                    continue;
+                }
+                auto [ptr, highlight] = KickMessageBuilder::makeChatMessage(
+                    self.get(), msg.toObject());
+                messages.emplace_back(std::move(ptr));
+            }
+
+            if (getSettings()->loadTwitchMessageHistoryOnConnect)
+            {
+                self->fillInMissingMessages(messages);
+            }
+        });
 }
 
 QDebug operator<<(QDebug dbg, const KickChannel &chan)

@@ -16,9 +16,46 @@
 #include <pajlada/signals/signalholder.hpp>
 #include <QUrlQuery>
 
+#include <algorithm>
+#include <limits>
+
 namespace chatterino {
 
 using namespace Qt::Literals::StringLiterals;
+
+QString KickAccountData::tokenUrl() const
+{
+    if (!this->publicProxy.isEmpty())
+    {
+        if (this->publicProxy != kick::AUTH_PROXY ||
+            this->clientID != kick::AUTH_CLIENT_ID)
+        {
+            return {};
+        }
+        return this->publicProxy + u"/oauth/token"_s;
+    }
+    return !this->clientID.isEmpty() && !this->clientSecret.isEmpty()
+               ? u"https://id.kick.com/oauth/token"_s
+               : QString{};
+}
+
+bool KickAccountData::setTokens(const QJsonObject &response)
+{
+    const auto access = response["access_token"].toString().trimmed();
+    const auto refresh = response["refresh_token"].toString().trimmed();
+    const auto expiry = response["expires_in"];
+    const auto seconds =
+        expiry.isString() ? expiry.toString().toLongLong() : expiry.toInteger();
+    if (access.isEmpty() || refresh.isEmpty() || seconds <= 0)
+    {
+        return false;
+    }
+    this->authToken = access;
+    this->refreshToken = refresh;
+    this->expiresAt = QDateTime::currentDateTimeUtc().addSecs(
+        std::min<qint64>(seconds, std::numeric_limits<qint32>::max()));
+    return true;
+}
 
 std::optional<KickAccountData> KickAccountData::loadRaw(const std::string &key)
 {
@@ -27,30 +64,39 @@ std::optional<KickAccountData> KickAccountData::loadRaw(const std::string &key)
     auto clientID = QStringSetting::get("/kickAccounts/" + key + "/clientID");
     auto clientSecret =
         QStringSetting::get("/kickAccounts/" + key + "/clientSecret");
+    auto publicProxy =
+        QStringSetting::get("/kickAccounts/" + key + "/publicProxy");
     auto authToken = QStringSetting::get("/kickAccounts/" + key + "/authToken");
     auto refreshToken =
         QStringSetting::get("/kickAccounts/" + key + "/refreshToken");
     auto expiresAtStr =
         QStringSetting::get("/kickAccounts/" + key + "/expiresAt");
 
-    if (username.isEmpty() || userID == 0 || clientID.isEmpty() ||
-        clientSecret.isEmpty() || authToken.isEmpty() ||
-        refreshToken.isEmpty() || expiresAtStr.isEmpty())
+    if (username.trimmed().isEmpty() || userID == 0 ||
+        authToken.trimmed().isEmpty() || refreshToken.trimmed().isEmpty())
     {
         return std::nullopt;
     }
 
     QDateTime expiresAt = QDateTime::fromString(expiresAtStr, Qt::ISODate);
+    if (!expiresAt.isValid())
+    {
+        return std::nullopt;
+    }
 
-    return KickAccountData{
+    KickAccountData data{
         .username = username.trimmed(),
         .userID = userID,
         .clientID = clientID.trimmed(),
-        .clientSecret = clientSecret.trimmed(),
+        .clientSecret = publicProxy.trimmed().isEmpty() ? clientSecret.trimmed()
+                                                        : QString{},
+        .publicProxy = publicProxy.trimmed(),
         .authToken = authToken.trimmed(),
         .refreshToken = refreshToken.trimmed(),
         .expiresAt = expiresAt,
     };
+    return data.tokenUrl().isEmpty() ? std::nullopt
+                                     : std::make_optional(std::move(data));
 }
 
 void KickAccountData::save() const
@@ -59,7 +105,10 @@ void KickAccountData::save() const
     QStringSetting::set(basePath + "/username", this->username.toLower());
     UInt64Setting::set(basePath + "/userID", this->userID);
     QStringSetting::set(basePath + "/clientID", this->clientID);
-    QStringSetting::set(basePath + "/clientSecret", this->clientSecret);
+    QStringSetting::set(basePath + "/clientSecret", this->publicProxy.isEmpty()
+                                                        ? this->clientSecret
+                                                        : QString{});
+    QStringSetting::set(basePath + "/publicProxy", this->publicProxy);
     QStringSetting::set(basePath + "/authToken", this->authToken);
     QStringSetting::set(basePath + "/refreshToken", this->refreshToken);
     QStringSetting::set(basePath + "/expiresAt",
@@ -72,7 +121,8 @@ KickAccount::KickAccount(const KickAccountData &args)
     , username_(args.username.toLower())
     , userID_(args.userID)
     , clientID_(args.clientID)
-    , clientSecret_(args.clientSecret)
+    , clientSecret_(args.publicProxy.isEmpty() ? args.clientSecret : QString{})
+    , publicProxy_(args.publicProxy)
     , authToken_(args.authToken)
     , refreshToken_(args.refreshToken)
     , expiresAt_(args.expiresAt)
@@ -88,6 +138,7 @@ void KickAccount::save() const
         .userID = this->userID_,
         .clientID = this->clientID_,
         .clientSecret = this->clientSecret_,
+        .publicProxy = this->publicProxy_,
         .authToken = this->authToken_,
         .refreshToken = this->refreshToken_,
         .expiresAt = this->expiresAt_,
@@ -99,11 +150,10 @@ bool KickAccount::update(const KickAccountData &data)
 {
     bool changed = false;
 
-    if (QString::compare(this->username_, data.username, Qt::CaseInsensitive) ==
-        0)
+    if (this->username_ != data.username.toLower())
     {
         changed = true;
-        this->username_ = data.username;
+        this->username_ = data.username.toLower();
     }
     if (this->userID_ != data.userID)
     {
@@ -115,10 +165,17 @@ bool KickAccount::update(const KickAccountData &data)
         changed = true;
         this->clientID_ = data.clientID;
     }
-    if (this->clientSecret_ != data.clientSecret)
+    const auto secret =
+        data.publicProxy.isEmpty() ? data.clientSecret : QString{};
+    if (this->clientSecret_ != secret)
     {
         changed = true;
-        this->clientSecret_ = data.clientSecret;
+        this->clientSecret_ = secret;
+    }
+    if (this->publicProxy_ != data.publicProxy)
+    {
+        changed = true;
+        this->publicProxy_ = data.publicProxy;
     }
     if (this->authToken_ != data.authToken)
     {
@@ -138,7 +195,9 @@ bool KickAccount::update(const KickAccountData &data)
 
     if (changed)
     {
+        this->cancelRefresh();
         this->save();
+        this->authUpdated.invoke();
     }
     return changed;
 }
@@ -150,7 +209,7 @@ QString KickAccount::toString() const
 
 void KickAccount::refreshIfNeeded()
 {
-    if (this->isAnonymous())
+    if (this->isAnonymous() || this->refreshing_)
     {
         return;
     }
@@ -162,48 +221,73 @@ void KickAccount::refreshIfNeeded()
         return;
     }
 
+    KickAccountData credentials{
+        .clientID = this->clientID_,
+        .clientSecret = this->clientSecret_,
+        .publicProxy = this->publicProxy_,
+    };
+    const auto url = credentials.tokenUrl();
+    if (url.isEmpty())
+    {
+        return;
+    }
     QUrlQuery payload{
         {"refresh_token"_L1, this->refreshToken_},
         {"client_id"_L1, this->clientID_},
-        {"client_secret"_L1, this->clientSecret_},
         {"grant_type"_L1, "refresh_token"_L1},
     };
+    if (this->publicProxy_.isEmpty())
+    {
+        payload.addQueryItem(u"client_secret"_s, this->clientSecret_);
+    }
 
     auto weak = this->weak_from_this();
-    NetworkRequest(u"https://id.kick.com/oauth/token"_s,
-                   NetworkRequestType::Post)
+    const auto generation = ++this->refreshGeneration_;
+    this->refreshing_ = true;
+    NetworkRequest(url, NetworkRequestType::Post)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .hideRequestBody()
         .payload(payload.toString(QUrl::FullyEncoded).toUtf8())
         .timeout(20'000)
-        .onSuccess([weak](const NetworkResult &res) {
+        .maximumResponseSize(64 * 1024)
+        .onSuccess([weak, generation](const NetworkResult &res) {
             auto self = weak.lock();
-            if (!self)
+            if (!self || self->refreshGeneration_ != generation)
             {
                 return;
             }
 
-            const auto json = res.parseJson();
-            self->authToken_ = json["access_token"_L1].toString();
-            self->refreshToken_ = json["refresh_token"_L1].toString();
-            auto expiresInSec =
-                std::clamp<qint64>(json["expires_in"_L1].toInteger(), 0,
-                                   std::numeric_limits<qint32>::max());
-            self->expiresAt_ =
-                QDateTime::currentDateTimeUtc().addSecs(expiresInSec);
+            self->refreshing_ = false;
+            KickAccountData tokens;
+            if (!tokens.setTokens(res.parseJson()))
+            {
+                qCWarning(chatterinoKick)
+                    << "Invalid Kick token refresh response";
+                return;
+            }
+            self->authToken_ = tokens.authToken;
+            self->refreshToken_ = tokens.refreshToken;
+            self->expiresAt_ = tokens.expiresAt;
             self->save();
             self->authUpdated.invoke();
         })
-        .onError([weak](const NetworkResult &res) {
+        .onError([weak, generation](const NetworkResult &res) {
             auto self = weak.lock();
-            if (!self)
+            if (!self || self->refreshGeneration_ != generation)
             {
                 return;
             }
+            self->refreshing_ = false;
             qCWarning(chatterinoKick) << "Failed to refresh" << self->username()
                                       << "error:" << res.formatError();
         })
         .execute();
+}
+
+void KickAccount::cancelRefresh()
+{
+    ++this->refreshGeneration_;
+    this->refreshing_ = false;
 }
 
 void KickAccount::loadSeventvUser()
@@ -245,14 +329,20 @@ void KickAccount::loadSeventvUser()
 
     seventv->getUserByKickID(
         this->userID(),
-        [this, loadPersonalEmotes](const auto &json) {
+        [weak = this->weak_from_this(), loadPersonalEmotes](const auto &json,
+                                                            const auto &) {
+            auto self = weak.lock();
+            if (!self)
+            {
+                return;
+            }
             const auto user = json["user"].toObject();
             const auto id = user["id"].toString();
             if (id.isEmpty())
             {
                 return;
             }
-            this->seventvUserID_ = id;
+            self->seventvUserID_ = id;
 
             for (const auto &emoteSetJson : user["emote_sets"].toArray())
             {
@@ -261,7 +351,7 @@ void KickAccount::loadSeventvUser()
                         SeventvEmoteSetFlag(emoteSet["flags"].toInt()))
                         .has(SeventvEmoteSetFlag::Personal))
                 {
-                    loadPersonalEmotes(this->userID(),
+                    loadPersonalEmotes(self->userID(),
                                        emoteSet["id"].toString());
                     break;
                 }

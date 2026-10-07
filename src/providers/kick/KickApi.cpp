@@ -86,11 +86,16 @@ void callDeserialize(auto &&cb, BoostJsonValue data)
 }
 
 template <typename T>
-void getJsonNoAuth(const QString &url, std::function<void(ExpectedStr<T>)> cb)
+void getJsonNoAuth(
+    const QString &url,
+    std::function<void(Expected<T, std::pair<unsigned, QString>>)> cb)
 {
     NetworkRequest(url)
+        .timeout(20'000)
+        .maximumResponseSize(2 * 1024 * 1024)
         .onError([cb](const NetworkResult &res) {
-            cb(makeUnexpected(res.formatError()));
+            cb(makeUnexpected(
+                std::pair(res.status().value_or(0), res.formatError())));
         })
         .onSuccess([cb = std::move(cb)](const NetworkResult &res) {
             const auto &ba = res.getData();
@@ -101,15 +106,87 @@ void getJsonNoAuth(const QString &url, std::function<void(ExpectedStr<T>)> cb)
             {
                 qCWarning(chatterinoKick)
                     << "Failed to parse API response:" << ec.message();
-                cb(makeUnexpected(u"Failed to parse API response: "_s %
-                                  QString::fromStdString(ec.message())));
+                cb(makeUnexpected(
+                    std::pair(0U, u"Failed to parse API response: "_s %
+                                      QString::fromStdString(ec.message()))));
                 return;
             }
 
             BoostJsonValue ref(jv);
-            callDeserialize<T>(cb, ref);
+            callDeserialize<T>(
+                [cb = std::move(cb)](auto &&res) {
+                    if constexpr (std::is_same_v<
+                                      std::remove_cvref_t<decltype(res)>, T>)
+                    {
+                        cb(std::forward<decltype(res)>(res));
+                    }
+                    else
+                    {
+                        cb(makeUnexpected(std::pair(
+                            0, std::forward<decltype(res)>(res).error())));
+                    }
+                },
+                ref);
         })
         .execute();
+}
+
+template <typename T>
+void autoSlugifyImpl(const QString &baseUrl, auto &&cb, bool)
+{
+    getJsonNoAuth<T>(baseUrl, std::forward<decltype(cb)>(cb));
+}
+
+template <typename T>
+void autoSlugifyImpl(const QString &baseUrl, auto &&cb, bool shouldSlug,
+                     const QString &segment, auto &&...rest)
+{
+    QString url = baseUrl;
+    url.append('/');
+    if (shouldSlug)
+    {
+        QString slug = segment;
+        url.append(slug.replace('_', '-'));
+    }
+    else
+    {
+        url.append(segment);
+    }
+    autoSlugifyImpl<T>(
+        url,
+        [baseUrl, cb = std::forward<decltype(cb)>(cb), shouldSlug, segment,
+         rest...](auto res) {
+            if (!shouldSlug && !res.has_value() && res.error().first == 404 &&
+                segment.contains('_'))
+            {
+                autoSlugifyImpl<T>(baseUrl, cb, true, segment, rest...);
+            }
+            else
+            {
+                cb(std::move(res));
+            }
+        },
+        false, rest...);
+}
+
+template <typename T>
+void autoSlugify(const QString &baseUrl,
+                 std::function<void(Expected<T, QString>)> cb,
+                 auto &&...segments)
+{
+    autoSlugifyImpl<T>(
+        baseUrl,
+        [cb = std::move(cb)](auto res) {
+            if (!res.has_value())
+            {
+                cb(makeUnexpected(std::move(res.error().second)));
+            }
+            else
+            {
+                cb(*std::move(res));
+            }
+        },
+        false, std::forward<decltype(segments)>(segments)...);
 }
 
 QString makePublicV1Url(QStringView endpoint)
@@ -126,7 +203,7 @@ KickPrivateUserInfo::KickPrivateUserInfo(BoostJsonObject obj)
     , username(obj["username"].toQString())
 {
     auto pictureUrl = obj["profile_pic"];
-    if (pictureUrl.isString())
+    if (pictureUrl.isString() && !pictureUrl.toStringView().empty())
     {
         this->profilePictureURL = pictureUrl.toQString();
     }
@@ -153,12 +230,41 @@ KickPrivateChatroomInfo::KickPrivateChatroomInfo(BoostJsonObject obj)
     }
 }
 
+KickPrivateChannelSubBadge::KickPrivateChannelSubBadge(BoostJsonObject obj)
+    : months(static_cast<unsigned>(obj["months"].toUint64()))
+    , badgeImageUrl(obj["badge_image"]["src"].toQString())
+{
+}
+
 KickPrivateChannelInfo::KickPrivateChannelInfo(BoostJsonObject obj)
     : channelID(obj["id"].toUint64())
     , followersCount(obj["followers_count"].toUint64())
     , slug(obj["slug"].toQString())
     , user(obj["user"].toObject())
     , chatroom(obj["chatroom"].toObject())
+{
+    for (auto badge : obj["subscriber_badges"].toArray())
+    {
+        this->subBadges.emplace_back(badge.toObject());
+    }
+    if (obj["followers_count"].isString())
+    {
+        this->followersCount = obj["followers_count"].toQString().toULongLong();
+    }
+    if (obj["livestream"].isObject())
+    {
+        const auto stream = obj["livestream"].toObject();
+        this->isLive = stream["is_live"].toBool();
+        this->streamTitle = stream["session_title"].toQString();
+    }
+    else if (obj["livestream"].isNull())
+    {
+        this->isLive = false;
+    }
+}
+
+KickPrivateChannelInfoSmall::KickPrivateChannelInfoSmall(BoostJsonObject obj)
+    : user(obj["user"].toObject())
 {
 }
 
@@ -205,6 +311,7 @@ KickChannelInfo::KickChannelInfo(BoostJsonObject obj)
     , category(obj["category"].toObject())
     , stream(obj["stream"].toObject())
     , streamTitle(obj["stream_title"].toQString())
+    , slug(obj["slug"].toQString())
 {
 }
 
@@ -240,36 +347,41 @@ KickApi *KickApi::instance()
     return api.get();
 }
 
-QString KickApi::slugify(const QString &usernameOrSlug)
-{
-    auto slugified = usernameOrSlug;
-    slugified.replace('_', '-');
-    return slugified;
-}
-
 void KickApi::privateChannelInfo(const QString &username,
                                  Callback<KickPrivateChannelInfo> cb)
 {
-    getJsonNoAuth<KickPrivateChannelInfo>(
-        u"https://kick.com/api/v2/channels/" % slugify(username),
-        std::move(cb));
+    autoSlugify<KickPrivateChannelInfo>(u"https://kick.com/api/v2/channels"_s,
+                                        std::move(cb), username);
+}
+
+void KickApi::privateChannelInfoSmall(const QString &slug,
+                                      Callback<KickPrivateChannelInfoSmall> cb)
+{
+    autoSlugify<KickPrivateChannelInfoSmall>(
+        u"https://kick.com/api/v2/channels"_s, std::move(cb), slug, "info");
 }
 
 void KickApi::privateUserInChannelInfo(
     const QString &userUsername, const QString &channelUsername,
     Callback<KickPrivateUserInChannelInfo> cb)
 {
-    getJsonNoAuth<KickPrivateUserInChannelInfo>(
-        u"https://kick.com/api/v2/channels/" % slugify(channelUsername) %
-            "/users/" % slugify(userUsername),
-        std::move(cb));
+    autoSlugify<KickPrivateUserInChannelInfo>(
+        u"https://kick.com/api/v2/channels"_s, std::move(cb), channelUsername,
+        "users", userUsername);
 }
 
 void KickApi::privateEmotesInChannel(
     const QString &username, Callback<std::vector<KickPrivateEmoteSetInfo>> cb)
 {
-    getJsonNoAuth(u"https://kick.com/emotes/" % slugify(username),
-                  std::move(cb));
+    autoSlugify(u"https://kick.com/emotes"_s, std::move(cb), username);
+}
+
+void KickApi::privateChannelHistory(uint64_t channelID,
+                                    Callback<BoostJsonObject> cb)
+{
+    autoSlugify(u"https://web.kick.com/api/v1/chat/" %
+                    QString::number(channelID) % "/history",
+                std::move(cb));
 }
 
 void KickApi::sendMessage(uint64_t broadcasterUserID, const QString &message,
@@ -325,7 +437,7 @@ void KickApi::getChannelByName(const QString &usernameOrSlug,
                                Callback<KickChannelInfo> cb)
 {
     QString path =
-        u"channels?slug=" % QUrl::toPercentEncoding(slugify(usernameOrSlug));
+        u"channels?slug=" % QUrl::toPercentEncoding(usernameOrSlug);
     this->getJson(path, std::move(cb));
 }
 
@@ -409,6 +521,8 @@ template <typename T>
 void KickApi::doRequest(NetworkRequest &&req, Callback<T> cb)
 {
     std::move(req)
+        .timeout(20'000)
+        .maximumResponseSize(2 * 1024 * 1024)
         .header("Authorization"_ba, "Bearer "_ba + this->authToken)
         .onError([cb](const NetworkResult &res) {
             auto message = res.parseJson().value("message").toString();

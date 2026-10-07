@@ -4,6 +4,7 @@
 #include "common/QLogging.hpp"
 #include "controllers/accounts/AccountController.hpp"
 #include "providers/kick/KickApi.hpp"
+#include "providers/kick/KickChannel.hpp"
 #include "providers/kick/KickChatServer.hpp"
 
 #include <QPointer>
@@ -15,7 +16,7 @@ namespace {
 using namespace std::chrono_literals;
 
 constexpr auto IMMEDIATE_DELAY = 1s;
-constexpr auto REFRESH_INTERVAL = 1min;
+constexpr auto REFRESH_INTERVAL = 30s;
 
 constexpr size_t CHUNK_SIZE = 50;
 
@@ -77,6 +78,33 @@ void KickLiveController::refreshList(const std::span<uint64_t> userIDs)
 {
     if (!getApp()->getAccounts()->kick.isLoggedIn())
     {
+        for (const auto id : userIDs)
+        {
+            const auto channel = this->chatServer.findByUserID(id);
+            if (!channel || this->publicRequests.contains(id))
+            {
+                continue;
+            }
+            this->publicRequests.insert(id);
+            KickApi::privateChannelInfo(
+                channel->getName(),
+                [self = QPointer(this), weak = channel->weakFromThis(),
+                 id](const auto &result) {
+                    if (!self)
+                    {
+                        return;
+                    }
+                    self->publicRequests.remove(id);
+                    const auto channel = weak.lock();
+                    if (channel && result && result->user.userID == id &&
+                        result->isLive &&
+                        !getApp()->getAccounts()->kick.isLoggedIn())
+                    {
+                        channel->updateLiveStatus(*result->isLive,
+                                                  result->streamTitle);
+                    }
+                });
+        }
         return;
     }
 

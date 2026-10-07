@@ -3,6 +3,7 @@
 #include <QList>
 #include <QObject>
 #include <QTimer>
+#include <QSet>
 
 #include <span>
 #include <vector>
@@ -34,6 +35,7 @@ private:
     QTimer refreshTimer;
 
     std::vector<uint64_t> immediateChannels;
+    QSet<uint64_t> publicRequests;
 };
 
 }

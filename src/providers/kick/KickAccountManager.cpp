@@ -141,6 +141,7 @@ void KickAccountManager::load()
         else
         {
             qCDebug(chatterinoKick) << "Kick user updated to anonymous";
+            getKickApi()->setAuth({});
             this->currentUser_ = this->anonymousUser_;
         }
 
@@ -183,6 +184,8 @@ bool KickAccountManager::removeAccount(KickAccount *account)
     {
         return false;
     }
+
+    account->cancelRefresh();
 
     auto accountPath = "/kickAccounts/uid" + std::to_string(account->userID());
     pajlada::Settings::SettingManager::gRemoveSetting(accountPath);

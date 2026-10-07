@@ -34,6 +34,12 @@ struct KickPrivateChatroomInfo {
     std::optional<std::chrono::minutes> followersModeDuration;
 };
 
+struct KickPrivateChannelSubBadge {
+    KickPrivateChannelSubBadge(BoostJsonObject obj);
+    unsigned months;
+    QString badgeImageUrl;
+};
+
 struct KickPrivateChannelInfo {
     KickPrivateChannelInfo(BoostJsonObject obj);
 
@@ -42,6 +48,9 @@ struct KickPrivateChannelInfo {
     QString slug;
     KickPrivateUserInfo user;
     KickPrivateChatroomInfo chatroom;
+    std::vector<KickPrivateChannelSubBadge> subBadges;
+    std::optional<bool> isLive;
+    QString streamTitle;
 };
 
 struct KickPrivateUserInChannelInfo {
@@ -90,6 +99,12 @@ struct KickChannelInfo {
     KickCategoryInfo category;
     KickStreamInfo stream;
     QString streamTitle;
+    QString slug;
+};
+
+struct KickPrivateChannelInfoSmall {
+    explicit KickPrivateChannelInfoSmall(BoostJsonObject obj);
+    KickPrivateUserInfo user;
 };
 
 class KickApi
@@ -100,10 +115,14 @@ public:
 
     static KickApi *instance();
 
-    static QString slugify(const QString &usernameOrSlug);
-
     static void privateChannelInfo(const QString &username,
                                    Callback<KickPrivateChannelInfo> cb);
+
+    static void privateChannelInfoSmall(
+        const QString &slug, Callback<KickPrivateChannelInfoSmall> cb);
+
+    static void privateChannelHistory(uint64_t channelID,
+                                      Callback<BoostJsonObject> cb);
 
     static void privateUserInChannelInfo(
         const QString &userUsername, const QString &channelUsername,

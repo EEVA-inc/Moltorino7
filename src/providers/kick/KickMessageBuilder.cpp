@@ -10,6 +10,7 @@
 #include "messages/MessageElement.hpp"
 #include "messages/MessageThread.hpp"
 #include "providers/bttv/BttvEmotes.hpp"
+#include "providers/chatterino/ChatterinoBadges.hpp"
 #include "providers/emoji/Emojis.hpp"
 #include "providers/ffz/FfzEmotes.hpp"
 #include "providers/kick/KickAccount.hpp"
@@ -28,10 +29,15 @@
 #include "util/Helpers.hpp"
 #include "util/Variant.hpp"
 
+#include <algorithm>
+#include <limits>
+
 namespace {
 
 using namespace chatterino;
 using namespace Qt::Literals::StringLiterals;
+
+constexpr size_t MAX_BADGES_PER_LIST = 64;
 
 EmotePtr lookupEmote(const KickChannel &channel, uint64_t senderID,
                      QStringView word)
@@ -83,6 +89,11 @@ void appendWord(KickMessageBuilder &builder, QStringView word)
     auto emote = lookupEmote(*builder.channel(), builder.senderID, word);
     if (emote)
     {
+        if (emote->modifierPlacement != EmoteModifierPlacement::None)
+        {
+            builder.addWordFromUserMessage(word, builder.channel());
+            return;
+        }
         builder.appendEmote(emote);
         return;
     }
@@ -333,13 +344,51 @@ void appendReplyButtons(KickMessageBuilder &builder)
     }
 }
 
-void appendKickBadges(KickMessageBuilder &builder, BoostJsonArray badges)
+void appendKickBadges(KickMessageBuilder &builder, BoostJsonArray badgeArray)
 {
+    struct Badge {
+        std::string_view type;
+        unsigned count;
+        uint64_t order;
+    };
+    std::vector<Badge> badges;
+    for (auto badge : badgeArray)
+    {
+        if (badges.size() == MAX_BADGES_PER_LIST)
+        {
+            break;
+        }
+        badges.push_back({badge["type"].toStringView(),
+                          static_cast<unsigned>(std::min<uint64_t>(
+                              badge["count"].toUint64(1),
+                              std::numeric_limits<unsigned>::max())),
+                          badge["sort_order"].toUint64()});
+    }
+    std::ranges::stable_sort(badges, {}, &Badge::order);
     bool hasMod = false;
     bool hasVip = false;
     for (auto badgeObj : badges)
     {
-        auto ty = badgeObj["type"].toStringView();
+        auto ty = badgeObj.type;
+        if (ty == "subscriber")
+        {
+            auto badge = builder.channel()->getSubBadge(badgeObj.count);
+            if (badge)
+            {
+                builder.emplace<BadgeElement>(
+                    std::move(badge), MessageElementFlag::BadgeSubscription);
+                continue;
+            }
+        }
+        else if (ty == "sub_gifter")
+        {
+            if (auto badge = KickBadges::lookupSubGifter(badgeObj.count))
+            {
+                builder.emplace<BadgeElement>(std::move(badge),
+                                              MessageElementFlag::BadgeVanity);
+                continue;
+            }
+        }
         auto [emote, flag] = KickBadges::lookup(ty);
         if (!emote)
         {
@@ -367,6 +416,46 @@ void appendKickBadges(KickMessageBuilder &builder, BoostJsonArray badges)
     }
 }
 
+void appendKickV2Badges(KickMessageBuilder &builder, BoostJsonArray badges)
+{
+    std::vector<BoostJsonObject> selected;
+    for (auto badgeObj : badges)
+    {
+        if (!badgeObj["selected"].toBool())
+        {
+            continue;
+        }
+        selected.push_back(badgeObj.toObject());
+        if (selected.size() == MAX_BADGES_PER_LIST)
+        {
+            break;
+        }
+    }
+    std::ranges::stable_sort(selected, {}, [](const auto &badge) {
+        return badge["sort_order"].toUint64();
+    });
+    for (const auto badge : selected)
+    {
+        auto [emote, flag] = KickBadges::getV2Cached(badge);
+        if (emote)
+        {
+            builder.emplace<BadgeElement>(emote, flag);
+        }
+    }
+}
+
+void appendChatterinoBadge(KickMessageBuilder &builder)
+{
+    if (auto badge =
+            getApp()->getChatterinoBadges()->getKickBadge(builder.senderID))
+    {
+        builder.emplace<BadgeElement>(badge,
+                                      MessageElementFlag::BadgeChatterino);
+
+        builder->externalBadges.emplace_back(badge->name.string);
+    }
+}
+
 void appendSeventvBadge(KickMessageBuilder &builder)
 {
     auto badge = getApp()->getSeventvBadges()->getKickBadge(builder.senderID);
@@ -387,7 +476,7 @@ HighlightAlert processHighlights(KickMessageBuilder &builder,
 
     auto [highlighted, highlightResult] = getApp()->getHighlights()->check(
         args, {}, builder->loginName, builder->messageText, builder->flags,
-        builder->platform);
+        builder->platform, builder->userID, builder->channelName);
 
     if (!highlighted)
     {
@@ -396,6 +485,12 @@ HighlightAlert processHighlights(KickMessageBuilder &builder,
 
     builder->flags.set(MessageFlag::Highlighted);
     builder->highlightColor = highlightResult.color;
+    if (!highlightResult.matches.empty())
+    {
+        builder->highlightMatches =
+            std::make_shared<const std::vector<HighlightMatch>>(
+                std::move(highlightResult.matches));
+    }
 
     if (highlightResult.showInMentions)
     {
@@ -478,9 +573,12 @@ std::pair<MessagePtrMut, HighlightAlert> KickMessageBuilder::makeChatMessage(
     builder.appendChannelName();
 
     builder.emplace<TimestampElement>(builder->serverReceivedTime.time());
-    builder.emplace<TwitchModerationElement>();
+    builder.emplace<TwitchModerationElement>(
+        true, false, false, kickChannel->weakFromThis());
 
+    appendKickV2Badges(builder, identity["badges_v2"].toArray());
     appendKickBadges(builder, identity["badges"].toArray());
+    appendChatterinoBadge(builder);
     appendSeventvBadge(builder);
 
     builder.appendUsername(identity);
@@ -496,7 +594,6 @@ std::pair<MessagePtrMut, HighlightAlert> KickMessageBuilder::makeChatMessage(
     builder->messageText = messageText;
 
     MessageParseArgs args;
-    args.isStaffOrBroadcaster = kickChannel->isBroadcaster();
 
     auto highlightAlert = processHighlights(builder, args);
 
@@ -727,7 +824,6 @@ std::tuple<MessagePtrMut, MessagePtrMut, HighlightAlert>
 
         MessageParseArgs args;
         args.isSubscriptionMessage = true;
-        args.isStaffOrBroadcaster = channel->isBroadcaster();
         alert = processHighlights(builder, args);
         customMessage = builder.release();
     }
@@ -937,8 +1033,8 @@ void KickMessageBuilder::appendChannelName()
     QString channelName('#' + this->channel()->getName());
     Link link(Link::JumpToChannel, u":kick:" % this->channel()->getName());
 
-    this->emplace<TextElement>(channelName, MessageElementFlag::ChannelName,
-                               MessageColor::System)
+    this->emplace<ChannelNameElement>(channelName,
+                                      this->channel()->channelAvatar())
         ->setLink(link);
 }
 

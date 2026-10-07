@@ -7,6 +7,8 @@
 #include <pajlada/signals/signal.hpp>
 
 #include <chrono>
+#include <map>
+#include <span>
 #include <queue>
 #include <unordered_map>
 
@@ -21,6 +23,7 @@ struct UserConnectionUpdateDispatch;
 
 class MessageThread;
 class EmoteMap;
+class ChannelAvatarSource;
 
 struct Emote;
 using EmotePtr = std::shared_ptr<const Emote>;
@@ -28,6 +31,7 @@ using EmotePtr = std::shared_ptr<const Emote>;
 struct EmoteName;
 
 struct KickChannelInfo;
+struct KickPrivateChannelSubBadge;
 
 class KickChannel : public Channel, public ChannelChatters
 {
@@ -63,6 +67,11 @@ public:
     const QString &slug() const
     {
         return this->slug_;
+    }
+
+    std::shared_ptr<ChannelAvatarSource> channelAvatar() const
+    {
+        return this->channelAvatar_;
     }
 
     uint64_t roomID() const
@@ -124,6 +133,7 @@ public:
         QString uptime;
         uint64_t viewerCount = 0;
     };
+    bool updateLiveStatus(bool live, const QString &title);
     void updateStreamData(const KickChannelInfo &info);
     const StreamData &streamData() const;
     pajlada::Signals::NoArgSignal streamDataChanged;
@@ -138,6 +148,8 @@ public:
 
     pajlada::Signals::Signal<const QString &> sendWaitUpdate;
     void setSendWait(std::chrono::seconds waitTime);
+
+    EmotePtr getSubBadge(unsigned months);
 
     friend QDebug operator<<(QDebug dbg, const KickChannel &chan);
 
@@ -172,10 +184,13 @@ private:
                                           const QString &emoteName);
 
     void emitSendWait();
+    void initSubBadges(std::span<const KickPrivateChannelSubBadge> infos);
+    void loadChannelHistory();
 
     QString displayName_;
 
     QString slug_;
+    std::shared_ptr<ChannelAvatarSource> channelAvatar_;
 
     Atomic<std::shared_ptr<const EmoteMap>> seventvEmotes_;
 
@@ -204,6 +219,8 @@ private:
     bool isVip_ = false;
 
     StreamData streamData_;
+    std::map<unsigned, ImagePtr> subBadgeImages_;
+    std::unordered_map<unsigned, EmotePtr> subBadges_;
 };
 
 }

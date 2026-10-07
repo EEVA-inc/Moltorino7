@@ -4,23 +4,33 @@
 
 #include <pajlada/signals/signal.hpp>
 #include <QDateTime>
+#include <QJsonObject>
 #include <QString>
 
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace chatterino {
+
+namespace kick {
+inline constexpr QLatin1StringView AUTH_PROXY{"https://c7-auth.nerixyz.de"};
+inline constexpr QLatin1StringView AUTH_CLIENT_ID{"01KEBZBHCX3DKEJ0KRQBDNT05B"};
+}
 
 struct KickAccountData {
     QString username;
     uint64_t userID = 0;
     QString clientID;
     QString clientSecret;
+    QString publicProxy;
     QString authToken;
     QString refreshToken;
     QDateTime expiresAt;
 
+    QString tokenUrl() const;
+    bool setTokens(const QJsonObject &response);
     void save() const;
     static std::optional<KickAccountData> loadRaw(const std::string &key);
 };
@@ -67,6 +77,10 @@ public:
     {
         return this->authToken_;
     }
+    QString publicProxy() const
+    {
+        return this->publicProxy_;
+    }
     QString refreshToken() const
     {
         return this->refreshToken_;
@@ -78,6 +92,7 @@ public:
     }
 
     void refreshIfNeeded();
+    void cancelRefresh();
     void loadSeventvUser();
 
     pajlada::Signals::NoArgSignal authUpdated;
@@ -87,9 +102,12 @@ private:
     uint64_t userID_ = 0;
     QString clientID_;
     QString clientSecret_;
+    QString publicProxy_;
     QString authToken_;
     QString refreshToken_;
     QDateTime expiresAt_;
+    uint64_t refreshGeneration_ = 0;
+    bool refreshing_ = false;
 
     QString seventvUserID_;
 };
