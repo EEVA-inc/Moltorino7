@@ -29,6 +29,32 @@ std::optional<EmotePtr> ChatterinoBadges::getBadge(const UserId &id)
     return std::nullopt;
 }
 
+EmotePtr ChatterinoBadges::getKickBadge(uint64_t kickID)
+{
+    std::shared_lock lock(this->mutex_);
+
+    auto it = this->kickMapping.find(kickID);
+    if (it != this->kickMapping.end())
+    {
+        return this->emotes[it->second];
+    }
+    return {};
+}
+
+void ChatterinoBadges::setKickMapping(const QString &twitchID, uint64_t kickID)
+{
+    std::unique_lock lock(this->mutex_);
+    this->kickToTwitchMapping.insert_or_assign(kickID, twitchID);
+    this->kickMapping.erase(kickID);
+
+    auto existing = this->badgeMap.find(twitchID);
+    if (existing == this->badgeMap.end())
+    {
+        return;
+    }
+    this->kickMapping.insert_or_assign(kickID, existing->second);
+}
+
 void ChatterinoBadges::loadChatterinoBadges()
 {
     static QUrl url("https://api.chatterino.com/badges");
@@ -74,6 +100,15 @@ void ChatterinoBadges::loadChatterinoBadges()
                     this->badgeMap[user.toString()] = index;
                 }
                 ++index;
+            }
+
+            for (const auto &[kickID, twitchID] : this->kickToTwitchMapping)
+            {
+                if (auto badge = this->badgeMap.find(twitchID);
+                    badge != this->badgeMap.end())
+                {
+                    this->kickMapping.insert_or_assign(kickID, badge->second);
+                }
             }
         })
         .execute();

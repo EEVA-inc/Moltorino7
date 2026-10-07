@@ -126,8 +126,9 @@ void loadWithBackups(const FileData &fileData,
             return;
         }
 
-        auto *diag = new RestoreBackupsDialog(fileData, loadResult.error());
-        auto ret = diag->exec();
+        RestoreBackupsDialog dialog(fileData, loadResult.error());
+        dialog.setAttribute(Qt::WA_DeleteOnClose, false);
+        auto ret = dialog.exec();
         if (ret != QDialog::Accepted)
         {
             return;
@@ -135,6 +136,33 @@ void loadWithBackups(const FileData &fileData,
 
         qCDebug(chatterinoSettings) << "Retrying to load" << fileData.fileKind;
     }
+}
+
+void loadSettingManagerWithBackups(
+    const FileData &fileData,
+    const std::shared_ptr<pajlada::Settings::SettingManager> &manager)
+{
+    loadWithBackups(fileData, [manager]() -> ExpectedStr<void> {
+        using LoadError = pajlada::Settings::SettingManager::LoadError;
+        switch (manager->load())
+        {
+            case LoadError::NoError:
+                return {};
+            case LoadError::CannotOpenFile:
+                return makeUnexpected("Failed to open file");
+            case LoadError::FileHandleError:
+                return makeUnexpected("File handle error");
+            case LoadError::FileReadError:
+                return makeUnexpected("Failed to read file");
+            case LoadError::FileSeekError:
+                return makeUnexpected("Failed to seek in file");
+            case LoadError::JSONParseError:
+                return makeUnexpected("File contained malformed JSON");
+            case LoadError::SavingFromTemporaryFileFailed:
+                return makeUnexpected("Failed to load temporary file");
+        }
+        return makeUnexpected("Unknown error");
+    });
 }
 
 }

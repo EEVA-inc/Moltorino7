@@ -1,5 +1,6 @@
 #include "providers/seventv/paints/LinearGradientPaint.hpp"
 
+#include <cmath>
 #include <utility>
 
 namespace chatterino {
@@ -7,8 +8,7 @@ namespace chatterino {
 LinearGradientPaint::LinearGradientPaint(
     QString name, QString id, std::optional<QColor> color, QGradientStops stops,
     bool repeat, float angle, std::vector<PaintDropShadow> dropShadows)
-    : Paint(std::move(id))
-    , name_(std::move(name))
+    : Paint(std::move(name), std::move(id))
     , color_(color)
     , stops_(std::move(stops))
     , repeat_(repeat)
@@ -25,10 +25,27 @@ bool LinearGradientPaint::animated() const
 QBrush LinearGradientPaint::asBrush(const QColor userColor,
                                     const QRectF drawingRect) const
 {
+    if (this->stops_.empty())
+    {
+        return {userColor};
+    }
+    if (this->stops_.size() == 1 ||
+        this->stops_.back().first <= this->stops_.front().first)
+    {
+        return {overlayColors(userColor, this->stops_.back().second)};
+    }
+
+    auto angle = std::isfinite(this->angle_)
+                     ? std::fmod(this->angle_, 360.F)
+                     : 0.F;
+    if (angle < 0.F)
+    {
+        angle += 360.F;
+    }
     QPointF startPoint = drawingRect.bottomLeft();
     QPointF endPoint = drawingRect.topRight();
 
-    const int angleStep = int(this->angle_ / 90) % 4;
+    const int angleStep = int(angle / 90);
     if (angleStep == 1)
     {
         startPoint = drawingRect.topLeft();
@@ -47,15 +64,15 @@ QBrush LinearGradientPaint::asBrush(const QColor userColor,
 
     QLineF gradientAxis;
     gradientAxis.setP1(drawingRect.center());
-    gradientAxis.setAngle(90.0F - this->angle_);
+    gradientAxis.setAngle(90.0F - angle);
 
     QLineF colorStartAxis;
     colorStartAxis.setP1(startPoint);
-    colorStartAxis.setAngle(-this->angle_);
+    colorStartAxis.setAngle(-angle);
 
     QLineF colorStopAxis;
     colorStopAxis.setP1(endPoint);
-    colorStopAxis.setAngle(-this->angle_);
+    colorStopAxis.setAngle(-angle);
 
     QPointF gradientStart;
     QPointF gradientEnd;

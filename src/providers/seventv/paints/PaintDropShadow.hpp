@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QColor>
+#include <QMarginsF>
 
 class QPixmapDropShadowFilter;
 
@@ -13,6 +14,7 @@ public:
 
     bool isValid() const;
     PaintDropShadow scaled(float scale) const;
+    QMarginsF margins(float scale) const;
     void apply(QPixmapDropShadowFilter &effect) const;
 
 private:

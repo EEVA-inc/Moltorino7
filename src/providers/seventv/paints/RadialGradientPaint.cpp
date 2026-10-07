@@ -5,8 +5,7 @@ namespace chatterino {
 RadialGradientPaint::RadialGradientPaint(
     QString name, QString id, QGradientStops stops, bool repeat,
     std::vector<PaintDropShadow> dropShadows)
-    : Paint(std::move(id))
-    , name_(std::move(name))
+    : Paint(std::move(name), std::move(id))
     , stops_(std::move(stops))
     , repeat_(repeat)
     , dropShadows_(std::move(dropShadows))
@@ -15,6 +14,16 @@ RadialGradientPaint::RadialGradientPaint(
 
 QBrush RadialGradientPaint::asBrush(QColor userColor, QRectF drawingRect) const
 {
+    if (this->stops_.empty())
+    {
+        return {userColor};
+    }
+    if (this->stops_.size() == 1 ||
+        this->stops_.back().first <= this->stops_.front().first)
+    {
+        return {overlayColors(userColor, this->stops_.back().second)};
+    }
+
     double x = drawingRect.x() + (drawingRect.width() / 2);
     double y = drawingRect.y() + (drawingRect.height() / 2);
 

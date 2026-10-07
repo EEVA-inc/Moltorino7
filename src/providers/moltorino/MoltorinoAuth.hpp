@@ -23,16 +23,21 @@ struct MoltorinoAuthAccount {
     QString login;
     QString displayName;
     QString token;
+    QString clientId;
+    bool enabled = true;
     bool valid = false;
     QString lastError;
     QString lastValidatedAt;
+    bool moderatedChannelsManualRefreshOnly = false;
     QVector<MoltorinoAuthChannel> moderatedChannels;
+    QVector<MoltorinoAuthChannel> verifiedEditorChannels;
 };
 
 struct MoltorinoAuthToken {
     QString token;
     QString userId;
     QString login;
+    QString clientId;
     bool legacy = false;
 
     [[nodiscard]] bool hasToken() const
@@ -43,6 +48,8 @@ struct MoltorinoAuthToken {
 
 struct MoltorinoAuthSummary {
     int accountCount = 0;
+    int enabledAccountCount = 0;
+    int disabledAccountCount = 0;
     int validAccountCount = 0;
     int invalidAccountCount = 0;
     int moderatedChannelCount = 0;
@@ -58,18 +65,32 @@ struct MoltorinoAuthRefreshResult {
     QStringList errors;
 };
 
+enum class MoltorinoAuthRefreshMode {
+    Automatic,
+    Manual,
+};
+
 namespace MoltorinoAuth {
 
 std::vector<MoltorinoAuthAccount> accounts();
 MoltorinoAuthSummary summary();
 QString legacyToken();
+bool hasConfiguredAuth();
 
 void addOrUpdateToken(
     const QString &token,
     std::function<void(MoltorinoAuthAccount)> successCallback,
     std::function<void(const QString &)> failureCallback);
+bool setAccountEnabled(const QString &userId, const QString &token,
+                       bool enabled);
 void removeAccount(const QString &userId, const QString &token);
-void refreshAccounts(std::function<void(MoltorinoAuthRefreshResult)> callback);
+void refreshAccounts(
+    MoltorinoAuthRefreshMode mode,
+    std::function<void(MoltorinoAuthRefreshResult)> callback);
+void rememberEditorChannel(const QString &token,
+                           const MoltorinoAuthChannel &channel);
+void forgetEditorChannel(const QString &token, const QString &channelId,
+                         const QString &channelLogin);
 void scheduleStartupRefresh();
 
 MoltorinoAuthToken resolveModerationToken(
