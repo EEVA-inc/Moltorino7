@@ -20,4 +20,11 @@ std::optional<ActionDefinition> findHotkeyActionDefinition(
 
 QKeySequence normalizeKeySequence(const QKeySequence &seq);
 
+std::optional<Qt::Key> physicalNumberRowKey(const QString &platformName,
+                                         int logicalKey,
+                                         quint32 nativeScanCode,
+                                         quint32 nativeVirtualKey);
+std::vector<QString> remapIndexedHotkeyArguments(
+    const std::vector<QString> &arguments, const std::vector<int> &oldToNew);
+
 }

@@ -24,6 +24,9 @@ enum class ExposedLinkType : std::uint8_t {
 };
 
 void createUserType(sol::table &c2);
+sol::object findElementRef(sol::state_view lua,
+                           const std::shared_ptr<Message> &message,
+                           const MessageElement *creator);
 
 }
 

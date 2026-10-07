@@ -217,7 +217,7 @@ void ExternalToolsPage::initLayout(GeneralPageView &layout)
         auto *importButton = new QPushButton("Import Settings from Clipboard");
         importButton->setToolTip(
             "Import image uploader settings from clipboard JSON");
-        QObject::connect(importButton, &QPushButton::clicked, [this]() {
+        QObject::connect(importButton, &QPushButton::clicked, this, [this]() {
             importImageUploaderSettings(this);
         });
         buttonLayout->addWidget(importButton);
@@ -225,7 +225,7 @@ void ExternalToolsPage::initLayout(GeneralPageView &layout)
         auto *exportButton = new QPushButton("Export Settings to Clipboard");
         exportButton->setToolTip(
             "Copy current image uploader settings to clipboard as JSON");
-        QObject::connect(exportButton, &QPushButton::clicked, [this]() {
+        QObject::connect(exportButton, &QPushButton::clicked, this, [this]() {
             exportImageUploaderSettings(this);
         });
         buttonLayout->addWidget(exportButton);
@@ -240,15 +240,11 @@ void ExternalToolsPage::initLayout(GeneralPageView &layout)
         layout.addTitle("Spell checker (experimental)");
 
         layout.addDescription(
-            u"Check the spelling of words in the input box of splits."
-            " Chatterino does not include dictionaries - they have to "
-            "be downloaded or created manually. Chatterino expects "
-            "Hunspell "
-            "dictionaries in " %
+            u"Check spelling as you type. English (United States) is included. "
+            u"You can add other Hunspell dictionaries to " %
             formatRichNamedLink(getApp()->getPaths().dictionariesDirectory,
                                 getApp()->getPaths().dictionariesDirectory) %
-            u". Dictionaries are pairs of .aff (affixes) and .dic (dictionary) "
-            u"files.");
+            u".");
 
         SettingWidget::checkbox("Check spelling by default",
                                 s.enableSpellChecking)
@@ -274,18 +270,15 @@ void ExternalToolsPage::initLayout(GeneralPageView &layout)
                 dict.path,
             };
         };
-        std::vector<std::pair<QString, QVariant>> dictList{{"None", ""}};
+        std::vector<std::pair<QString, QVariant>> dictList;
 
         std::ranges::transform(
             getApp()->getSpellChecker()->getAvailableDictionaries(),
             std::back_inserter(dictList), toItem);
 
-        if (dictList.size() > 1)
-        {
-            SettingWidget::dropdown("Default dictionary (requires restart)",
-                                    s.spellCheckingDefaultDictionary, dictList)
-                ->addTo(layout);
-        }
+        SettingWidget::dropdown("Dictionary", s.spellCheckingDefaultDictionary,
+                                dictList)
+            ->addTo(layout);
     }
 #endif
 

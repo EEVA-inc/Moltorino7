@@ -389,6 +389,7 @@ PluginRepl::PluginRepl(QString id, QWidget *parent)
               BaseWindow::EnableCustomFrame,
               BaseWindow::DisableCustomScaling,
               BaseWindow::DisableLayoutSave,
+              BaseWindow::CloseOnMinimize,
           },
           parent)
     , id(std::move(id))
@@ -681,8 +682,8 @@ void PluginRepl::setPlugin(Plugin *plugin)
 
     if (!plugin)
     {
-        this->pluginDestroyConn.release();
-        this->pluginLogConn.release();
+        this->pluginDestroyConn.disconnect();
+        this->pluginLogConn.disconnect();
         return;
     }
 

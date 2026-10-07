@@ -34,6 +34,7 @@ namespace chatterino {
 Scrollbar::Scrollbar(size_t messagesLimit, ChannelView *parent)
     : BaseWidget(parent)
     , currentValueAnimation_(this, "currentValue_")
+    , highlightsLimit_(messagesLimit)
     , highlights_(messagesLimit)
 {
     this->resize(static_cast<int>(16 * this->scale()), 100);
@@ -67,12 +68,31 @@ boost::circular_buffer<ScrollbarHighlight> Scrollbar::getHighlights() const
 
 void Scrollbar::addHighlight(ScrollbarHighlight highlight)
 {
+    this->ensureHighlightsStorage();
+    if (this->highlights_.capacity() == 0)
+    {
+        return;
+    }
     this->highlights_.push_back(std::move(highlight));
+}
+
+void Scrollbar::prependHighlight(ScrollbarHighlight highlight)
+{
+    this->ensureHighlightsStorage();
+    if (this->highlights_.capacity() == 0)
+    {
+        return;
+    }
+    this->highlights_.push_front(std::move(highlight));
 }
 
 void Scrollbar::addHighlightsAtStart(
     const std::vector<ScrollbarHighlight> &highlights)
 {
+    if (!highlights.empty())
+    {
+        this->ensureHighlightsStorage();
+    }
     size_t nItems = std::min(highlights.size(), this->highlights_.capacity() -
                                                     this->highlights_.size());
 
@@ -100,6 +120,20 @@ void Scrollbar::replaceHighlight(size_t index, ScrollbarHighlight replacement)
 void Scrollbar::clearHighlights()
 {
     this->highlights_.clear();
+}
+
+void Scrollbar::releaseHighlightsStorage()
+{
+    this->highlights_.clear();
+    this->highlights_.set_capacity(0);
+}
+
+void Scrollbar::ensureHighlightsStorage()
+{
+    if (this->highlights_.capacity() == 0 && this->highlightsLimit_ != 0)
+    {
+        this->highlights_.set_capacity(this->highlightsLimit_);
+    }
 }
 
 void Scrollbar::scrollToBottom(bool animate)
@@ -172,9 +206,24 @@ void Scrollbar::setDesiredValue(qreal value, bool animated)
 {
 
     value = std::max(this->minimum_, std::min(this->getBottom(), value));
+    const auto clampedCurrent = std::max(
+        this->minimum_, std::min(this->getBottom(), this->currentValue_));
+    if (!areClose(this->currentValue_, clampedCurrent))
+    {
+        this->currentValueAnimation_.stop();
+        this->setCurrentValue(clampedCurrent);
+    }
     if (areClose(this->currentValue_, value))
     {
+        this->currentValueAnimation_.stop();
+        if (!areClose(this->desiredValue_, value))
+        {
+            this->desiredValue_ = value;
+            this->desiredValueChanged_.invoke();
+        }
+        this->atBottom_ = areClose(this->getBottom(), value);
 
+        this->resetBounds();
         return;
     }
 

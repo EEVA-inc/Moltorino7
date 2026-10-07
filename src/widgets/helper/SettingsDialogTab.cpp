@@ -5,29 +5,33 @@
 #include "widgets/helper/SettingsDialogTab.hpp"
 
 #include "widgets/dialogs/SettingsDialog.hpp"
+#include "widgets/helper/SettingsTheme.hpp"
 #include "widgets/settingspages/SettingsPage.hpp"
 
 #include <QPainter>
 #include <QStyleOption>
+
+#include <cmath>
 
 namespace chatterino {
 
 SettingsDialogTab::SettingsDialogTab(SettingsDialog *_dialog,
                                      std::function<SettingsPage *()> _lazyPage,
                                      const QString &name, QString imageFileName,
-                                     SettingsTabId id)
+                                     SettingsTabId id, float iconOpticalScale)
     : BaseWidget(_dialog)
     , dialog_(_dialog)
     , lazyPage_(std::move(_lazyPage))
     , id_(id)
     , name_(name)
+    , iconOpticalScale_(iconOpticalScale)
 {
     this->ui_.labelText = name;
     this->ui_.icon.addFile(imageFileName);
 
     this->setCursor(QCursor(Qt::PointingHandCursor));
 
-    this->setStyleSheet("color: #FFF");
+    this->themeChangedEvent();
 }
 
 void SettingsDialogTab::setSelected(bool _selected)
@@ -40,7 +44,20 @@ void SettingsDialogTab::setSelected(bool _selected)
     //    height: <checkbox-size>px;
 
     this->selected_ = _selected;
+    this->themeChangedEvent();
+    this->update();
     this->selectedChanged(this->selected_);
+}
+
+void SettingsDialogTab::themeChangedEvent()
+{
+    const auto &appearance = settingsTheme();
+    this->setStyleSheet(QStringLiteral("background:%1; color:%2;")
+                            .arg(this->selected_
+                                     ? appearance.selectionSurface.name()
+                                     : QStringLiteral("transparent"),
+                                 this->selected_ ? appearance.accent.name()
+                                                 : appearance.text.name()));
 }
 
 SettingsPage *SettingsDialogTab::page()
@@ -69,17 +86,20 @@ void SettingsDialogTab::paintEvent(QPaintEvent *)
 
     this->style()->drawPrimitive(QStyle::PE_Widget, &opt, &painter, this);
 
-    int iconSize = 20 * this->scale();
-    int pad = (this->height() - iconSize) / 2;
-    QPixmap pixmap = this->ui_.icon.pixmap(
-        QSize(this->height() - pad * 2, this->height() - pad * 2));
+    const auto baseIconSize =
+        static_cast<int>(std::lround(20.F * this->scale()));
+    const auto iconSize =
+        static_cast<int>(std::lround(baseIconSize * this->iconOpticalScale_));
+    const auto iconPad = (this->height() - iconSize) / 2;
+    QPixmap pixmap = this->ui_.icon.pixmap(QSize(iconSize, iconSize));
 
-    painter.drawPixmap(pad, pad, pixmap);
+    painter.drawPixmap(iconPad, iconPad, pixmap);
 
-    pad = (3 * pad) + iconSize;
+    const auto basePad = (this->height() - baseIconSize) / 2;
+    const auto textPad = (3 * basePad) + baseIconSize;
 
     this->style()->drawItemText(
-        &painter, QRect(pad, 0, this->width() - pad, this->height()),
+        &painter, QRect(textPad, 0, this->width() - textPad, this->height()),
         Qt::AlignLeft | Qt::AlignVCenter, this->palette(), false,
         this->ui_.labelText);
 }

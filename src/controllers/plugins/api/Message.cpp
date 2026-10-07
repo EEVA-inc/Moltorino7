@@ -104,6 +104,30 @@ std::unique_ptr<ReplyCurveElement> replyCurveElementFromTable()
     return std::make_unique<ReplyCurveElement>();
 }
 
+std::unique_ptr<ImageElement> imageElementFromTable(const sol::table &tbl)
+{
+    return std::make_unique<ImageElement>(
+        requiredGet<ImagePtr>(tbl, "image"),
+        requiredGet<MessageElementFlag>(tbl, "flags"));
+}
+
+std::unique_ptr<CircularImageElement> circularImageElementFromTable(
+    const sol::table &tbl)
+{
+    return std::make_unique<CircularImageElement>(
+        requiredGet<ImagePtr>(tbl, "image"), requiredGet<int>(tbl, "padding"),
+        QColor::fromString(requiredGet<std::string_view>(tbl, "background")),
+        requiredGet<MessageElementFlag>(tbl, "flags"));
+}
+
+std::unique_ptr<ScalingImageElement> scalingImageElementFromTable(
+    const sol::table &tbl)
+{
+    return std::make_unique<ScalingImageElement>(
+        requiredGet<ImageSet>(tbl, "images"),
+        requiredGet<MessageElementFlag>(tbl, "flags"));
+}
+
 void setLinkOn(MessageElement *el, const Link &link)
 {
     el->setLink(link);
@@ -132,7 +156,13 @@ void setLinkOn(MessageElement *el, const Link &link)
         case Link::None:
         case Link::AutoModAllow:
         case Link::AutoModDeny:
+        case Link::AutoModReviewApprove:
+        case Link::AutoModReviewDeny:
+        case Link::AutoModReviewTimeout:
+        case Link::AutoModReviewBan:
+        case Link::AutoModReviewRetry:
         case Link::AcknowledgeChatWarning:
+        case Link::OpenModerationReport:
         case Link::OpenAccountsPage:
         case Link::Reconnect:
         case Link::ViewThread:
@@ -176,6 +206,18 @@ std::unique_ptr<MessageElement> elementFromTable(const sol::table &tbl)
         el = replyCurveElementFromTable();
         linksAllowed = false;
     }
+    else if (type == ImageElement::TYPE)
+    {
+        el = imageElementFromTable(tbl);
+    }
+    else if (type == CircularImageElement::TYPE)
+    {
+        el = circularImageElementFromTable(tbl);
+    }
+    else if (type == ScalingImageElement::TYPE)
+    {
+        el = scalingImageElementFromTable(tbl);
+    }
     else
     {
         throw std::runtime_error("Invalid message type");
@@ -202,59 +244,7 @@ std::unique_ptr<MessageElement> elementFromTable(const sol::table &tbl)
     return el;
 }
 
-std::shared_ptr<Message> messageFromTable(const sol::table &tbl)
-{
-    auto msg = std::make_shared<Message>();
-    msg->flags = tbl.get_or("flags", MessageFlag::None);
-
-    auto parseTime = tbl.get<std::optional<qint64>>("parse_time");
-    if (parseTime)
-    {
-        msg->parseTime = datetimeFromOffset(*parseTime).time();
-    }
-
-    msg->id = tbl.get_or("id", QString{});
-    msg->searchText = tbl.get_or("search_text", QString{});
-    msg->messageText = tbl.get_or("message_text", QString{});
-    msg->loginName = tbl.get_or("login_name", QString{});
-    msg->displayName = tbl.get_or("display_name", QString{});
-    msg->localizedName = tbl.get_or("localized_name", QString{});
-    msg->userID = tbl.get_or("user_id", QString{});
-
-    msg->channelName = tbl.get_or("channel_name", QString{});
-
-    auto usernameColor = tbl.get_or("username_color", QString{});
-    if (!usernameColor.isEmpty())
-    {
-        msg->usernameColor = QColor(usernameColor);
-    }
-
-    auto serverReceivedTime =
-        tbl.get<std::optional<qint64>>("server_received_time");
-    if (serverReceivedTime)
-    {
-        msg->serverReceivedTime = datetimeFromOffset(*serverReceivedTime);
-    }
-
-    auto highlightColor = tbl.get_or("highlight_color", QString{});
-    if (!highlightColor.isEmpty())
-    {
-        msg->highlightColor = std::make_shared<QColor>(highlightColor);
-    }
-
-    auto elements = tbl.get<std::optional<sol::table>>("elements");
-    if (elements)
-    {
-        auto size = elements->size();
-        for (size_t i = 1; i <= size; i++)
-        {
-            msg->elements.emplace_back(
-                elementFromTable(elements->get<sol::table>(i)));
-        }
-    }
-
-    return msg;
-}
+std::shared_ptr<Message> messageFromTable(const sol::table &tbl);
 
 void checkWritable(Message *msg)
 {
@@ -652,10 +642,18 @@ void createUserType(sol::table &c2)
                 &CircularImageElement::padding);
         }),
         "background", sol::property([](const ElementRef &el) {
-            return el.as<CircularImageElement>().map(
+            return el.asConst<CircularImageElement>().map(
                 [](const CircularImageElement &el) {
                     return el.background().name(QColor::HexArgb);
                 });
+        }),
+        "images", sol::property([](const ElementRef &el) {
+            return el.asConst<ScalingImageElement>().map(
+                &ScalingImageElement::images);
+        }),
+        "image", sol::property([](const ElementRef &el) {
+            return el.visit<const ImageElement, const CircularImageElement>(
+                &ImageElement::image, &CircularImageElement::image);
         }),
         "words", sol::property([](const ElementRef &el) {
             return el.visit<const TextElement, const SingleLineTextElement>(
@@ -783,16 +781,107 @@ void createUserType(sol::table &c2)
             return MessageElements(msg);
         },
         "append_element",
-        [](Message *msg, const sol::table &tbl) {
-            checkWritable(msg);
-            auto el = elementFromTable(tbl);
-            if (el)
-            {
-                msg->elements.emplace_back(std::move(el));
-            }
+        sol::overload(
+
+            [](Message *msg, ElementRef &element) {
+                checkWritable(msg);
+                msg->elements.emplace_back(element.cref().clone());
+            },
+            [](Message *msg, const sol::table &tbl) {
+                checkWritable(msg);
+                auto el = elementFromTable(tbl);
+                if (el)
+                {
+                    msg->elements.emplace_back(std::move(el));
+                }
+            }),
+        "clone",
+        [](const Message &message) {
+            return message.clone();
         });
 }
 
+sol::object findElementRef(sol::state_view lua,
+                           const std::shared_ptr<Message> &message,
+                           const MessageElement *creator)
+{
+    if (message != nullptr && creator != nullptr)
+    {
+        for (size_t index = 0; index < message->elements.size(); ++index)
+        {
+            if (message->elements[index].get() == creator)
+            {
+                return sol::make_object(lua, ElementRef(message, index));
+            }
+        }
+    }
+    return sol::make_object(lua, sol::nil);
+}
+}
+
+namespace {
+std::shared_ptr<Message> messageFromTable(const sol::table &tbl)
+{
+    auto msg = std::make_shared<Message>();
+    msg->flags = tbl.get_or("flags", MessageFlag::None);
+
+    auto parseTime = tbl.get<std::optional<qint64>>("parse_time");
+    if (parseTime)
+    {
+        msg->parseTime = datetimeFromOffset(*parseTime).time();
+    }
+
+    msg->id = tbl.get_or("id", QString{});
+    msg->searchText = tbl.get_or("search_text", QString{});
+    msg->messageText = tbl.get_or("message_text", QString{});
+    msg->loginName = tbl.get_or("login_name", QString{});
+    msg->displayName = tbl.get_or("display_name", QString{});
+    msg->localizedName = tbl.get_or("localized_name", QString{});
+    msg->userID = tbl.get_or("user_id", QString{});
+
+    msg->channelName = tbl.get_or("channel_name", QString{});
+
+    auto usernameColor = tbl.get_or("username_color", QString{});
+    if (!usernameColor.isEmpty())
+    {
+        msg->usernameColor = QColor(usernameColor);
+    }
+
+    auto serverReceivedTime =
+        tbl.get<std::optional<qint64>>("server_received_time");
+    if (serverReceivedTime)
+    {
+        msg->serverReceivedTime = datetimeFromOffset(*serverReceivedTime);
+    }
+
+    auto highlightColor = tbl.get_or("highlight_color", QString{});
+    if (!highlightColor.isEmpty())
+    {
+        msg->highlightColor = std::make_shared<QColor>(highlightColor);
+    }
+
+    auto elements = tbl.get<std::optional<sol::table>>("elements");
+    if (elements)
+    {
+        auto size = elements->size();
+        for (size_t i = 1; i <= size; i++)
+        {
+            auto ref =
+                elements->get<std::optional<lua::api::message::ElementRef>>(i);
+            if (ref.has_value())
+            {
+                msg->elements.emplace_back(ref->cref().clone());
+            }
+            else
+            {
+                msg->elements.emplace_back(
+                    elementFromTable(elements->get<sol::table>(i)));
+            }
+        }
+    }
+
+    return msg;
+}
 }
 
 #endif

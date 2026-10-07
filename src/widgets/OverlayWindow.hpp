@@ -60,6 +60,7 @@ protected:
 
     void addShortcuts() override;
 
+    void wheelEvent(QWheelEvent *event) override;
     float desiredScale() const override;
 
 private:

@@ -52,6 +52,11 @@ struct SignalCallback {
         }
     }
 
+    PluginWeakRef owner() const
+    {
+        return this->pluginRef;
+    }
+
     void operator()(auto &&...args) const
     {
         assertInGuiThread();

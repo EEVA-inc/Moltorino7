@@ -18,8 +18,10 @@
 #ifdef USEWINSDK
 #    include "util/WindowsHelper.hpp"
 
+// clang-format off
 #    include "Windows.h"
 #    include "Psapi.h"
+// clang-format on
 
 #    pragma comment(lib, "Dwmapi.lib")
 #endif
@@ -99,6 +101,7 @@ AttachedWindow *AttachedWindow::get(void *target, const GetArgs &args)
 
     window->x_ = args.x;
     window->pixelRatio_ = args.pixelRatio;
+    window->yOffset_ = args.yOffset;
 
     if (args.height != -1)
     {
@@ -285,10 +288,14 @@ void AttachedWindow::updateWindowRect(void *_attachedPtr)
 
         if (this->pixelRatio_ != -1.0)
         {
+            const auto bottomOffset =
+                this->yOffset_ < 0
+                    ? 0
+                    : int(this->yOffset_ * scale * this->pixelRatio_);
             ::MoveWindow(
                 hwnd,
                 int(rect.left + this->x_ * scale * this->pixelRatio_ + o - 2),
-                int(rect.bottom - this->height_ * scale - o),
+                int(rect.bottom - this->height_ * scale - o - bottomOffset),
                 int(this->width_ * scale), int(this->height_ * scale), true);
         }
 

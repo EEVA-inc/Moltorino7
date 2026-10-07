@@ -8,11 +8,12 @@
 #include "singletons/Theme.hpp"
 #include "widgets/Scrollbar.hpp"
 
+#include <cassert>
+
 namespace chatterino {
 
 ScrollbarHighlight::ScrollbarHighlight()
-    : color_(std::make_shared<QColor>())
-    , style_(Style::None)
+    : style_(Style::None)
 {
 }
 

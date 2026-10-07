@@ -64,6 +64,7 @@ private:
     void *target_;
     double x_ = -1;
     double pixelRatio_ = -1;
+    int yOffset_ = -1;
     int width_ = 360;
     int height_ = -1;
     bool fullscreen_ = false;

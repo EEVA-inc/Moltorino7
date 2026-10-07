@@ -57,7 +57,7 @@ void MarkdownLabel::paintEvent(QPaintEvent * )
     if (!this->text_.isEmpty())
     {
         QColor textColor =
-            this->theme ? this->theme->messages.textColors.regular : Qt::black;
+            this->theme ? this->theme->window.text : Qt::black;
 
         this->markdownDocument->setTextWidth(textRect.width());
         this->markdownDocument->setDefaultFont(font);

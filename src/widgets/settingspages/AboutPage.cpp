@@ -4,9 +4,12 @@
 
 #include "widgets/settingspages/AboutPage.hpp"
 
+#include "Application.hpp"
 #include "common/Common.hpp"
 #include "common/QLogging.hpp"
 #include "common/Version.hpp"
+#include "providers/moltorino/MoltorinoUpdater.hpp"
+#include "singletons/Paths.hpp"
 #include "util/Expected.hpp"
 #include "util/LayoutCreator.hpp"
 #include "util/RemoveScrollAreaBackground.hpp"
@@ -16,10 +19,12 @@
 #include <QFile>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QGuiApplication>
 #include <QLabel>
 #include <QStringBuilder>
 #include <QTextEdit>
 #include <QTextStream>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <twitch-eventsub-ws/chrono.hpp>
 
@@ -57,7 +62,7 @@ AboutPage::AboutPage()
             auto vbox = versionInfo.emplace<QVBoxLayout>();
             const auto &version = Version::instance();
 
-            QString buildString = "Chatterino " % version.version();
+            QString buildString = version.fullVersion();
             buildString +=
                 " (<a href=\"https://www.twitch.tv/moltobenne_\">MoltoBenne's "
                 "version</a>)";
@@ -65,15 +70,42 @@ AboutPage::AboutPage()
 
             QString string = buildString % "<br>" % version.runningString();
 
+#ifdef Q_OS_LINUX
+
+            string += QString("<br>Window system: %1")
+                          .arg(QGuiApplication::platformName().toHtmlEscaped());
+#endif
+
             if (!version.extraString().isEmpty())
             {
                 string += "<br>" % version.extraString();
             }
 
+            string +=
+                "<br><br>Your settings directory is located at <a href=\"";
+            string +=
+                QUrl::fromLocalFile(getApp()->getPaths().settingsDirectory)
+                    .toString(QUrl::FullyEncoded);
+            string += "\">";
+            string += getApp()->getPaths().settingsDirectory.toHtmlEscaped();
+            string += "</a>.";
+
             auto label = vbox.emplace<QLabel>(string);
             label->setWordWrap(true);
             label->setOpenExternalLinks(true);
             label->setTextInteractionFlags(Qt::TextBrowserInteraction);
+
+            const auto internalBuild =
+                version.internalVersion().toHtmlEscaped();
+            const auto buildText =
+                QString("<a href=\"patch-notes\">What is new in %1</a>")
+                    .arg(internalBuild);
+            auto buildLabel = vbox.emplace<QLabel>(buildText);
+            buildLabel->setTextInteractionFlags(Qt::TextBrowserInteraction);
+            QObject::connect(buildLabel.getElement(), &QLabel::linkActivated,
+                             this, [](const QString &) {
+                                 getMoltorinoUpdater()->showFullChangelog();
+                             });
         }
 
         auto aboutChatterino = layout.emplace<QGroupBox>("About Chatterino...");
@@ -141,6 +173,12 @@ AboutPage::AboutPage()
             addLicense(form.getElement(), "Fluent icons",
                        "https://github.com/microsoft/fluentui-system-icons",
                        ":/licenses/fluenticons.txt");
+            addLicense(form.getElement(), "Gabarito",
+                       "https://github.com/google/fonts/tree/main/ofl/gabarito",
+                       ":/fonts/Gabarito/OFL.txt");
+            addLicense(form.getElement(), "Keychain",
+                       "https://github.com/hrantzsch/keychain",
+                       ":/licenses/keychain.txt");
             addLicense(form.getElement(), "KImageFormats",
                        "https://invent.kde.org/frameworks/kimageformats",
                        ":/licenses/kimageformats.txt");
@@ -165,6 +203,13 @@ AboutPage::AboutPage()
 #ifdef CHATTERINO_WITH_SPELLCHECK
             addLicense(form.getElement(), "Hunspell",
                        "https://hunspell.github.io", ":/licenses/hunspell.txt");
+            addLicense(form.getElement(), "English dictionary (SCOWL)",
+                       "https://wordlist.aspell.net/",
+                       ":/licenses/english-dictionary.txt");
+#endif
+#ifdef MOLTORINO_VELOPACK_ENABLED
+            addLicense(form.getElement(), "Velopack", "https://velopack.io",
+                       ":/licenses/velopack.txt");
 #endif
         }
 

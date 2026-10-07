@@ -7,7 +7,8 @@
 namespace chatterino {
 
 WelcomeDialog::WelcomeDialog()
-    : BaseWindow({BaseWindow::EnableCustomFrame, BaseWindow::DisableLayoutSave})
+    : BaseWindow({BaseWindow::EnableCustomFrame, BaseWindow::DisableLayoutSave,
+                  BaseWindow::CloseOnMinimize})
 {
     this->setWindowTitle("Chatterino quick setup");
 }

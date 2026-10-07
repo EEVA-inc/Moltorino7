@@ -10,15 +10,16 @@
 #include "singletons/Theme.hpp"
 #include "singletons/WindowManager.hpp"
 #include "util/DebugCount.hpp"
-#include "util/PostToThread.hpp"
 #include "util/WindowsHelper.hpp"
 #include "widgets/buttons/LabelButton.hpp"
 #include "widgets/buttons/TitlebarButton.hpp"
 #include "widgets/buttons/TitlebarButtons.hpp"
+#include "widgets/helper/SettingsTheme.hpp"
 #include "widgets/Label.hpp"
 #include "widgets/Window.hpp"
 
 #include <QApplication>
+#include <QFile>
 #include <QFont>
 #include <QIcon>
 #include <QScreen>
@@ -189,6 +190,20 @@ RECT windowBordersFor(HWND hwnd, bool isMaximized)
 
 #endif
 
+bool isInteractiveChild(const QWidget *widget, const QWidget *window)
+{
+    for (auto *current = widget; current != nullptr && current != window;
+         current = current->parentWidget())
+    {
+        if (current->hasMouseTracking() ||
+            current->focusPolicy() != Qt::NoFocus)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 Qt::WindowFlags windowFlagsFor(FlagsEnum<BaseWindow::Flags> flags)
 {
     Qt::WindowFlags out;
@@ -202,6 +217,13 @@ Qt::WindowFlags windowFlagsFor(FlagsEnum<BaseWindow::Flags> flags)
     }
     out.setFlag(Qt::WindowStaysOnTopHint, flags.has(BaseWindow::TopMost));
     out.setFlag(Qt::FramelessWindowHint, flags.has(BaseWindow::Frameless));
+    if (flags.has(BaseWindow::DisableMaximize) &&
+        !flags.has(BaseWindow::Frameless))
+    {
+        out.setFlag(Qt::CustomizeWindowHint);
+        out.setFlag(Qt::WindowTitleHint);
+        out.setFlag(Qt::WindowCloseButtonHint);
+    }
 
 #ifdef Q_OS_LINUX
     if (flags.has(BaseWindow::LinuxPopup))
@@ -244,9 +266,12 @@ BaseWindow::BaseWindow(FlagsEnum<Flags> _flags, QWidget *parent)
 
     getSettings()->uiScale.connect(
         [this]() {
-            postToThread([this] {
-                this->updateScale();
-            });
+            QMetaObject::invokeMethod(
+                this,
+                [this] {
+                    this->updateScale();
+                },
+                Qt::QueuedConnection);
         },
         this->connections_, false);
 
@@ -285,7 +310,7 @@ QRect BaseWindow::getBounds() const
 #ifdef USEWINSDK
     return this->currentBounds_;
 #else
-    return this->geometry();
+    return this->normalGeometry();
 #endif
 }
 
@@ -333,8 +358,15 @@ void BaseWindow::init()
 
             QObject::connect(minButton, &TitleBarButton::leftClicked, this,
                              [this] {
-                                 this->setWindowState(Qt::WindowMinimized |
-                                                      this->windowState());
+                                 if (this->closesOnMinimize())
+                                 {
+                                     this->close();
+                                 }
+                                 else
+                                 {
+                                     this->setWindowState(Qt::WindowMinimized |
+                                                          this->windowState());
+                                 }
                              });
             QObject::connect(
                 maxButton, &TitleBarButton::leftClicked, this,
@@ -360,6 +392,7 @@ void BaseWindow::init()
             buttonLayout->addWidget(maxButton);
             buttonLayout->addWidget(exitButton);
             buttonLayout->setSpacing(0);
+            maxButton->setVisible(!this->flags_.has(DisableMaximize));
         }
 
         this->ui_.layoutBase = new BaseWidget(this);
@@ -407,7 +440,13 @@ void BaseWindow::setTopMost(bool topMost)
     }
 #else
     auto isVisible = this->isVisible();
+    const auto bounds = this->normalGeometry();
+    const auto state = this->windowState();
     this->setWindowFlag(Qt::WindowStaysOnTopHint, topMost);
+
+    this->setWindowState(Qt::WindowNoState);
+    this->setGeometry(bounds);
+    this->setWindowState(state);
     if (isVisible)
     {
         this->show();
@@ -478,6 +517,7 @@ void BaseWindow::windowDeactivationEvent()
     switch (this->windowDeactivateAction)
     {
         case WindowDeactivateAction::Delete:
+            this->hide();
             this->deleteLater();
             break;
 
@@ -492,6 +532,75 @@ void BaseWindow::windowDeactivationEvent()
         case WindowDeactivateAction::Nothing:
         default:
             break;
+    }
+}
+
+void BaseWindow::applySettingsStylesheet()
+{
+    if (!this->flags_.has(UseSettingsStylesheet))
+    {
+        return;
+    }
+    QFile styleFile(":/qss/settings.qss");
+    if (!styleFile.open(QFile::ReadOnly))
+    {
+        assert(false && "Resources not loaded");
+        qCWarning(chatterinoWidget) << "Resources not loaded";
+        return;
+    }
+    QString stylesheet = QString::fromUtf8(styleFile.readAll());
+    const auto &appearance = settingsTheme();
+
+    const auto backgroundToken =
+        QStringLiteral("__MOLTORINO_SETTINGS_BACKGROUND__");
+    const auto surfaceToken = QStringLiteral("__MOLTORINO_SETTINGS_SURFACE__");
+    const auto raisedSurfaceToken =
+        QStringLiteral("__MOLTORINO_SETTINGS_RAISED_SURFACE__");
+    const auto mutedTextToken =
+        QStringLiteral("__MOLTORINO_SETTINGS_MUTED_TEXT__");
+    const auto accentToken = QStringLiteral("__MOLTORINO_SETTINGS_ACCENT__");
+    const auto textToken = QStringLiteral("__MOLTORINO_SETTINGS_TEXT__");
+
+    stylesheet.replace(QStringLiteral("#222222"), backgroundToken);
+    stylesheet.replace(QStringLiteral("#333333"), surfaceToken);
+    stylesheet.replace(QStringLiteral("#545454"), raisedSurfaceToken);
+    stylesheet.replace(QStringLiteral("#999999"), mutedTextToken);
+    stylesheet.replace(QStringLiteral("#4FC3F7"), accentToken);
+    stylesheet.replace(QStringLiteral("#A6DDF4"), accentToken);
+    stylesheet.replace(QStringLiteral("#ffffff"), textToken);
+
+    stylesheet.replace(backgroundToken,
+                       appearance.background.name(QColor::HexRgb));
+    stylesheet.replace(surfaceToken, appearance.surface.name(QColor::HexRgb));
+    stylesheet.replace(raisedSurfaceToken,
+                       appearance.raisedSurface.name(QColor::HexRgb));
+    stylesheet.replace(mutedTextToken,
+                       appearance.mutedText.name(QColor::HexRgb));
+    stylesheet.replace(accentToken, appearance.accent.name(QColor::HexRgb));
+    stylesheet.replace(textToken, appearance.text.name(QColor::HexRgb));
+
+    if (!appearance.interfaceFontFamily.isEmpty())
+    {
+        auto family = appearance.interfaceFontFamily;
+
+        family.replace(u'\\', QStringLiteral("\\\\"));
+        family.replace(u'"', QStringLiteral("\\\""));
+        family.remove(u'\r');
+        family.remove(u'\n');
+        stylesheet.replace(QStringLiteral("font-family: \"Segoe UI\";"),
+                           QStringLiteral("font-family: \"%1\";").arg(family));
+        stylesheet.replace(QStringLiteral("font-family: \"Segoe UI light\";"),
+                           QStringLiteral("font-family: \"%1\";").arg(family));
+    }
+    if (appearance.interfaceFontSize > 0)
+    {
+        stylesheet.replace(QStringLiteral("font-size: 14px;"),
+                           QStringLiteral("font-size: %1pt;")
+                               .arg(appearance.interfaceFontSize));
+    }
+    if (this->styleSheet() != stylesheet)
+    {
+        this->setStyleSheet(stylesheet);
     }
 }
 
@@ -517,6 +626,23 @@ void BaseWindow::themeChangedEvent()
         {
             button->setMouseEffectColor(this->theme->window.text);
         }
+    }
+    else if (this->flags_.has(UseSettingsStylesheet))
+    {
+        const auto &appearance = settingsTheme();
+        QPalette palette;
+        palette.setColor(QPalette::Window, appearance.background);
+        palette.setColor(QPalette::WindowText, appearance.text);
+        palette.setColor(QPalette::Base, appearance.surface);
+        palette.setColor(QPalette::Text, appearance.text);
+        palette.setColor(QPalette::Button, appearance.surface);
+        palette.setColor(QPalette::ButtonText, appearance.text);
+        palette.setColor(QPalette::Highlight, appearance.accent);
+        palette.setColor(QPalette::HighlightedText, appearance.background);
+        palette.setColor(QPalette::PlaceholderText, appearance.mutedText);
+        this->setPalette(palette);
+        this->overrideBackgroundColor_ = appearance.background;
+        this->applySettingsStylesheet();
     }
     else
     {
@@ -584,23 +710,9 @@ void BaseWindow::mousePressEvent(QMouseEvent *event)
         auto pos = event->position().toPoint();
         if (auto *widget = this->childAt(pos.x(), pos.y()))
         {
-            std::function<bool(QWidget *)> recursiveCheckMouseTracking;
-            recursiveCheckMouseTracking = [&](QWidget *widget) {
-                if (widget == nullptr || widget->isHidden())
-                {
-                    return false;
-                }
-
-                if (widget->hasMouseTracking())
-                {
-                    return true;
-                }
-
-                return recursiveCheckMouseTracking(widget->parentWidget());
-            };
-
-            if (!recursiveCheckMouseTracking(widget) &&
-                !this->windowHandle()->startSystemMove())
+            if (!isInteractiveChild(widget, this) &&
+                (!this->windowHandle() ||
+                 !this->windowHandle()->startSystemMove()))
             {
                 this->moving = true;
             }
@@ -678,8 +790,25 @@ LabelButton *BaseWindow::addTitleBarLabel(std::function<void()> onClicked)
     return button;
 }
 
-void BaseWindow::changeEvent(QEvent *)
+bool BaseWindow::closesOnMinimize() const
 {
+    return this->flags_.has(Dialog) || this->flags_.has(CloseOnMinimize);
+}
+
+void BaseWindow::changeEvent(QEvent *event)
+{
+    if (event->type() == QEvent::WindowStateChange && this->isMinimized() &&
+        this->closesOnMinimize())
+    {
+        QTimer::singleShot(0, this, [this] {
+            if (this->isMinimized())
+            {
+                this->setWindowState(this->windowState() &
+                                     ~Qt::WindowMinimized);
+                this->close();
+            }
+        });
+    }
 #ifdef USEWINSDK
     if (this->ui_.titlebarButtons)
     {
@@ -770,7 +899,8 @@ void BaseWindow::closeEvent(QCloseEvent *)
 void BaseWindow::showEvent(QShowEvent *)
 {
 #ifdef Q_OS_WIN
-    if (this->flags_.has(BoundsCheckOnShow))
+    if (this->flags_.has(BoundsCheckOnShow) && !this->isMaximized() &&
+        !this->isFullScreen() && !this->isMinimized())
     {
         this->moveTo(this->pos(), widgets::BoundsChecking::CursorPosition);
     }
@@ -807,6 +937,30 @@ bool BaseWindow::nativeEvent(const QByteArray &eventType, void *message,
 
     switch (msg->message)
     {
+        case WM_NCLBUTTONDBLCLK:
+            if (this->flags_.has(DisableMaximize) && msg->wParam == HTCAPTION)
+            {
+                *result = 0;
+                return true;
+            }
+            break;
+
+        case WM_SYSCOMMAND:
+            if ((msg->wParam & 0xfff0) == SC_MAXIMIZE &&
+                this->flags_.has(DisableMaximize))
+            {
+                *result = 0;
+                return true;
+            }
+            if ((msg->wParam & 0xfff0) == SC_MINIMIZE &&
+                this->closesOnMinimize())
+            {
+                this->close();
+                *result = 0;
+                return true;
+            }
+            break;
+
         case WM_SHOWWINDOW:
             returnValue = this->handleSHOWWINDOW(msg);
             break;
@@ -880,10 +1034,12 @@ bool BaseWindow::nativeEvent(const QByteArray &eventType, void *message,
         case WM_DPICHANGED: {
             if (this->flags_.has(ClearBuffersOnDpiChange))
             {
-
-                postToThread([] {
-                    getApp()->getWindows()->invalidateChannelViewBuffers();
-                });
+                QMetaObject::invokeMethod(
+                    this,
+                    [] {
+                        getApp()->getWindows()->invalidateChannelViewBuffers();
+                    },
+                    Qt::QueuedConnection);
             }
         }
         break;
@@ -1168,10 +1324,12 @@ bool BaseWindow::handleSIZE(MSG *msg)
 
             if (this->isNotMinimizedOrMaximized_)
             {
-
-                postToThread([this] {
-                    this->currentBounds_ = this->geometry();
-                });
+                QMetaObject::invokeMethod(
+                    this,
+                    [this] {
+                        this->currentBounds_ = this->geometry();
+                    },
+                    Qt::QueuedConnection);
             }
             this->useNextBounds_.stop();
 
@@ -1354,27 +1512,7 @@ bool BaseWindow::handleNCHITTEST(MSG *msg, long *result)
 
         if (auto *widget = this->childAt(point))
         {
-            std::function<bool(QWidget *)> recursiveCheckMouseTracking;
-            recursiveCheckMouseTracking = [&](QWidget *widget) {
-                if (widget == nullptr || widget->isHidden())
-                {
-                    return false;
-                }
-
-                if (widget->hasMouseTracking())
-                {
-                    return true;
-                }
-
-                if (widget == this)
-                {
-                    return false;
-                }
-
-                return recursiveCheckMouseTracking(widget->parentWidget());
-            };
-
-            if (recursiveCheckMouseTracking(widget))
+            if (isInteractiveChild(widget, this))
             {
                 client = true;
             }

@@ -45,6 +45,9 @@ public:
         ClearBuffersOnDpiChange = 1 << 9,
 
         LinuxPopup = 1 << 10,
+        UseSettingsStylesheet = 1 << 11,
+        CloseOnMinimize = 1 << 12,
+        DisableMaximize = 1 << 13,
     };
 
     explicit BaseWindow(FlagsEnum<Flags> flags_ = None,
@@ -149,6 +152,8 @@ protected:
     std::optional<QColor> overrideBackgroundColor_;
 
 private:
+    bool closesOnMinimize() const;
+    void applySettingsStylesheet();
     void init();
 
     void calcButtonsSizes();

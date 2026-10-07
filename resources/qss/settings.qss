@@ -12,6 +12,10 @@ chatterino--ComboBox {
     width: 120px;
 }
 
+#SettingsDialog {
+    background: #222222;
+}
+
 QScrollArea {
     border: none;
 }
@@ -21,8 +25,8 @@ QScrollArea QFrame {
 }
 
 QComboBox QFrame {
-    background: #000;
-    border: 1px solid #66BCFF;
+    background: #545454;
+    border: 1px solid #4FC3F7;
 }
 
 chatterino--SettingsDialog chatterino--SettingsDialogTab {
@@ -32,6 +36,15 @@ chatterino--SettingsDialog chatterino--SettingsDialogTab {
 
 chatterino--SettingsPage #generalSettingsScrollContent {
     background: #222;
+}
+
+#generalSettingsScrollContent > QWidget {
+    background: #222222;
+}
+
+#generalSettingsScrollContent > QWidget#qt_scrollarea_viewport,
+#generalSettingsScrollContent > QWidget#qt_scrollarea_viewport > QWidget {
+    background: #222222;
 }
 
 chatterino--SettingsPage QToolTip {
@@ -69,5 +82,6 @@ QLabel#description {
 chatterino--NavigationLabel {
     font-family: "Segoe UI light";
     font-size: 15px;
-    color: #A6DDF4;
+    color: #999999;
+    padding: 2px 7px;
 }

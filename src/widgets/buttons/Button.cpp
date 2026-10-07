@@ -11,6 +11,7 @@
 #include <QDebug>
 #include <QMimeData>
 #include <QPainter>
+#include <QPointer>
 #include <QScreen>
 
 namespace chatterino {
@@ -22,7 +23,6 @@ Button::Button(BaseWidget *parent)
             &Button::onMouseEffectTimeout);
 
     this->effectTimer_.setInterval(20);
-    this->effectTimer_.start();
 
     this->setMouseTracking(true);
 }
@@ -89,13 +89,24 @@ void Button::setMenu(std::unique_ptr<QMenu> menu)
     }
 
     this->menu_ = std::move(menu);
+    this->menuVisible_ = this->menu_ && this->menu_->isVisible();
+    if (!this->menu_)
+    {
+        return;
+    }
 
-    this->menu_->installEventFilter(
-        new FunctionEventFilter(this, [this](QObject *, QEvent *event) {
-            if (event->type() == QEvent::Hide)
+    const QPointer<Button> self(this);
+    this->menu_->installEventFilter(new FunctionEventFilter(
+        this->menu_.get(), [self](QObject *watched, QEvent *event) {
+            if (self && watched == self->menu_.get() &&
+                event->type() == QEvent::Hide)
             {
-                QTimer::singleShot(20, this, [this] {
-                    this->menuVisible_ = false;
+                const QPointer<QMenu> menu(self->menu_.get());
+                QTimer::singleShot(20, self.data(), [self, menu] {
+                    if (menu && self->menu_.get() == menu && !menu->isVisible())
+                    {
+                        self->menuVisible_ = false;
+                    }
                 });
             }
             return false;
@@ -178,6 +189,7 @@ void Button::enterEvent(QEvent * )
     if (!this->mouseOver_)
     {
         this->mouseOver_ = true;
+        this->effectTimer_.start();
         this->update();
         this->mouseOverUpdated();
     }
@@ -188,6 +200,7 @@ void Button::leaveEvent(QEvent * )
     if (this->mouseOver_)
     {
         this->mouseOver_ = false;
+        this->effectTimer_.start();
         this->update();
         this->mouseOverUpdated();
     }
@@ -203,13 +216,14 @@ void Button::mousePressEvent(QMouseEvent *event)
     switch (event->button())
     {
         case Qt::MouseButton::LeftButton: {
+            const bool menuWasVisible = this->menuVisible_;
             this->leftMouseButtonDown_ = true;
 
             this->addClickEffect(event->pos());
 
             this->leftMousePress();
 
-            if (this->menu_ && !this->menuVisible_)
+            if (this->menu_ && !menuWasVisible)
             {
                 QTimer::singleShot(80, this, [this] {
                     this->showMenu();
@@ -292,6 +306,7 @@ void Button::mouseMoveEvent(QMouseEvent *event)
 void Button::addClickEffect(QPoint position)
 {
     this->clickEffects_.emplace_back(position);
+    this->effectTimer_.start();
 }
 
 void Button::onMouseEffectTimeout()
@@ -340,6 +355,14 @@ void Button::onMouseEffectTimeout()
     if (performUpdate)
     {
         this->update();
+    }
+
+    const bool hoverAnimationFinished =
+        (this->mouseOver_ && this->hoverMultiplier_ == 1) ||
+        (!this->mouseOver_ && this->hoverMultiplier_ == 0);
+    if (hoverAnimationFinished && this->clickEffects_.empty())
+    {
+        this->effectTimer_.stop();
     }
 }
 

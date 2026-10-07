@@ -17,6 +17,7 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <utility>
 
 namespace {
 
@@ -687,6 +688,38 @@ QKeySequence HotkeyController::getDisplaySequence(
         return found->keySequence();
     }
     return {};
+}
+
+int HotkeyController::addHotkey(std::shared_ptr<Hotkey> hotkey)
+{
+    return this->hotkeys_.append(std::move(hotkey));
+}
+
+bool HotkeyController::removeHotkey(const QString &name)
+{
+    return this->hotkeys_.removeFirstMatching([&name](const auto &hotkey) {
+        return hotkey->name() == name;
+    });
+}
+
+std::vector<std::shared_ptr<Hotkey>> HotkeyController::getHotkeys(
+    HotkeyCategory category, const QString &action,
+    const std::optional<std::vector<QString>> &arguments) const
+{
+    std::vector<std::shared_ptr<Hotkey>> matches;
+    for (const auto &hotkey : this->hotkeys_)
+    {
+        if (hotkey->category() != category || hotkey->action() != action)
+        {
+            continue;
+        }
+        if (arguments && hotkey->arguments() != *arguments)
+        {
+            continue;
+        }
+        matches.push_back(hotkey);
+    }
+    return matches;
 }
 
 std::shared_ptr<Hotkey> HotkeyController::findLike(

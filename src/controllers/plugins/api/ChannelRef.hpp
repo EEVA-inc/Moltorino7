@@ -76,6 +76,15 @@ public:
     ConnectionHandle on_display_name_changed(ThisPluginState state,
                                              sol::main_protected_function pfn);
 
+    ConnectionHandle on_messages_cleared(ThisPluginState state,
+                                         sol::main_protected_function pfn);
+
+    ConnectionHandle on_message_replaced(ThisPluginState state,
+                                         sol::main_protected_function pfn);
+
+    ConnectionHandle on_message_appended(ThisPluginState state,
+                                         sol::main_protected_function pfn);
+
     static std::optional<ChannelRef> get_by_name(const QString &name);
 
     static std::optional<ChannelRef> get_by_twitch_id(const QString &id);

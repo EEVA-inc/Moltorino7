@@ -30,13 +30,13 @@ void ColorItemDelegate::paint(QPainter *painter,
     auto color = data.value<QColor>();
 
     painter->save();
+    painter->setClipRect(option.rect);
     if (color.alpha() != 255)
     {
         drawCheckerboard(*painter, option.rect,
                          std::min(option.rect.height() / 2, 10));
     }
-    painter->setBrush(color);
-    painter->drawRect(option.rect);
+    painter->fillRect(option.rect, color);
     painter->restore();
 }
 

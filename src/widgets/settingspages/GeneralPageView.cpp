@@ -9,6 +9,7 @@
 #include "util/LayoutHelper.hpp"
 #include "util/RapidJsonSerializeQString.hpp"
 #include "widgets/helper/Line.hpp"
+#include "widgets/helper/SettingsTheme.hpp"
 #include "widgets/settingspages/SettingWidget.hpp"
 
 #include <QRegularExpression>
@@ -82,6 +83,20 @@ void GeneralPageView::addWidget(QWidget *widget, const QStringList &keywords)
             .element = widget,
             .keywords = keywords,
         });
+    }
+}
+
+void GeneralPageView::scrollToTop()
+{
+    auto *scrollBar = this->contentScrollArea_->verticalScrollBar();
+    scrollBar->setValue(scrollBar->minimum());
+}
+
+void GeneralPageView::scrollToWidget(QWidget *widget)
+{
+    if (widget != nullptr)
+    {
+        this->contentScrollArea_->ensureWidgetVisible(widget, 12, 12);
     }
 }
 
@@ -177,8 +192,8 @@ ComboBox *GeneralPageView::addDropdown(const QString &text,
     this->addToolTip(*label, toolTipText);
     this->addLayout(layout);
 
-    this->groups_.back().widgets.push_back({combo, {text}});
-    this->groups_.back().widgets.push_back({label, {text}});
+    this->groups_.back().widgets.push_back({combo, {text, toolTipText}});
+    this->groups_.back().widgets.push_back({label, {text, toolTipText}});
 
     return combo;
 }
@@ -347,7 +362,11 @@ void GeneralPageView::updateNavigationHighlighting()
                       &group == &this->groups_.back()))
         {
             first = false;
-            group.navigationLink->setStyleSheet("color: #00ABF4");
+            const auto &appearance = settingsTheme();
+            group.navigationLink->setStyleSheet(
+                QStringLiteral("color: %1; background-color: %2;")
+                    .arg(appearance.accent.name(QColor::HexRgb),
+                         appearance.selectionSurface.name(QColor::HexRgb)));
         }
         else
         {

@@ -50,6 +50,10 @@ void MessageView::setMessage(const MessagePtr &message)
 {
     if (!message)
     {
+        this->message_.reset();
+        this->messageLayout_.reset();
+        this->setFixedSize(this->width_, 0);
+        this->update();
         return;
     }
 
@@ -79,6 +83,10 @@ void MessageView::setWidth(int width)
 
 void MessageView::paintEvent(QPaintEvent * /*event*/)
 {
+    if (!this->messageLayout_)
+    {
+        return;
+    }
     QPainter painter(this);
 
     auto ctx = MessagePaintContext{
@@ -134,6 +142,7 @@ void MessageView::layoutMessage()
                 this->scale() * static_cast<float>(this->devicePixelRatio()),
             .selectedChannel = nullptr,
             .message = *this->message_,
+            .preferences = &this->messagePreferences_,
         },
         false);
 

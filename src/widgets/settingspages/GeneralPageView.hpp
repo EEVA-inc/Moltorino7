@@ -129,6 +129,8 @@ public:
 
     void addLayout(QLayout *layout);
     void addStretch();
+    void scrollToTop();
+    void scrollToWidget(QWidget *widget);
 
     TitleLabel *addTitle(const QString &text);
     SubtitleLabel *addSubtitle(const QString &text);

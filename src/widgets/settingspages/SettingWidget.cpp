@@ -5,6 +5,7 @@
 #include "widgets/settingspages/SettingWidget.hpp"
 
 #include "common/QLogging.hpp"
+#include "singletons/NativeMessaging.hpp"
 #include "singletons/Settings.hpp"
 #include "util/QMagicEnumTagged.hpp"
 #include "util/RapidJsonSerializeQString.hpp"
@@ -19,10 +20,13 @@
 #include <QFormLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QSignalBlocker>
+#include <QSvgWidget>
 
 namespace {
 
 constexpr int MAX_TOOLTIP_LINE_LENGTH = 50;
+constexpr int TOOLTIP_ICON_SIZE = 12;
 const auto MAX_TOOLTIP_LINE_LENGTH_PATTERN =
     QStringLiteral(R"(.{%1}\S*\K(\s+))").arg(MAX_TOOLTIP_LINE_LENGTH);
 const QRegularExpression MAX_TOOLTIP_LINE_LENGTH_REGEX(
@@ -33,7 +37,8 @@ const QRegularExpression MAX_TOOLTIP_LINE_LENGTH_REGEX(
 namespace chatterino {
 
 SettingWidget::SettingWidget(const QString &mainKeyword)
-    : vLayout(new QVBoxLayout(this))
+    : tooltipIcon(new QSvgWidget(this))
+    , vLayout(new QVBoxLayout(this))
     , hLayout(new QHBoxLayout)
 {
     this->vLayout->setContentsMargins(0, 0, 0, 0);
@@ -42,6 +47,7 @@ SettingWidget::SettingWidget(const QString &mainKeyword)
     this->vLayout->addLayout(this->hLayout);
 
     this->keywords.append(mainKeyword);
+    this->tooltipIcon->hide();
 }
 
 SettingWidget *SettingWidget::checkbox(const QString &label,
@@ -52,6 +58,8 @@ SettingWidget *SettingWidget::checkbox(const QString &label,
     auto *check = new SCheckBox(label);
 
     widget->hLayout->addWidget(check);
+    widget->hLayout->addWidget(widget->tooltipIcon);
+    widget->hLayout->addStretch(1);
 
     setting.connect(
         [check](const bool &value) {
@@ -78,6 +86,8 @@ SettingWidget *SettingWidget::inverseCheckbox(const QString &label,
     auto *check = new SCheckBox(label);
 
     widget->hLayout->addWidget(check);
+    widget->hLayout->addWidget(widget->tooltipIcon);
+    widget->hLayout->addStretch(1);
 
     setting.connect(
         [check](const bool &value) {
@@ -105,6 +115,8 @@ SettingWidget *SettingWidget::customCheckbox(
     auto *check = new SCheckBox(label);
 
     widget->hLayout->addWidget(check);
+    widget->hLayout->addWidget(widget->tooltipIcon);
+    widget->hLayout->addStretch(1);
 
     check->setChecked(initialValue);
 
@@ -143,6 +155,7 @@ SettingWidget *SettingWidget::intInput(const QString &label,
     }
 
     widget->hLayout->addWidget(lbl);
+    widget->hLayout->addWidget(widget->tooltipIcon);
     widget->hLayout->addStretch(1);
     widget->hLayout->addWidget(input);
 
@@ -185,6 +198,7 @@ SettingWidget *SettingWidget::dropdown(const QString &label,
     widget->label = lbl;
 
     widget->hLayout->addWidget(lbl);
+    widget->hLayout->addWidget(widget->tooltipIcon);
     widget->hLayout->addStretch(1);
     widget->hLayout->addWidget(combo);
 
@@ -235,6 +249,9 @@ template SettingWidget *SettingWidget::dropdown<ShowModerationState>(
 template SettingWidget *SettingWidget::dropdown<EmojiStyle>(
     const QString &label, EnumStringSetting<EmojiStyle> &setting);
 
+template SettingWidget *SettingWidget::dropdown<BrowserManifestFormat>(
+    const QString &label, EnumStringSetting<BrowserManifestFormat> &setting);
+
 template <typename T>
 SettingWidget *SettingWidget::dropdown(const QString &label,
                                        EnumSetting<T> &setting)
@@ -257,6 +274,7 @@ SettingWidget *SettingWidget::dropdown(const QString &label,
     widget->label = lbl;
 
     widget->hLayout->addWidget(lbl);
+    widget->hLayout->addWidget(widget->tooltipIcon);
     widget->hLayout->addStretch(1);
     widget->hLayout->addWidget(combo);
 
@@ -334,6 +352,7 @@ SettingWidget *SettingWidget::dropdown(
     widget->label = lbl;
 
     widget->hLayout->addWidget(lbl);
+    widget->hLayout->addWidget(widget->tooltipIcon);
     widget->hLayout->addStretch(1);
     widget->hLayout->addWidget(combo);
 
@@ -375,6 +394,28 @@ SettingWidget *SettingWidget::dropdown(
     return widget;
 }
 
+void SettingWidget::setDropdownItems(
+    const std::vector<std::pair<QString, QVariant>> &items,
+    const QVariant &selectedValue)
+{
+    auto *combo = qobject_cast<QComboBox *>(this->actionWidget);
+    if (combo == nullptr)
+    {
+        qCWarning(chatterinoWidget)
+            << "Tried to update choices on a non-dropdown setting widget";
+        return;
+    }
+
+    const QSignalBlocker blocker(combo);
+    combo->clear();
+    for (const auto &[itemText, itemData] : items)
+    {
+        combo->addItem(itemText, itemData);
+    }
+    combo->setCurrentIndex(combo->findData(selectedValue));
+    combo->setMinimumWidth(combo->minimumSizeHint().width() + 30);
+}
+
 SettingWidget *SettingWidget::colorButton(const QString &label,
                                           QStringSetting &setting)
 {
@@ -386,6 +427,7 @@ SettingWidget *SettingWidget::colorButton(const QString &label,
     auto *colorButton = new ColorButton(color);
 
     widget->hLayout->addWidget(lbl);
+    widget->hLayout->addWidget(widget->tooltipIcon);
     widget->hLayout->addStretch(1);
     widget->hLayout->addWidget(colorButton);
 
@@ -431,6 +473,7 @@ SettingWidget *SettingWidget::lineEdit(const QString &label,
     }
 
     widget->hLayout->addWidget(lbl);
+    widget->hLayout->addWidget(widget->tooltipIcon);
     widget->hLayout->addWidget(edit);
 
     QObject::connect(edit, &QLineEdit::textChanged,
@@ -465,6 +508,7 @@ SettingWidget *SettingWidget::fontButton(const QString &label,
     auto *button = new SPushButton(currentFont().family());
 
     widget->hLayout->addWidget(lbl);
+    widget->hLayout->addWidget(widget->tooltipIcon);
     widget->hLayout->addStretch(1);
     widget->hLayout->addWidget(button);
 
@@ -511,6 +555,11 @@ SettingWidget *SettingWidget::setTooltip(QString tooltip)
     {
         this->actionWidget->setToolTip(tooltip);
     }
+
+    this->tooltipIcon->setVisible(true);
+    this->tooltipIcon->load(u":/settings/hint.svg"_qs);
+    this->tooltipIcon->setToolTip(tooltip);
+    this->tooltipIcon->setFixedSize(TOOLTIP_ICON_SIZE, TOOLTIP_ICON_SIZE);
 
     this->keywords.append(tooltip);
 
@@ -572,7 +621,13 @@ void SettingWidget::addTo(GeneralPageView &view)
 
 void SettingWidget::addTo(GeneralPageView &view, QFormLayout *formLayout)
 {
-    this->registerWidget(view);
+    this->setParent(&view);
+    this->hide();
+    if (this->label != nullptr)
+    {
+        view.registerWidget(this->label, this->keywords, nullptr);
+    }
+    view.registerWidget(this->actionWidget, this->keywords, nullptr);
 
     formLayout->addRow(this->label, this->actionWidget);
 }
@@ -581,7 +636,7 @@ void SettingWidget::addToLayout(QLayout *layout)
 {
     if (this->label == this->actionWidget)
     {
-        layout->addWidget(this->actionWidget);
+        layout->addWidget(this);
         return;
     }
 

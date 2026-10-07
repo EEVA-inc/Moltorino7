@@ -7,7 +7,7 @@
 #include "ForwardDecl.hpp"
 #include "widgets/DraggablePopup.hpp"
 
-#include <boost/signals2.hpp>
+#include <boost/signals2/connection.hpp>
 #include <pajlada/signals/scoped-connection.hpp>
 #include <pajlada/signals/signal.hpp>
 
@@ -33,14 +33,23 @@ public:
 
     void setThread(std::shared_ptr<MessageThread> thread,
                    std::weak_ptr<Channel> channel);
+    void showAt(QPoint position);
     void giveFocus(Qt::FocusReason reason);
 
 protected:
+    bool event(QEvent *event) override;
+    void scaleChangedEvent(float scale) override;
     void focusInEvent(QFocusEvent *event) override;
 
 private:
     void addMessagesFromThread();
     void updateInputUI();
+    void updateMinimumSize();
+    int minimumChatHeight() const;
+    void queueFitToScreen();
+    void fitToScreen();
+    bool fittingToScreen_ = false;
+    bool fitQueued_ = false;
 
     // The message reply thread
     std::shared_ptr<MessageThread> thread_;
@@ -58,7 +67,8 @@ private:
     } ui_;
 
     std::unique_ptr<pajlada::Signals::ScopedConnection> messageConnection_;
-    std::vector<boost::signals2::scoped_connection> bSignals_;
+    pajlada::Signals::ScopedConnection currentUserConnection_;
+    pajlada::Signals::ScopedConnection kickCurrentUserConnection_;
     boost::signals2::scoped_connection replySubscriptionSignal_;
 };
 

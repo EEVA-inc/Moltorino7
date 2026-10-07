@@ -7,6 +7,7 @@
 #include "singletons/Theme.hpp"
 
 #include <QPainter>
+#include <QPainterPath>
 
 namespace chatterino {
 
@@ -40,8 +41,8 @@ void DrawnButton::themeChangedEvent()
             o.padding = 4;
             o.thickness = 1;
 
-            o.foreground = this->theme->messages.textColors.system;
-            o.foregroundHover = this->theme->messages.textColors.regular;
+            o.foreground = this->theme->tabs.regular.text;
+            o.foregroundHover = this->theme->window.text;
         }
         break;
 
@@ -49,17 +50,16 @@ void DrawnButton::themeChangedEvent()
             o.padding = 2;
             o.thickness = 2;
 
-            if (this->theme->isLightTheme())
-            {
+            o.foreground = this->theme->tabs.regular.text;
+            o.foregroundHover = this->theme->window.text;
+        }
+        break;
 
-                o.foreground = QColor("#424242");
-            }
-            else
-            {
-
-                o.foreground = QColor("#c0c0c0");
-            }
-            o.foregroundHover = this->theme->messages.textColors.regular;
+        case Symbol::FolderPlus: {
+            o.padding = 4;
+            o.thickness = 1;
+            o.foreground = this->theme->tabs.regular.text;
+            o.foregroundHover = this->theme->window.text;
         }
         break;
     }
@@ -150,6 +150,43 @@ void DrawnButton::paintContent(QPainter &painter)
 
             auto topBox = centerBox.translated(0, -(thickness + padding));
             painter.fillRect(topBox, fg);
+        }
+        break;
+
+        case Symbol::FolderPlus: {
+            painter.setRenderHint(QPainter::Antialiasing);
+
+            auto inner = this->rect().marginsRemoved(
+                {padding, padding, padding, padding});
+            const auto lineWidth = std::max(1, thickness);
+            QPen pen(fg, lineWidth, Qt::SolidLine, Qt::RoundCap,
+                     Qt::RoundJoin);
+            painter.setPen(pen);
+            painter.setBrush(Qt::NoBrush);
+
+            const auto folderTop = inner.top() + inner.height() * 0.25;
+            const auto folderBottom = inner.bottom() - inner.height() * 0.06;
+            const auto tabRight = inner.left() + inner.width() * 0.46;
+            QPainterPath folder;
+            folder.moveTo(inner.left(), folderTop);
+            folder.lineTo(inner.left() + inner.width() * 0.12,
+                          inner.top() + inner.height() * 0.12);
+            folder.lineTo(tabRight, inner.top() + inner.height() * 0.12);
+            folder.lineTo(tabRight + inner.width() * 0.12, folderTop);
+            folder.lineTo(inner.right(), folderTop);
+            folder.lineTo(inner.right(), folderBottom);
+            folder.lineTo(inner.left(), folderBottom);
+            folder.closeSubpath();
+            painter.drawPath(folder);
+
+            const auto plusCenter = QPointF(
+                inner.left() + inner.width() * 0.69,
+                inner.top() + inner.height() * 0.60);
+            const auto arm = inner.width() * 0.16;
+            painter.drawLine(QPointF(plusCenter.x() - arm, plusCenter.y()),
+                             QPointF(plusCenter.x() + arm, plusCenter.y()));
+            painter.drawLine(QPointF(plusCenter.x(), plusCenter.y() - arm),
+                             QPointF(plusCenter.x(), plusCenter.y() + arm));
         }
         break;
     }

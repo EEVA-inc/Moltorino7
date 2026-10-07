@@ -98,6 +98,15 @@ PluginsPage::PluginsPage()
         }
     }
 
+    this->managedConnections_.managedConnect(
+        getApp()->getPlugins()->onPluginsUpdated, [this] {
+            this->rebuildContent();
+        });
+    getSettings()->enabledPlugins.connect(
+        [this] {
+            this->rebuildContent();
+        },
+        this->managedConnections_);
     this->rebuildContent();
 }
 
@@ -192,8 +201,11 @@ void PluginsPage::rebuildContent()
 
             commandsTxt += cmdName;
         }
-        pluginEntry->addRow("Commands",
-                            new QLabel(commandsTxt, this->dataFrame_));
+        if (plugin->meta.isValid())
+        {
+            pluginEntry->addRow("Commands",
+                                new QLabel(commandsTxt, this->dataFrame_));
+        }
         if (!plugin->meta.permissions.empty())
         {
             QString perms = "<ul>";
@@ -220,12 +232,10 @@ void PluginsPage::rebuildContent()
             auto *toggleButton = new QPushButton(toggleTxt, this->dataFrame_);
             QObject::connect(
                 toggleButton, &QPushButton::pressed, [name = id, this]() {
-                    std::vector<QString> val =
-                        getSettings()->enabledPlugins.getValue();
+                    QStringList val = getSettings()->enabledPlugins.getValue();
                     if (PluginController::isPluginEnabled(name))
                     {
-                        val.erase(std::remove(val.begin(), val.end(), name),
-                                  val.end());
+                        val.removeAll(name);
                     }
                     else
                     {
@@ -233,7 +243,6 @@ void PluginsPage::rebuildContent()
                     }
                     getSettings()->enabledPlugins.setValue(val);
                     getApp()->getPlugins()->reload(name);
-                    this->rebuildContent();
                 });
             pluginEntry->addRow(toggleButton);
         }
@@ -242,7 +251,6 @@ void PluginsPage::rebuildContent()
         QObject::connect(reloadButton, &QPushButton::pressed,
                          [name = id, this]() {
                              getApp()->getPlugins()->reload(name);
-                             this->rebuildContent();
                          });
         pluginEntry->addRow(reloadButton);
         if (getApp()->getArgs().safeMode)
@@ -250,7 +258,7 @@ void PluginsPage::rebuildContent()
             reloadButton->setEnabled(false);
         }
 
-        if (getSettings()->pluginRepl.enabled)
+        if (getSettings()->pluginRepl.enabled && plugin->meta.isValid())
         {
             auto *replButton = new QPushButton("Open REPL", this->dataFrame_);
             QObject::connect(replButton, &QPushButton::clicked, [id]() {

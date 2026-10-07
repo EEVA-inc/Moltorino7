@@ -27,6 +27,7 @@
 #include <QKeySequence>
 #include <QMessageBox>
 #include <QSizeGrip>
+#include <QWheelEvent>
 #include <QWindow>
 
 #ifdef Q_OS_WIN
@@ -216,6 +217,19 @@ void OverlayWindow::applyTheme()
         this->dropShadow_->setBlurRadius(settings->overlayShadowRadius);
     }
     this->update();
+}
+
+void OverlayWindow::wheelEvent(QWheelEvent *event)
+{
+    if (event->angleDelta().x() != 0 || event->angleDelta().y() == 0 ||
+        !event->modifiers().testFlag(Qt::ControlModifier))
+    {
+        return;
+    }
+    const auto change = event->angleDelta().y() > 0 ? 0.1F : -0.1F;
+    getSettings()->setClampedOverlayScale(
+        getSettings()->getClampedOverlayScale() + change);
+    event->accept();
 }
 
 float OverlayWindow::desiredScale() const
@@ -502,7 +516,7 @@ void OverlayWindow::addShortcuts()
              const auto &direction = arguments.at(0);
              if (direction == "reset")
              {
-                 getSettings()->uiScale.setValue(1);
+                 getSettings()->setClampedOverlayScale(1);
                  return "";
              }
 

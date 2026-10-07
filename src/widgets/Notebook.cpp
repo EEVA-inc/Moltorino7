@@ -9,6 +9,7 @@
 #include "common/QLogging.hpp"
 #include "controllers/hotkeys/HotkeyCategory.hpp"
 #include "controllers/hotkeys/HotkeyController.hpp"
+#include "controllers/recording/ChatRecordingController.hpp"
 #include "singletons/Resources.hpp"
 #include "singletons/Settings.hpp"
 #include "singletons/StreamerMode.hpp"
@@ -18,7 +19,10 @@
 #include "widgets/buttons/InitMoltorinoUpdateButton.hpp"
 #include "widgets/buttons/PixmapButton.hpp"
 #include "widgets/buttons/SvgButton.hpp"
+#include "widgets/dialogs/ColorPickerDialog.hpp"
+#include "widgets/dialogs/MoltorinoDialogTheme.hpp"
 #include "widgets/dialogs/SettingsDialog.hpp"
+#include "widgets/dialogs/TabGroupDialog.hpp"
 #include "widgets/helper/ChannelView.hpp"
 #include "widgets/helper/NotebookTab.hpp"
 #include "widgets/splits/Split.hpp"
@@ -27,19 +31,81 @@
 
 #include <boost/foreach.hpp>
 #include <QActionGroup>
+#include <QCryptographicHash>
 #include <QDebug>
+#include <QDir>
 #include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
+#include <QImageReader>
+#include <QInputDialog>
 #include <QLayout>
 #include <QList>
+#include <QSaveFile>
+#include <QScopeGuard>
+#include <QSet>
 #include <QStandardPaths>
 #include <QUuid>
 #include <QWidget>
 
+#include <algorithm>
+#include <array>
 #include <ranges>
 #include <utility>
 
 namespace chatterino {
+
+namespace {
+constexpr auto MAX_TAB_GROUPS = 128;
+
+QString normalizeTabGroupColorMode(QString mode)
+{
+    mode = mode.trimmed().toLower();
+    return mode == "none" || mode == "custom" ? mode : QStringLiteral("theme");
+}
+
+QString normalizeTabGroupIcon(QString icon)
+{
+    icon = icon.trimmed().toLower();
+    static const QSet<QString> icons = {
+        QStringLiteral("folder"), QStringLiteral("star"),
+        QStringLiteral("heart"),  QStringLiteral("bell"),
+        QStringLiteral("shield"), QStringLiteral("none"),
+        QStringLiteral("custom"),
+    };
+    return icons.contains(icon) ? icon : QStringLiteral("folder");
+}
+
+QString tabGroupIconPath(const QString &groupId)
+{
+    const auto safeName =
+        QString::fromLatin1(QCryptographicHash::hash(groupId.toUtf8(),
+                                                     QCryptographicHash::Sha256)
+                                .toHex()
+                                .left(24)) +
+        QStringLiteral(".png");
+    return QDir(getApp()->getPaths().settingsDirectory)
+        .filePath(QStringLiteral("TabGroupIcons/%1").arg(safeName));
+}
+
+void removeTabGroupIcon(const QString &groupId)
+{
+    QFile::remove(tabGroupIconPath(groupId));
+}
+
+void showThemedWarning(QWidget *parent, const QString &title,
+                       const QString &text)
+{
+    QPointer<QMessageBox> box = new QMessageBox(QMessageBox::Warning, title,
+                                                text, QMessageBox::Ok, parent);
+    const auto cleanup = qScopeGuard([box] {
+        delete box;
+    });
+    installMoltorinoDialogTheme(box);
+    box->exec();
+}
+}
 
 Notebook::Notebook(QWidget *parent)
     : BaseWidget(parent)
@@ -49,9 +115,26 @@ Notebook::Notebook(QWidget *parent)
                                      .thickness = 1,
                                  },
                                  this))
+    , groupButton_(new DrawnButton(DrawnButton::Symbol::FolderPlus,
+                                   {
+                                       .padding = 6,
+                                       .thickness = 1,
+                                   },
+                                   this))
 {
     this->addButton_->setHidden(true);
     this->addButton_->enableDrops({"chatterino/split"});
+    this->groupButton_->setHidden(true);
+    this->groupButton_->setToolTip("Create tab group");
+    QObject::connect(this->groupButton_, &Button::leftClicked, this, [this] {
+        this->openTabGroupEditor({}, this->selectedPage_);
+    });
+
+    getSettings()->showTabGroupButton.connect(
+        [this](bool, auto) {
+            this->updateGroupButtonVisibility();
+        },
+        this->settingConnections_);
 
     QObject::connect(
         this->addButton_, &Button::dropEvent, this, [this](QDropEvent *event) {
@@ -80,6 +163,13 @@ Notebook::Notebook(QWidget *parent)
 
     this->lockNotebookLayoutAction_->setCheckable(true);
     this->lockNotebookLayoutAction_->setChecked(this->lockNotebookLayout_);
+
+    this->newTabGroupAction_ = new QAction("Create tab group…", this);
+    this->newTabGroupAction_->setEnabled(false);
+    QObject::connect(this->newTabGroupAction_, &QAction::triggered, this,
+                     [this] {
+                         this->openTabGroupEditor({}, this->selectedPage_);
+                     });
 
     // Update lockNotebookLayout_ value anytime the user changes the checkbox state
     QObject::connect(this->lockNotebookLayoutAction_, &QAction::triggered,
@@ -126,6 +216,8 @@ NotebookTab *Notebook::addPageAt(QWidget *page, int position, QString title,
     // Queue up save because: Tab added
     getApp()->getWindows()->queueSave();
 
+    this->ensureUngroupedOrder();
+
     auto *tab = new NotebookTab(this);
     tab->page = page;
 
@@ -135,6 +227,20 @@ NotebookTab *Notebook::addPageAt(QWidget *page, int position, QString title,
     Item item;
     item.page = page;
     item.tab = tab;
+
+    auto ungroupedPosition = static_cast<int>(this->items_.size());
+    if (position >= 0 && position < this->items_.size())
+    {
+        ungroupedPosition = this->items_[position].tab->ungroupedIndex();
+    }
+    for (auto &existing : this->items_)
+    {
+        if (existing.tab->ungroupedIndex() >= ungroupedPosition)
+        {
+            existing.tab->setUngroupedIndex(existing.tab->ungroupedIndex() + 1);
+        }
+    }
+    tab->setUngroupedIndex(ungroupedPosition);
 
     if (position == -1)
     {
@@ -153,6 +259,8 @@ NotebookTab *Notebook::addPageAt(QWidget *page, int position, QString title,
         this->select(page);
     }
 
+    this->updateGroupButtonVisibility();
+
     this->performLayout();
     tab->setVisible(this->shouldShowTab(tab));
     return tab;
@@ -165,6 +273,16 @@ void Notebook::removePage(QWidget *page)
 
     int removingIndex = this->indexOf(page);
     assert(removingIndex != -1);
+
+    if (auto *recordings = getApp()->getChatRecordings())
+    {
+        recordings->stop(dynamic_cast<SplitContainer *>(page));
+    }
+
+    if (this->groupDropSource_ == page || this->groupDropTarget_ == page)
+    {
+        this->cancelTabGroupDrop();
+    }
 
     if (this->selectedPage_ == page)
     {
@@ -199,19 +317,37 @@ void Notebook::removePage(QWidget *page)
         }
     }
 
+    const auto groupId = this->items_[removingIndex].tab->groupId();
+    const auto ungroupedIndex =
+        this->items_[removingIndex].tab->ungroupedIndex();
+
     // Remove page and delete resources
     this->items_[removingIndex].page->deleteLater();
     this->items_[removingIndex].tab->deleteLater();
     this->items_.removeAt(removingIndex);
+    for (auto &item : this->items_)
+    {
+        if (item.tab->ungroupedIndex() > ungroupedIndex)
+        {
+            item.tab->setUngroupedIndex(item.tab->ungroupedIndex() - 1);
+        }
+    }
+
+    this->updateGroupButtonVisibility();
+
+    if (!groupId.isEmpty() && this->tabGroupMembers(groupId).isEmpty())
+    {
+        this->removeTabGroup(groupId, false);
+    }
 
     this->performLayout(true);
 }
 
 void Notebook::duplicatePage(QWidget *page)
 {
-    auto *item = this->findItem(page);
-    assert(item != nullptr);
-    if (item == nullptr)
+    auto item = this->findItem(page);
+    assert(item.has_value());
+    if (!item.has_value())
     {
         return;
     }
@@ -221,6 +357,9 @@ void Notebook::duplicatePage(QWidget *page)
     {
         return;
     }
+
+    auto *sourceTab = item->tab;
+    const auto sourceGroupId = sourceTab->groupId();
 
     auto *newContainer = new SplitContainer(this);
     if (!container->getSplits().empty())
@@ -237,20 +376,28 @@ void Notebook::duplicatePage(QWidget *page)
     }
 
     QString newTabTitle = "";
-    if (item->tab->hasCustomTitle())
+    if (sourceTab->hasCustomTitle())
     {
-        newTabTitle = item->tab->getCustomTitle();
+        newTabTitle = sourceTab->getCustomTitle();
     }
 
     auto *tab =
         this->addPageAt(newContainer, newTabPosition, newTabTitle, false);
-    if (item->tab->hasCustomTabColor())
+    if (sourceTab->hasCustomTabColor())
     {
-        tab->setCustomTabColor(item->tab->getCustomTabColor());
+        tab->setCustomTabColor(sourceTab->getCustomTabColor());
     }
-    tab->copyHighlightStateAndSourcesFrom(item->tab);
+    tab->setAlwaysVisible(sourceTab->isAlwaysVisible());
+    tab->copyHighlightStateAndSourcesFrom(sourceTab);
 
     newContainer->setTab(tab);
+
+    if (!sourceGroupId.isEmpty())
+    {
+        this->updateUngroupedOrderAfterMove(newContainer, page, true);
+
+        this->assignPageToTabGroup(newContainer, sourceGroupId, false);
+    }
 }
 
 void Notebook::removeCurrentPage()
@@ -327,8 +474,8 @@ void Notebook::select(QWidget *page, bool focusPage)
     if (page)
     {
         // A new page has been selected, mark it as selected & focus one of its splits
-        auto *item = this->findItem(page);
-        if (!item)
+        auto item = this->findItem(page);
+        if (!item.has_value())
         {
             return;
         }
@@ -340,21 +487,19 @@ void Notebook::select(QWidget *page, bool focusPage)
 
         if (focusPage)
         {
-            if (item->selectedWidget == nullptr)
+            if (item->selectedWidget != nullptr &&
+                containsChild(page, item->selectedWidget))
             {
-                item->page->setFocus();
+                item->selectedWidget->setFocus(Qt::MouseFocusReason);
             }
             else
             {
-                if (containsChild(page, item->selectedWidget))
-                {
-                    item->selectedWidget->setFocus(Qt::MouseFocusReason);
-                }
-                else
+                if (item->selectedWidget != nullptr)
                 {
                     qCDebug(chatterinoWidget) << "Notebook: selected child of "
                                                  "page doesn't exist anymore";
                 }
+                page->setFocus();
             }
         }
     }
@@ -364,8 +509,11 @@ void Notebook::select(QWidget *page, bool focusPage)
         // Hide the previously selected page
         this->selectedPage_->hide();
 
-        auto *item = this->findItem(this->selectedPage_);
-        if (!item)
+        auto item =
+            std::ranges::find_if(this->items_, [this](const auto &candidate) {
+                return candidate.page == this->selectedPage_;
+            });
+        if (item == this->items_.end())
         {
             return;
         }
@@ -376,7 +524,6 @@ void Notebook::select(QWidget *page, bool focusPage)
     this->selectedPage_ = page;
 
     this->performLayout();
-    this->updateTabVisibility();
 }
 
 bool Notebook::containsPage(QWidget *page)
@@ -387,7 +534,7 @@ bool Notebook::containsPage(QWidget *page)
                        });
 }
 
-Notebook::Item *Notebook::findItem(QWidget *page)
+std::optional<Notebook::Item> Notebook::findItem(QWidget *page)
 {
     auto it = std::find_if(this->items_.begin(), this->items_.end(),
                            [page](const auto &item) {
@@ -395,9 +542,9 @@ Notebook::Item *Notebook::findItem(QWidget *page)
                            });
     if (it != this->items_.end())
     {
-        return &(*it);
+        return *it;
     }
-    return nullptr;
+    return std::nullopt;
 }
 
 bool Notebook::containsChild(const QObject *obj, const QObject *child)
@@ -450,31 +597,21 @@ void Notebook::selectVisibleIndex(int index, bool focusPage)
 void Notebook::selectNextTab(bool focusPage)
 {
     const int size = this->items_.size();
-
-    if (!this->tabVisibilityFilter_)
+    if (size == 0)
     {
-        if (size <= 1)
-        {
-            return;
-        }
-
-        auto index = (this->indexOf(this->selectedPage_) + 1) % size;
-        this->select(this->items_[index].page, focusPage);
         return;
     }
 
     // find next tab that is permitted by filter
-    const int startIndex = this->indexOf(this->selectedPage_);
-
-    auto index = (startIndex + 1) % size;
-    while (index != startIndex)
+    auto index = this->indexOf(this->selectedPage_);
+    for (int visited = 0; visited < size; ++visited)
     {
-        if (this->tabVisibilityFilter_(this->items_[index].tab))
+        index = (index + 1) % size;
+        if (this->tabPassesVisibilityFilter(this->items_[index].tab))
         {
             this->select(this->items_[index].page, focusPage);
             return;
         }
-        index = (index + 1) % size;
     }
 }
 
@@ -482,36 +619,21 @@ void Notebook::selectPreviousTab(bool focusPage)
 {
     const int size = this->items_.size();
 
-    if (!this->tabVisibilityFilter_)
+    if (size == 0)
     {
-        if (size <= 1)
-        {
-            return;
-        }
-
-        int index = this->indexOf(this->selectedPage_) - 1;
-        if (index < 0)
-        {
-            index += size;
-        }
-
-        this->select(this->items_[index].page, focusPage);
         return;
     }
 
     // find next previous tab that is permitted by filter
-    const int startIndex = this->indexOf(this->selectedPage_);
-
-    auto index = startIndex == 0 ? size - 1 : startIndex - 1;
-    while (index != startIndex)
+    auto index = std::max(0, this->indexOf(this->selectedPage_));
+    for (int visited = 0; visited < size; ++visited)
     {
-        if (this->tabVisibilityFilter_(this->items_[index].tab))
+        index = index == 0 ? size - 1 : index - 1;
+        if (this->tabPassesVisibilityFilter(this->items_[index].tab))
         {
             this->select(this->items_[index].page, focusPage);
             return;
         }
-
-        index = index == 0 ? size - 1 : index - 1;
     }
 }
 
@@ -520,7 +642,7 @@ void Notebook::selectLastTab(bool focusPage)
     if (!this->tabVisibilityFilter_)
     {
         const auto size = this->items_.size();
-        if (size <= 1)
+        if (size == 0)
         {
             return;
         }
@@ -562,6 +684,31 @@ QWidget *Notebook::getSelectedPage() const
 
 QWidget *Notebook::tabAt(QPoint point, int &index, int maxWidth)
 {
+    for (const auto &group : this->tabGroups_)
+    {
+        if (!group->header->isVisible())
+        {
+            continue;
+        }
+
+        auto rect = group->header->getDesiredRect();
+        rect.setWidth(std::min(maxWidth, rect.width()));
+        if (!rect.contains(point))
+        {
+            continue;
+        }
+
+        for (int memberIndex = 0; memberIndex < this->items_.size();
+             ++memberIndex)
+        {
+            if (this->items_[memberIndex].tab->groupId() == group->id)
+            {
+                index = memberIndex;
+                return this->items_[memberIndex].page;
+            }
+        }
+    }
+
     auto i = 0;
 
     for (auto &item : this->items_)
@@ -573,7 +720,6 @@ QWidget *Notebook::tabAt(QPoint point, int &index, int maxWidth)
         }
 
         auto rect = item.tab->getDesiredRect();
-        rect.setHeight(int(this->scale() * 24));
 
         rect.setWidth(std::min(maxWidth, rect.width()));
 
@@ -600,9 +746,1495 @@ void Notebook::rearrangePage(QWidget *page, int index)
     // Queue up save because: Tab rearranged
     getApp()->getWindows()->queueSave();
 
-    this->items_.move(this->indexOf(page), index);
+    const auto currentIndex = this->indexOf(page);
+    if (currentIndex == -1 || index < 0 || index >= this->items_.size())
+    {
+        return;
+    }
+
+    this->ensureUngroupedOrder();
+    const auto groupId = this->items_[currentIndex].tab->groupId();
+    auto *targetPage = this->items_[index].page;
+    const auto movingForward = currentIndex < index;
+    if (!groupId.isEmpty())
+    {
+        int first = this->items_.size();
+        int last = -1;
+        for (int i = 0; i < this->items_.size(); ++i)
+        {
+            if (this->items_[i].tab->groupId() == groupId)
+            {
+                first = std::min(first, i);
+                last = std::max(last, i);
+            }
+        }
+        index = std::clamp(index, first, last);
+    }
+
+    this->items_.move(currentIndex, index);
+    if (groupId.isEmpty())
+    {
+        this->updateUngroupedOrderAfterMove(page, targetPage, movingForward);
+    }
+    this->normalizeTabGroups();
 
     this->performLayout(true);
+}
+
+QString Notebook::createTabGroup(QWidget *firstPage, QWidget *secondPage)
+{
+    if (!firstPage || !this->containsPage(firstPage) ||
+        this->tabGroups_.size() >= MAX_TAB_GROUPS)
+    {
+        return {};
+    }
+
+    this->ensureUngroupedOrder();
+
+    auto group = std::make_unique<TabGroup>();
+    group->id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    group->openMenuOnClick =
+        getSettings()->newTabGroupClickAction.getValue() == "menu";
+    group->header = new NotebookTab(this, NotebookTab::Role::GroupHeader);
+    group->header->setGroupId(group->id);
+    group->header->setTabLocation(this->tabLocation_);
+    const auto id = group->id;
+    this->tabGroups_.push_back(std::move(group));
+    this->updateGroupButtonVisibility();
+
+    this->assignPageToTabGroup(firstPage, id, false);
+    if (secondPage && secondPage != firstPage && this->containsPage(secondPage))
+    {
+        this->assignPageToTabGroup(secondPage, id);
+    }
+
+    this->normalizeTabGroups();
+    this->refresh();
+    getApp()->getWindows()->queueSave();
+    return id;
+}
+
+void Notebook::groupPageWith(QWidget *page, QWidget *targetPage)
+{
+    if (!page || !targetPage || page == targetPage ||
+        this->isNotebookLayoutLocked())
+    {
+        return;
+    }
+
+    const auto targetGroup = this->pageTabGroup(targetPage);
+    const auto sourceGroup = this->pageTabGroup(page);
+    if (!targetGroup.isEmpty())
+    {
+        this->assignPageToTabGroup(page, targetGroup);
+    }
+    else if (!sourceGroup.isEmpty())
+    {
+        this->assignPageToTabGroup(targetPage, sourceGroup);
+    }
+    else
+    {
+        this->createTabGroup(targetPage, page);
+    }
+}
+
+QString Notebook::pageTabGroup(QWidget *page) const
+{
+    for (const auto &item : this->items_)
+    {
+        if (item.page == page)
+        {
+            return item.tab->groupId();
+        }
+    }
+    return {};
+}
+
+void Notebook::assignPageToTabGroup(QWidget *page, const QString &groupId,
+                                    bool moveNextToGroup)
+{
+    auto *group = this->findTabGroup(groupId);
+    auto item = this->findItem(page);
+    if (!group || !item || item->tab->groupId() == groupId)
+    {
+        return;
+    }
+
+    this->ensureUngroupedOrder();
+    const auto oldGroupId = item->tab->groupId();
+    item->tab->setGroupId(groupId);
+    item->tab->setGroupMuted(group->muted, false);
+
+    if (moveNextToGroup)
+    {
+        const auto from = this->indexOf(page);
+        auto destination = -1;
+        for (int i = 0; i < this->items_.size(); ++i)
+        {
+            if (this->items_[i].page != page &&
+                this->items_[i].tab->groupId() == groupId)
+            {
+                destination = i;
+            }
+        }
+        if (destination != -1)
+        {
+            this->items_.move(
+                from, from < destination ? destination : destination + 1);
+        }
+    }
+
+    if (!oldGroupId.isEmpty() && this->tabGroupMembers(oldGroupId).isEmpty())
+    {
+        this->removeTabGroup(oldGroupId, false);
+    }
+
+    this->updateTabGroupHeader(*group);
+    this->updateGroupButtonVisibility();
+    this->refresh();
+    getApp()->getWindows()->queueSave();
+}
+
+void Notebook::removePageFromTabGroup(QWidget *page)
+{
+    auto item = this->findItem(page);
+    if (!item || item->tab->groupId().isEmpty())
+    {
+        return;
+    }
+
+    const auto oldGroupId = item->tab->groupId();
+    item->tab->setGroupId({});
+    item->tab->setGroupMuted(false);
+    this->restoreUngroupedOrder();
+    this->normalizeTabGroups();
+    if (this->tabGroupMembers(oldGroupId).isEmpty())
+    {
+        this->removeTabGroup(oldGroupId, false);
+    }
+    else if (auto *group = this->findTabGroup(oldGroupId))
+    {
+        this->updateTabGroupHeader(*group);
+    }
+    this->refresh();
+    getApp()->getWindows()->queueSave();
+}
+
+void Notebook::ungroupTabGroup(const QString &groupId)
+{
+    this->removeTabGroup(groupId, true);
+}
+
+void Notebook::populateTabGroupMenu(QMenu *menu, QWidget *page)
+{
+    menu->clear();
+    const auto locked = this->isNotebookLayoutLocked();
+
+    auto *newGroup = menu->addAction("Create tab group…");
+    newGroup->setEnabled(!locked && this->tabGroups_.size() < MAX_TAB_GROUPS);
+    QObject::connect(newGroup, &QAction::triggered, this, [this, page] {
+        this->openTabGroupEditor({}, page);
+    });
+
+    if (!this->tabGroups_.empty())
+    {
+        menu->addSeparator();
+    }
+    const auto current = this->pageTabGroup(page);
+    for (const auto &group : this->tabGroups_)
+    {
+        const auto memberCount = this->tabGroupMembers(group->id).size();
+        auto *action =
+            menu->addAction(this->tabGroupDisplayName(*group, memberCount));
+        action->setCheckable(true);
+        action->setChecked(current == group->id);
+        action->setEnabled(!locked);
+        QObject::connect(action, &QAction::triggered, this,
+                         [this, page, id = group->id](bool checked) {
+                             if (checked)
+                             {
+                                 this->assignPageToTabGroup(page, id);
+                             }
+                             else
+                             {
+                                 this->removePageFromTabGroup(page);
+                             }
+                         });
+    }
+
+    if (!current.isEmpty())
+    {
+        menu->addSeparator();
+        auto *remove = menu->addAction("Remove from group");
+        remove->setEnabled(!locked);
+        QObject::connect(remove, &QAction::triggered, this, [this, page] {
+            this->removePageFromTabGroup(page);
+        });
+    }
+}
+
+void Notebook::showTabGroupMenu(const QString &groupId, const QPoint &globalPos)
+{
+    auto *group = this->findTabGroup(groupId);
+    if (!group)
+    {
+        return;
+    }
+
+    QPointer<QMenu> menu = new QMenu(this);
+    const auto cleanup = qScopeGuard([menu] {
+        delete menu;
+    });
+    menu->addAction(group->collapsed ? "Expand group" : "Collapse group", this,
+                    [this, groupId] {
+                        this->toggleTabGroup(groupId);
+                    });
+
+    auto *openTab = menu->addMenu("Open tab");
+    const auto members = this->tabGroupMembers(groupId);
+    for (const auto *member : members)
+    {
+        auto *action = openTab->addAction(this->tabGroupMemberLabel(*member));
+        action->setCheckable(true);
+        action->setChecked(member->page == this->selectedPage_);
+        QObject::connect(action, &QAction::triggered, this,
+                         [this, page = QPointer<QWidget>(member->page)] {
+                             if (page)
+                             {
+                                 this->select(page);
+                             }
+                         });
+    }
+
+    auto *mute = menu->addAction("Mute group alerts");
+    mute->setCheckable(true);
+    mute->setChecked(group->muted);
+    mute->setToolTip(
+        "Silence sounds and desktop alerts, and hide unread markers. Each tab "
+        "keeps its own alert settings.");
+    QObject::connect(
+        mute, &QAction::toggled, this, [this, groupId](bool muted) {
+            auto *current = this->findTabGroup(groupId);
+            if (!current || current->muted == muted)
+            {
+                return;
+            }
+            current->muted = muted;
+            for (auto *member : this->tabGroupMembers(groupId))
+            {
+                member->tab->setGroupMuted(muted, false);
+            }
+            const auto sizeChanged = this->updateTabGroupHeader(*current);
+            if (sizeChanged)
+            {
+                this->refresh();
+            }
+            getApp()->getWindows()->queueSave();
+        });
+
+    auto *clickMenu = menu->addMenu("When clicked");
+    auto *clickActions = new QActionGroup(clickMenu);
+    clickActions->setExclusive(true);
+    auto *expandAction = clickMenu->addAction("Expand tabs");
+    auto *listAction = clickMenu->addAction("Open tab list");
+    for (auto *action : {expandAction, listAction})
+    {
+        action->setCheckable(true);
+        clickActions->addAction(action);
+    }
+    expandAction->setChecked(!group->openMenuOnClick);
+    listAction->setChecked(group->openMenuOnClick);
+    QObject::connect(expandAction, &QAction::triggered, this, [this, groupId] {
+        if (auto *current = this->findTabGroup(groupId))
+        {
+            current->openMenuOnClick = false;
+            this->updateTabGroupHeader(*current);
+            getApp()->getWindows()->queueSave();
+        }
+    });
+    QObject::connect(listAction, &QAction::triggered, this, [this, groupId] {
+        if (auto *current = this->findTabGroup(groupId))
+        {
+            current->openMenuOnClick = true;
+            this->updateTabGroupHeader(*current);
+            getApp()->getWindows()->queueSave();
+        }
+    });
+
+    menu->addSeparator();
+    auto *rename = menu->addAction("Rename group…", this, [this, groupId] {
+        this->renameTabGroup(groupId);
+    });
+    rename->setEnabled(!this->isNotebookLayoutLocked());
+
+    auto *edit = menu->addAction("Edit tabs…", this, [this, groupId] {
+        this->openTabGroupEditor(groupId);
+    });
+    edit->setEnabled(!this->isNotebookLayoutLocked());
+
+    auto *colorMenu = menu->addMenu("Color");
+    auto *colorActions = new QActionGroup(colorMenu);
+    colorActions->setExclusive(true);
+    auto *themeColor = colorMenu->addAction("Theme accent");
+    themeColor->setCheckable(true);
+    themeColor->setChecked(group->colorMode == "theme");
+    colorActions->addAction(themeColor);
+    QObject::connect(themeColor, &QAction::triggered, this, [this, groupId] {
+        if (auto *current = this->findTabGroup(groupId))
+        {
+            current->colorMode = "theme";
+            current->color = QColor();
+            this->updateTabGroupHeader(*current);
+            getApp()->getWindows()->queueSave();
+        }
+    });
+
+    auto *noColor = colorMenu->addAction("No color");
+    noColor->setCheckable(true);
+    noColor->setChecked(group->colorMode == "none");
+    colorActions->addAction(noColor);
+    QObject::connect(noColor, &QAction::triggered, this, [this, groupId] {
+        if (auto *current = this->findTabGroup(groupId))
+        {
+            current->colorMode = "none";
+            current->color = QColor();
+            this->updateTabGroupHeader(*current);
+            getApp()->getWindows()->queueSave();
+        }
+    });
+    colorMenu->addSeparator();
+    const std::vector<std::pair<QString, QColor>> colors = {
+        {"Orange", QColor(255, 148, 67)}, {"Blue", QColor(91, 157, 255)},
+        {"Green", QColor(76, 196, 120)},  {"Purple", QColor(172, 123, 255)},
+        {"Pink", QColor(238, 95, 161)},   {"Cyan", QColor(73, 205, 214)},
+    };
+    for (const auto &[name, color] : colors)
+    {
+        auto *colorAction = colorMenu->addAction(name);
+        colorAction->setCheckable(true);
+        colorAction->setChecked(group->colorMode == "custom" &&
+                                group->color.isValid() &&
+                                group->color.rgb() == color.rgb());
+        colorActions->addAction(colorAction);
+        QObject::connect(colorAction, &QAction::triggered, this,
+                         [this, groupId, color] {
+                             if (auto *current = this->findTabGroup(groupId))
+                             {
+                                 current->colorMode = "custom";
+                                 current->color = color;
+                                 this->updateTabGroupHeader(*current);
+                                 getApp()->getWindows()->queueSave();
+                             }
+                         });
+    }
+    colorMenu->addSeparator();
+    colorMenu->addAction("Custom color…", this, [this, groupId] {
+        auto *current = this->findTabGroup(groupId);
+        if (!current)
+        {
+            return;
+        }
+        auto initial =
+            current->color.isValid() ? current->color : getTheme()->accent;
+        auto *dialog = new ColorPickerDialog(initial, this);
+        QObject::connect(dialog, &ColorPickerDialog::colorConfirmed, this,
+                         [this, groupId](const QColor &color) {
+                             if (auto *current = this->findTabGroup(groupId);
+                                 current && color.isValid())
+                             {
+                                 current->colorMode = "custom";
+                                 current->color = color;
+                                 this->updateTabGroupHeader(*current);
+                                 getApp()->getWindows()->queueSave();
+                             }
+                         });
+        dialog->show();
+    });
+
+    auto *iconMenu = menu->addMenu("Icon");
+    auto *iconActions = new QActionGroup(iconMenu);
+    iconActions->setExclusive(true);
+    const std::array<std::pair<const char *, const char *>, 6> icons = {{
+        {"Folder", "folder"},
+        {"Star", "star"},
+        {"Heart", "heart"},
+        {"Bell", "bell"},
+        {"Shield", "shield"},
+        {"No icon", "none"},
+    }};
+    for (const auto &[label, value] : icons)
+    {
+        auto *action = iconMenu->addAction(label);
+        action->setCheckable(true);
+        action->setChecked(group->icon == value);
+        iconActions->addAction(action);
+        QObject::connect(action, &QAction::triggered, this,
+                         [this, groupId, icon = QString::fromLatin1(value)] {
+                             if (auto *current = this->findTabGroup(groupId))
+                             {
+                                 if (current->icon == "custom")
+                                 {
+                                     removeTabGroupIcon(current->id);
+                                 }
+                                 current->icon = icon;
+                                 current->customIconPath.clear();
+                                 const auto sizeChanged =
+                                     this->updateTabGroupHeader(*current);
+                                 if (sizeChanged)
+                                 {
+                                     this->refresh();
+                                 }
+                                 getApp()->getWindows()->queueSave();
+                             }
+                         });
+    }
+    iconMenu->addSeparator();
+    auto *customIcon = iconMenu->addAction("Custom image…");
+    customIcon->setCheckable(true);
+    customIcon->setChecked(group->icon == "custom");
+    iconActions->addAction(customIcon);
+    QObject::connect(customIcon, &QAction::triggered, this, [this, groupId] {
+        auto *current = this->findTabGroup(groupId);
+        if (!current)
+        {
+            return;
+        }
+        const QPointer<Notebook> self(this);
+        const auto path = QFileDialog::getOpenFileName(
+            this, "Choose a group icon", {},
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp);;All files (*)");
+        if (!self)
+        {
+            return;
+        }
+        current = this->findTabGroup(groupId);
+        if (path.isEmpty() || !current)
+        {
+            return;
+        }
+        if (!this->setTabGroupCustomIcon(*current, path))
+        {
+            showThemedWarning(
+                this, "Group icon",
+                "Could not use that image. Choose a PNG, JPG, WebP, or "
+                "BMP image.");
+            return;
+        }
+        const auto sizeChanged = this->updateTabGroupHeader(*current);
+        if (sizeChanged)
+        {
+            this->refresh();
+        }
+        getApp()->getWindows()->queueSave();
+    });
+
+    menu->addSeparator();
+    auto *ungroup = menu->addAction("Ungroup tabs", this, [this, groupId] {
+        this->ungroupTabGroup(groupId);
+    });
+    ungroup->setEnabled(!this->isNotebookLayoutLocked());
+
+    auto *close = menu->addAction("Close all tabs…", this, [this, groupId] {
+        const auto members = this->tabGroupMembers(groupId);
+        if (members.isEmpty())
+        {
+            return;
+        }
+        QList<QPointer<QWidget>> pages;
+        for (const auto *member : members)
+        {
+            pages.push_back(member->page);
+        }
+        const auto oneTab = members.size() == 1;
+        QPointer<QMessageBox> confirmation = new QMessageBox(
+            QMessageBox::Question, "Close group tabs",
+            oneTab ? QStringLiteral("Close the tab in this group?")
+                   : QStringLiteral("Close all %1 tabs in this group?")
+                         .arg(members.size()),
+            QMessageBox::Cancel, this);
+        const auto cleanup = qScopeGuard([confirmation] {
+            delete confirmation;
+        });
+        auto *closeButton = confirmation->addButton(
+            oneTab ? "Close tab" : "Close tabs", QMessageBox::AcceptRole);
+        confirmation->setDefaultButton(QMessageBox::Cancel);
+        installMoltorinoDialogTheme(confirmation);
+        confirmation->exec();
+        if (!confirmation || confirmation->clickedButton() != closeButton)
+        {
+            return;
+        }
+
+        for (const auto &page : pages)
+        {
+            if (page && this->containsPage(page) &&
+                this->pageTabGroup(page) == groupId)
+            {
+                this->removePage(page);
+            }
+        }
+    });
+    close->setEnabled(!this->isNotebookLayoutLocked());
+
+    menu->exec(globalPos);
+}
+
+void Notebook::openTabGroupEditor(const QString &groupId, QWidget *initialPage)
+{
+    if (this->isNotebookLayoutLocked() || this->items_.isEmpty())
+    {
+        return;
+    }
+
+    this->ensureUngroupedOrder();
+    auto *group = groupId.isEmpty() ? nullptr : this->findTabGroup(groupId);
+    if (groupId.isEmpty() && this->tabGroups_.size() >= MAX_TAB_GROUPS)
+    {
+        return;
+    }
+    if (!groupId.isEmpty() && !group)
+    {
+        return;
+    }
+
+    std::vector<TabGroupDialogEntry> entries;
+    entries.reserve(this->items_.size());
+    for (const auto &item : this->items_)
+    {
+        QString otherGroupName;
+        const auto itemGroupId = item.tab->groupId();
+        if (!itemGroupId.isEmpty() && itemGroupId != groupId)
+        {
+            if (const auto *otherGroup = this->findTabGroup(itemGroupId))
+            {
+                otherGroupName = this->tabGroupDisplayName(
+                    *otherGroup, this->tabGroupMembers(itemGroupId).size());
+            }
+        }
+        entries.push_back({
+            .page = item.page,
+            .title = item.tab->getTitle(),
+            .channelTitle = item.tab->getDefaultTitle(),
+            .otherGroupName = std::move(otherGroupName),
+            .selected = group
+                            ? item.tab->groupId() == groupId
+                            : item.page == initialPage && itemGroupId.isEmpty(),
+        });
+    }
+
+    const QPointer<Notebook> self(this);
+    QPointer<TabGroupDialog> dialog = new TabGroupDialog(
+        group ? group->name : QString(), entries, group == nullptr,
+        group ? group->icon : QStringLiteral("folder"),
+        group ? group->customIconPath : QString(), this);
+    const auto result = dialog->exec();
+    if (!self || !dialog)
+    {
+        return;
+    }
+    if (result != QDialog::Accepted)
+    {
+        delete dialog;
+        return;
+    }
+    auto chosenPages = dialog->selectedPages();
+    const auto name = dialog->groupName();
+    const auto icon = dialog->groupIcon();
+    const auto iconPath = dialog->customIconPath();
+    delete dialog;
+    chosenPages.removeIf([this](auto *page) {
+        return !this->containsPage(page);
+    });
+    if (chosenPages.isEmpty())
+    {
+        return;
+    }
+
+    QString targetId = groupId;
+    group = this->findTabGroup(groupId);
+    if (groupId.isEmpty())
+    {
+        targetId = this->createTabGroup(chosenPages.front());
+        group = this->findTabGroup(targetId);
+    }
+    if (!group)
+    {
+        return;
+    }
+
+    QSet<QWidget *> chosen;
+    for (auto *page : chosenPages)
+    {
+        chosen.insert(page);
+    }
+
+    for (auto &item : this->items_)
+    {
+        if (chosen.contains(item.page))
+        {
+            item.tab->setGroupId(targetId);
+            item.tab->setGroupMuted(group->muted, false);
+        }
+        else if (item.tab->groupId() == targetId)
+        {
+            item.tab->setGroupId({});
+            item.tab->setGroupMuted(false);
+        }
+    }
+    group->name = name;
+    const auto chosenIcon = normalizeTabGroupIcon(icon);
+    if (chosenIcon == "custom")
+    {
+        if (!this->setTabGroupCustomIcon(*group, iconPath))
+        {
+            if (group->icon == "custom" && group->customIconPath.isEmpty())
+            {
+                group->icon = "folder";
+            }
+            showThemedWarning(
+                this, "Group icon",
+                "Could not use that image. The current icon is unchanged.");
+            if (!self)
+            {
+                return;
+            }
+            group = this->findTabGroup(targetId);
+            if (!group)
+            {
+                return;
+            }
+        }
+    }
+    else
+    {
+        if (group->icon == "custom")
+        {
+            removeTabGroupIcon(group->id);
+        }
+        group->icon = chosenIcon;
+        group->customIconPath.clear();
+    }
+
+    this->restoreUngroupedOrder();
+    this->normalizeTabGroups();
+    for (auto it = this->tabGroups_.begin(); it != this->tabGroups_.end();)
+    {
+        if ((*it)->id != targetId && this->tabGroupMembers((*it)->id).isEmpty())
+        {
+            removeTabGroupIcon((*it)->id);
+            (*it)->header->hide();
+            (*it)->header->deleteLater();
+            it = this->tabGroups_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    this->updateTabGroupHeader(*group);
+    this->updateGroupButtonVisibility();
+    this->refresh();
+    getApp()->getWindows()->queueSave();
+}
+
+void Notebook::toggleTabGroup(const QString &groupId)
+{
+    if (auto *group = this->findTabGroup(groupId))
+    {
+        group->collapsed = !group->collapsed;
+        this->refresh();
+        getApp()->getWindows()->queueSave();
+    }
+}
+
+void Notebook::moveTabGroup(const QString &groupId, int index)
+{
+    if (this->isNotebookLayoutLocked() || index < 0 ||
+        index >= this->items_.size())
+    {
+        return;
+    }
+
+    auto firstSourceIndex = this->items_.size();
+    for (int i = 0; i < this->items_.size(); ++i)
+    {
+        if (this->items_[i].tab->groupId() == groupId)
+        {
+            firstSourceIndex = i;
+            break;
+        }
+    }
+    if (firstSourceIndex == this->items_.size())
+    {
+        return;
+    }
+
+    const bool movingForward = firstSourceIndex < index;
+    const auto targetGroupId = this->items_[index].tab->groupId();
+    if (targetGroupId == groupId)
+    {
+        return;
+    }
+    if (!targetGroupId.isEmpty())
+    {
+        if (movingForward)
+        {
+            while (index + 1 < this->items_.size() &&
+                   this->items_[index + 1].tab->groupId() == targetGroupId)
+            {
+                ++index;
+            }
+            ++index;
+        }
+        else
+        {
+            while (index > 0 &&
+                   this->items_[index - 1].tab->groupId() == targetGroupId)
+            {
+                --index;
+            }
+        }
+    }
+    else if (movingForward)
+    {
+        ++index;
+    }
+
+    QList<Item> members;
+    int removedBeforeTarget = 0;
+    for (int i = this->items_.size() - 1; i >= 0; --i)
+    {
+        if (this->items_[i].tab->groupId() == groupId)
+        {
+            if (i < index)
+            {
+                ++removedBeforeTarget;
+            }
+            members.prepend(this->items_.takeAt(i));
+        }
+    }
+    if (members.isEmpty())
+    {
+        return;
+    }
+
+    index = std::clamp(index - removedBeforeTarget, 0,
+                       static_cast<int>(this->items_.size()));
+    for (const auto &member : members)
+    {
+        this->items_.insert(index++, member);
+    }
+    this->performLayout(true);
+    getApp()->getWindows()->queueSave();
+}
+
+void Notebook::tabStatusChanged(NotebookTab *tab)
+{
+    if (!tab || tab->role() != NotebookTab::Role::Page ||
+        tab->groupId().isEmpty())
+    {
+        return;
+    }
+    if (auto *group = this->findTabGroup(tab->groupId()))
+    {
+        if (this->updateTabGroupHeader(*group))
+        {
+            this->refresh();
+        }
+    }
+}
+
+Notebook::TabGroup *Notebook::findTabGroup(const QString &id)
+{
+    const auto it =
+        std::ranges::find_if(this->tabGroups_, [&id](const auto &group) {
+            return group->id == id;
+        });
+    return it == this->tabGroups_.end() ? nullptr : it->get();
+}
+
+const Notebook::TabGroup *Notebook::findTabGroup(const QString &id) const
+{
+    const auto it =
+        std::ranges::find_if(this->tabGroups_, [&id](const auto &group) {
+            return group->id == id;
+        });
+    return it == this->tabGroups_.end() ? nullptr : it->get();
+}
+
+QList<Notebook::Item *> Notebook::tabGroupMembers(const QString &id)
+{
+    QList<Item *> members;
+    for (auto &item : this->items_)
+    {
+        if (item.tab->groupId() == id)
+        {
+            members.push_back(&item);
+        }
+    }
+    return members;
+}
+
+QList<const Notebook::Item *> Notebook::tabGroupMembers(const QString &id) const
+{
+    QList<const Item *> members;
+    for (const auto &item : this->items_)
+    {
+        if (item.tab->groupId() == id)
+        {
+            members.push_back(&item);
+        }
+    }
+    return members;
+}
+
+QString Notebook::tabGroupDisplayName(const TabGroup &group, int members) const
+{
+    if (!group.name.isEmpty())
+    {
+        return group.name;
+    }
+    return members == 1 ? QStringLiteral("1 tab")
+                        : QStringLiteral("%1 tabs").arg(members);
+}
+
+bool Notebook::updateTabGroupHeader(TabGroup &group)
+{
+    const auto members = this->tabGroupMembers(group.id);
+    return this->updateTabGroupHeader(group, members);
+}
+
+bool Notebook::updateTabGroupHeader(TabGroup &group,
+                                    const QList<Item *> &members)
+{
+    bool selected = false;
+    bool live = false;
+    auto highlight = HighlightState::None;
+    for (const auto *member : members)
+    {
+        selected |= member->page == this->selectedPage_;
+        live |= member->tab->isLive();
+        if (member->tab->highlightState() == HighlightState::Highlighted)
+        {
+            highlight = HighlightState::Highlighted;
+        }
+        else if (highlight == HighlightState::None &&
+                 member->tab->highlightState() == HighlightState::NewMessage)
+        {
+            highlight = HighlightState::NewMessage;
+        }
+    }
+
+    const auto title = this->tabGroupDisplayName(group, members.size());
+    return group.header->setGroupHeaderState(
+        title, members.size(), group.collapsed, group.collapsed && selected,
+        live, highlight, group.colorMode, group.color, group.icon,
+        group.customIconPath, group.muted, group.openMenuOnClick,
+        std::exchange(group.customIconDirty, false));
+}
+
+void Notebook::activateTabGroup(const QString &groupId, const QPoint &globalPos)
+{
+    const auto *group = this->findTabGroup(groupId);
+    if (!group)
+    {
+        return;
+    }
+
+    if (group->openMenuOnClick)
+    {
+        this->showTabGroupQuickSwitcher(groupId, globalPos);
+    }
+    else
+    {
+        this->toggleTabGroup(groupId);
+    }
+}
+
+void Notebook::previewTabGroupDrop(QWidget *sourcePage, QWidget *targetPage)
+{
+    if (!sourcePage || !targetPage || sourcePage == targetPage ||
+        !this->containsPage(sourcePage) || !this->containsPage(targetPage) ||
+        !this->getAllowUserTabManagement() || this->isNotebookLayoutLocked())
+    {
+        this->cancelTabGroupDrop();
+        return;
+    }
+
+    const auto sourceGroup = this->pageTabGroup(sourcePage);
+    const auto targetGroup = this->pageTabGroup(targetPage);
+    if (!sourceGroup.isEmpty() && sourceGroup == targetGroup)
+    {
+        this->cancelTabGroupDrop();
+        return;
+    }
+
+    NotebookTab *visual = nullptr;
+    if (!targetGroup.isEmpty())
+    {
+        if (auto *group = this->findTabGroup(targetGroup))
+        {
+            visual = group->header;
+        }
+    }
+    if (!visual)
+    {
+        if (auto item = this->findItem(targetPage))
+        {
+            visual = item->tab;
+        }
+    }
+    if (!visual)
+    {
+        this->cancelTabGroupDrop();
+        return;
+    }
+
+    if (this->groupDropVisual_ != visual)
+    {
+        if (this->groupDropVisual_)
+        {
+            this->groupDropVisual_->setGroupDropTarget(false);
+        }
+        this->groupDropVisual_ = visual;
+        this->groupDropVisual_->setGroupDropTarget(true);
+    }
+    this->groupDropSource_ = sourcePage;
+    this->groupDropTarget_ = targetPage;
+}
+
+bool Notebook::commitTabGroupDrop(QWidget *sourcePage)
+{
+    if (!sourcePage || this->groupDropSource_ != sourcePage ||
+        !this->groupDropTarget_)
+    {
+        return false;
+    }
+
+    auto *targetPage = this->groupDropTarget_.data();
+    this->cancelTabGroupDrop();
+    this->groupPageWith(sourcePage, targetPage);
+    return true;
+}
+
+void Notebook::cancelTabGroupDrop()
+{
+    if (this->groupDropVisual_)
+    {
+        this->groupDropVisual_->setGroupDropTarget(false);
+    }
+    this->groupDropVisual_ = nullptr;
+    this->groupDropSource_.clear();
+    this->groupDropTarget_.clear();
+}
+
+void Notebook::showTabGroupQuickSwitcher(const QString &groupId,
+                                         const QPoint &globalPos)
+{
+    auto *group = this->findTabGroup(groupId);
+    if (!group)
+    {
+        return;
+    }
+
+    const auto members = this->tabGroupMembers(groupId);
+    QPointer<QMenu> menu = new QMenu(this);
+    const auto cleanup = qScopeGuard([menu] {
+        delete menu;
+    });
+    auto *heading =
+        menu->addSection(this->tabGroupDisplayName(*group, members.size()));
+    heading->setEnabled(false);
+    for (const auto *member : members)
+    {
+        auto label = this->tabGroupMemberLabel(*member);
+        if (member->tab->isLive())
+        {
+            label.prepend(QStringLiteral("\u25cf "));
+        }
+        auto *action = menu->addAction(label);
+        action->setCheckable(true);
+        action->setChecked(member->page == this->selectedPage_);
+        QObject::connect(action, &QAction::triggered, this,
+                         [this, page = QPointer<QWidget>(member->page)] {
+                             if (page)
+                             {
+                                 this->select(page);
+                             }
+                         });
+    }
+    menu->exec(globalPos);
+}
+
+QString Notebook::tabGroupMemberLabel(const Item &item) const
+{
+    const auto title = item.tab->getTitle().trimmed();
+    const auto channel = item.tab->getDefaultTitle().trimmed();
+    if (channel.isEmpty() || channel.compare(title, Qt::CaseInsensitive) == 0 ||
+        !getSettings()->showTabGroupChannelNames.getValue())
+    {
+        return title.isEmpty() ? QStringLiteral("Untitled tab") : title;
+    }
+    return QStringLiteral("%1 \u00b7 %2")
+        .arg(title.isEmpty() ? QStringLiteral("Untitled tab") : title, channel);
+}
+
+void Notebook::renameTabGroup(const QString &groupId)
+{
+    auto *group = this->findTabGroup(groupId);
+    if (!group || this->isNotebookLayoutLocked())
+    {
+        return;
+    }
+
+    QPointer<QInputDialog> dialog = new QInputDialog(this);
+    const auto cleanup = qScopeGuard([dialog] {
+        delete dialog;
+    });
+    dialog->setWindowTitle("Rename tab group");
+    dialog->setLabelText("Group name");
+    dialog->setTextValue(group->name);
+    dialog->setOkButtonText("Save");
+    dialog->setMinimumWidth(380);
+    if (auto *input = dialog->findChild<QLineEdit *>())
+    {
+        input->setMaxLength(64);
+        input->setPlaceholderText("Leave blank to use the tab count");
+        input->selectAll();
+    }
+    installMoltorinoDialogTheme(dialog);
+    const auto result = dialog->exec();
+    if (!dialog || result != QDialog::Accepted)
+    {
+        return;
+    }
+
+    group = this->findTabGroup(groupId);
+    if (!group)
+    {
+        return;
+    }
+    group->name = dialog->textValue().trimmed().left(64);
+    this->updateTabGroupHeader(*group);
+    this->refresh();
+    getApp()->getWindows()->queueSave();
+}
+
+bool Notebook::setTabGroupCustomIcon(TabGroup &group, const QString &sourcePath)
+{
+    const QFileInfo source(sourcePath);
+    if (!source.isFile() || source.size() <= 0 ||
+        source.size() > 10 * 1024 * 1024)
+    {
+        return false;
+    }
+
+    QImageReader reader(source.absoluteFilePath());
+    reader.setAutoTransform(true);
+    const auto sourceSize = reader.size();
+    if (sourceSize.isValid() &&
+        (sourceSize.width() > 256 || sourceSize.height() > 256))
+    {
+        reader.setScaledSize(sourceSize.scaled(256, 256, Qt::KeepAspectRatio));
+    }
+    auto image = reader.read();
+    if (image.isNull())
+    {
+        return false;
+    }
+    if (image.width() > 256 || image.height() > 256)
+    {
+        image = image.scaled(256, 256, Qt::KeepAspectRatio,
+                             Qt::SmoothTransformation);
+    }
+
+    const auto destination = tabGroupIconPath(group.id);
+    if (!source.canonicalFilePath().isEmpty() &&
+        QFileInfo(destination).canonicalFilePath() ==
+            source.canonicalFilePath())
+    {
+        group.icon = "custom";
+        group.customIconPath = destination;
+        group.customIconDirty = true;
+        return true;
+    }
+
+    QDir settings(getApp()->getPaths().settingsDirectory);
+    if (!settings.mkpath("TabGroupIcons"))
+    {
+        return false;
+    }
+    QSaveFile output(destination);
+    if (!output.open(QIODevice::WriteOnly) || !image.save(&output, "PNG") ||
+        !output.commit())
+    {
+        output.cancelWriting();
+        return false;
+    }
+
+    group.icon = "custom";
+    group.customIconPath = destination;
+    group.customIconDirty = true;
+    return true;
+}
+
+bool Notebook::tabPassesVisibilityFilter(const NotebookTab *tab) const
+{
+    return !this->tabVisibilityFilter_ || this->tabVisibilityFilter_(tab);
+}
+
+void Notebook::removeTabGroup(const QString &groupId, bool keepMembers)
+{
+    const auto it =
+        std::ranges::find_if(this->tabGroups_, [&groupId](const auto &group) {
+            return group->id == groupId;
+        });
+    if (it == this->tabGroups_.end())
+    {
+        return;
+    }
+
+    if (keepMembers)
+    {
+        for (auto &item : this->items_)
+        {
+            if (item.tab->groupId() == groupId)
+            {
+                item.tab->setGroupId({});
+                item.tab->setGroupMuted(false);
+            }
+        }
+    }
+    (*it)->header->hide();
+    (*it)->header->deleteLater();
+    removeTabGroupIcon((*it)->id);
+    this->tabGroups_.erase(it);
+    if (keepMembers)
+    {
+        this->restoreUngroupedOrder();
+        this->normalizeTabGroups();
+    }
+    this->updateGroupButtonVisibility();
+    this->refresh();
+    getApp()->getWindows()->queueSave();
+}
+
+void Notebook::normalizeTabGroups()
+{
+    QList<Item> normalized;
+    QSet<QString> emitted;
+    const auto original = this->items_;
+    normalized.reserve(original.size());
+
+    QSet<QString> validGroups;
+    for (const auto &group : this->tabGroups_)
+    {
+        validGroups.insert(group->id);
+    }
+    QHash<QString, QList<Item>> membersByGroup;
+    for (const auto &item : original)
+    {
+        const auto groupId = item.tab->groupId();
+        if (!groupId.isEmpty() && validGroups.contains(groupId))
+        {
+            membersByGroup[groupId].push_back(item);
+        }
+    }
+
+    for (auto item : original)
+    {
+        const auto groupId = item.tab->groupId();
+        if (groupId.isEmpty() || !validGroups.contains(groupId))
+        {
+            if (!groupId.isEmpty())
+            {
+                item.tab->setGroupId({});
+            }
+            normalized.push_back(item);
+            continue;
+        }
+        if (emitted.contains(groupId))
+        {
+            continue;
+        }
+        emitted.insert(groupId);
+        for (const auto &candidate : membersByGroup[groupId])
+        {
+            normalized.push_back(candidate);
+        }
+    }
+    this->items_ = std::move(normalized);
+}
+
+void Notebook::ensureUngroupedOrder()
+{
+    QSet<int> indices;
+    QList<std::pair<int, NotebookTab *>> validIndices;
+    QList<NotebookTab *> repairIndices;
+    auto largestIndex = -1;
+    for (auto &item : this->items_)
+    {
+        const auto index = item.tab->ungroupedIndex();
+        if (index < 0 || indices.contains(index))
+        {
+            repairIndices.push_back(item.tab);
+            continue;
+        }
+        indices.insert(index);
+        validIndices.push_back({index, item.tab});
+        largestIndex = std::max(largestIndex, index);
+    }
+
+    if (repairIndices.isEmpty() &&
+        largestIndex == static_cast<int>(this->items_.size()) - 1)
+    {
+        return;
+    }
+
+    std::ranges::stable_sort(validIndices,
+                             [](const auto &left, const auto &right) {
+                                 return left.first < right.first;
+                             });
+    auto nextIndex = 0;
+    for (const auto &[index, tab] : validIndices)
+    {
+        std::ignore = index;
+        tab->setUngroupedIndex(nextIndex++);
+    }
+    for (auto *tab : repairIndices)
+    {
+        tab->setUngroupedIndex(nextIndex++);
+    }
+}
+
+void Notebook::restoreUngroupedOrder()
+{
+    this->ensureUngroupedOrder();
+    QList<Item> ungroupedItems;
+    ungroupedItems.reserve(this->items_.size());
+    for (const auto &item : this->items_)
+    {
+        if (item.tab->groupId().isEmpty())
+        {
+            ungroupedItems.push_back(item);
+        }
+    }
+    std::ranges::stable_sort(
+        ungroupedItems, [](const Item &left, const Item &right) {
+            return left.tab->ungroupedIndex() < right.tab->ungroupedIndex();
+        });
+
+    auto restored = ungroupedItems.begin();
+    for (auto &item : this->items_)
+    {
+        if (item.tab->groupId().isEmpty())
+        {
+            item = *restored++;
+        }
+    }
+}
+
+void Notebook::updateUngroupedOrderAfterMove(QWidget *page, QWidget *targetPage,
+                                             bool afterTarget)
+{
+    if (!page || !targetPage || page == targetPage)
+    {
+        return;
+    }
+
+    QList<Item *> homeOrder;
+    homeOrder.reserve(this->items_.size());
+    for (auto &item : this->items_)
+    {
+        homeOrder.push_back(&item);
+    }
+    std::ranges::stable_sort(
+        homeOrder, [](const Item *left, const Item *right) {
+            return left->tab->ungroupedIndex() < right->tab->ungroupedIndex();
+        });
+
+    const auto pageIt = std::ranges::find(homeOrder, page, &Item::page);
+    const auto targetIt = std::ranges::find(homeOrder, targetPage, &Item::page);
+    if (pageIt == homeOrder.end() || targetIt == homeOrder.end())
+    {
+        return;
+    }
+
+    auto *moved = *pageIt;
+    homeOrder.erase(pageIt);
+    auto newTarget = std::ranges::find(homeOrder, targetPage, &Item::page);
+    if (afterTarget)
+    {
+        ++newTarget;
+    }
+    homeOrder.insert(newTarget, moved);
+
+    for (int i = 0; i < homeOrder.size(); ++i)
+    {
+        homeOrder[i]->tab->setUngroupedIndex(i);
+    }
+}
+
+void Notebook::syncUngroupedOrderToItems()
+{
+    for (int i = 0; i < this->items_.size(); ++i)
+    {
+        this->items_[i].tab->setUngroupedIndex(i);
+    }
+}
+
+std::vector<Notebook::TabGroupSnapshot> Notebook::tabGroups() const
+{
+    std::vector<TabGroupSnapshot> result;
+    result.reserve(this->tabGroups_.size());
+    QSet<QString> nonEmptyGroupIds;
+    for (const auto &item : this->items_)
+    {
+        if (!item.tab->groupId().isEmpty())
+        {
+            nonEmptyGroupIds.insert(item.tab->groupId());
+        }
+    }
+    for (const auto &group : this->tabGroups_)
+    {
+        if (!nonEmptyGroupIds.contains(group->id))
+        {
+            continue;
+        }
+        result.push_back({
+            .id = group->id,
+            .name = group->name,
+            .colorMode = group->colorMode,
+            .color = group->color,
+            .icon = group->icon,
+            .customIconPath = group->customIconPath,
+            .collapsed = group->collapsed,
+            .muted = group->muted,
+            .openMenuOnClick = group->openMenuOnClick,
+        });
+    }
+    return result;
+}
+
+void Notebook::restoreTabGroup(const TabGroupSnapshot &snapshot)
+{
+    const auto id = snapshot.id.left(64);
+    if (id.isEmpty() || this->findTabGroup(id) ||
+        this->tabGroups_.size() >= MAX_TAB_GROUPS)
+    {
+        return;
+    }
+
+    auto group = std::make_unique<TabGroup>();
+    group->id = id;
+    group->name = snapshot.name.left(64);
+    group->colorMode = normalizeTabGroupColorMode(snapshot.colorMode);
+    group->color = snapshot.color;
+    if (group->colorMode == "custom" && !group->color.isValid())
+    {
+        group->colorMode = "theme";
+    }
+    if (group->colorMode != "custom")
+    {
+        group->color = QColor();
+    }
+    group->icon = normalizeTabGroupIcon(snapshot.icon);
+    if (group->icon == "custom")
+    {
+        const auto internalPath = tabGroupIconPath(group->id);
+        const QFileInfo internalIcon(internalPath);
+        QImageReader internalReader(internalPath);
+        if (internalIcon.isFile() && internalIcon.size() > 0 &&
+            internalIcon.size() <= 10 * 1024 * 1024 && internalReader.canRead())
+        {
+            group->customIconPath = internalPath;
+        }
+        else
+        {
+            removeTabGroupIcon(group->id);
+            auto legacyPath = snapshot.customIconPath.left(1024);
+            if (!legacyPath.isEmpty() && QDir::isRelativePath(legacyPath))
+            {
+                legacyPath = QDir(getApp()->getPaths().settingsDirectory)
+                                 .filePath(legacyPath);
+            }
+            if (legacyPath.isEmpty() ||
+                !this->setTabGroupCustomIcon(*group, legacyPath))
+            {
+                group->icon = "folder";
+            }
+        }
+    }
+    if (group->icon != "custom")
+    {
+        group->customIconPath.clear();
+    }
+    group->collapsed = snapshot.collapsed;
+    group->muted = snapshot.muted;
+    group->openMenuOnClick = snapshot.openMenuOnClick;
+    group->header = new NotebookTab(this, NotebookTab::Role::GroupHeader);
+    group->header->setGroupId(group->id);
+    group->header->setTabLocation(this->tabLocation_);
+    group->header->hide();
+    this->tabGroups_.push_back(std::move(group));
+}
+
+void Notebook::restorePageTabGroup(QWidget *page, const QString &groupId,
+                                   int ungroupedIndex)
+{
+    const auto *group = this->findTabGroup(groupId);
+    if (auto item = this->findItem(page); item && group)
+    {
+        item->tab->setUngroupedIndex(ungroupedIndex);
+        item->tab->setGroupId(groupId);
+        item->tab->setGroupMuted(group->muted, false);
+    }
+}
+
+void Notebook::finishRestoringTabGroups()
+{
+    this->ensureUngroupedOrder();
+    this->normalizeTabGroups();
+    for (auto it = this->tabGroups_.begin(); it != this->tabGroups_.end();)
+    {
+        if (this->tabGroupMembers((*it)->id).isEmpty())
+        {
+            removeTabGroupIcon((*it)->id);
+            (*it)->header->deleteLater();
+            it = this->tabGroups_.erase(it);
+        }
+        else
+        {
+            for (auto *member : this->tabGroupMembers((*it)->id))
+            {
+                member->tab->setGroupMuted((*it)->muted, false);
+            }
+            this->updateTabGroupHeader(**it);
+            ++it;
+        }
+    }
+    this->updateGroupButtonVisibility();
+    this->refresh();
+}
+
+void Notebook::updateGroupButtonVisibility()
+{
+    const bool canCreate = this->showTabs_ && this->allowUserTabManagement_ &&
+                           !this->lockNotebookLayout_ &&
+                           this->items_.size() >= 2 &&
+                           this->tabGroups_.size() < MAX_TAB_GROUPS;
+    const bool visible = this->showAddButton_ && canCreate &&
+                         getSettings()->showTabGroupButton.getValue();
+    if (this->newTabGroupAction_)
+    {
+        this->newTabGroupAction_->setEnabled(canCreate);
+    }
+    if (this->groupButton_->isHidden() == visible)
+    {
+        this->groupButton_->setHidden(!visible);
+        this->refresh();
+    }
 }
 
 bool Notebook::getAllowUserTabManagement() const
@@ -613,6 +2245,7 @@ bool Notebook::getAllowUserTabManagement() const
 void Notebook::setAllowUserTabManagement(bool value)
 {
     this->allowUserTabManagement_ = value;
+    this->updateGroupButtonVisibility();
 }
 
 bool Notebook::getShowTabs() const
@@ -626,8 +2259,6 @@ void Notebook::setShowTabs(bool value)
 
     this->setShowAddButton(value);
     this->performLayout();
-
-    this->updateTabVisibility();
 
     // show a popup upon hiding tabs
     if (!value && getSettings()->informOnTabVisibilityToggle.getValue())
@@ -670,6 +2301,7 @@ void Notebook::showTabVisibilityInfoPopup()
 
     msgBox.setDefaultButton(QMessageBox::Ok);
 
+    installMoltorinoDialogTheme(&msgBox);
     msgBox.exec();
 
     if (msgBox.clickedButton() == dsaButton)
@@ -687,15 +2319,6 @@ void Notebook::refresh()
     }
 
     this->performLayout();
-    this->updateTabVisibility();
-}
-
-void Notebook::updateTabVisibility()
-{
-    for (auto &item : this->items_)
-    {
-        item.tab->setVisible(this->shouldShowTab(item.tab));
-    }
 }
 
 bool Notebook::getShowAddButton() const
@@ -708,6 +2331,7 @@ void Notebook::setShowAddButton(bool value)
     this->showAddButton_ = value;
 
     this->addButton_->setHidden(!value);
+    this->updateGroupButtonVisibility();
 
     this->refresh();
 }
@@ -716,6 +2340,7 @@ void Notebook::resizeAddButton()
 {
     int h = static_cast<int>((NOTEBOOK_TAB_HEIGHT - 1) * this->scale());
     this->addButton_->setFixedSize(h, h);
+    this->groupButton_->setFixedSize(h, h);
 }
 
 void Notebook::scaleChangedEvent(float /*scale*/)
@@ -726,6 +2351,10 @@ void Notebook::scaleChangedEvent(float /*scale*/)
     for (auto &i : this->items_)
     {
         i.tab->updateSize();
+    }
+    for (auto &group : this->tabGroups_)
+    {
+        group->header->updateSize();
     }
     this->refreshPaused_ = false;
     if (this->refreshRequested_)
@@ -742,18 +2371,88 @@ void Notebook::resizeEvent(QResizeEvent *)
 void Notebook::performLayout(bool animated)
 {
     std::vector<Item> filteredItems;
-    filteredItems.reserve(this->items_.size());
-    if (this->tabVisibilityFilter_)
+    filteredItems.reserve(this->items_.size() + this->tabGroups_.size());
+
+    QHash<QString, QList<Item *>> membersByGroup;
+    QHash<QString, TabGroup *> groupsById;
+    for (auto &group : this->tabGroups_)
     {
-        std::copy_if(this->items_.begin(), this->items_.end(),
-                     std::back_inserter(filteredItems),
-                     [this](const auto &item) {
-                         return this->tabVisibilityFilter_(item.tab);
-                     });
+        groupsById.insert(group->id, group.get());
     }
-    else
+    for (auto &item : this->items_)
     {
-        filteredItems.assign(this->items_.begin(), this->items_.end());
+        if (!item.tab->groupId().isEmpty() &&
+            groupsById.contains(item.tab->groupId()))
+        {
+            membersByGroup[item.tab->groupId()].push_back(&item);
+        }
+    }
+
+    QSet<QString> emittedGroups;
+    for (auto &item : this->items_)
+    {
+        const auto groupId = item.tab->groupId();
+        auto *group = groupsById.value(groupId, nullptr);
+        if (groupId.isEmpty() || !group)
+        {
+            if (this->tabPassesVisibilityFilter(item.tab))
+            {
+                filteredItems.push_back(item);
+            }
+            continue;
+        }
+
+        if (emittedGroups.contains(groupId))
+        {
+            continue;
+        }
+        emittedGroups.insert(groupId);
+
+        const auto &members = membersByGroup[groupId];
+        const auto hasVisibleMember =
+            std::ranges::any_of(members, [this](const auto *member) {
+                return this->tabPassesVisibilityFilter(member->tab);
+            });
+        if (!hasVisibleMember)
+        {
+            continue;
+        }
+
+        this->updateTabGroupHeader(*group, members);
+        filteredItems.push_back({.tab = group->header});
+        if (!group->collapsed)
+        {
+            for (const auto *member : members)
+            {
+                if (this->tabPassesVisibilityFilter(member->tab))
+                {
+                    filteredItems.push_back(*member);
+                }
+            }
+        }
+    }
+
+    QSet<NotebookTab *> displayedTabs;
+    displayedTabs.reserve(static_cast<qsizetype>(filteredItems.size()));
+    for (auto &item : filteredItems)
+    {
+        displayedTabs.insert(item.tab);
+    }
+    for (auto &item : this->items_)
+    {
+        item.tab->setVisible(this->showTabs_ &&
+                             displayedTabs.contains(item.tab));
+    }
+    for (auto &group : this->tabGroups_)
+    {
+        group->header->setVisible(this->showTabs_ &&
+                                  displayedTabs.contains(group->header));
+    }
+
+    for (std::size_t i = 0; i < filteredItems.size(); ++i)
+    {
+        filteredItems[i].tab->setVisibleEdgeFlags(
+            i == 0, i + 1 == filteredItems.size());
     }
 
     const auto scale = this->scale();
@@ -765,7 +2464,8 @@ void Notebook::performLayout(bool animated)
         .scale = scale,
         .tabHeight = tabHeight,
         .minimumTabAreaSpace = static_cast<int>(tabHeight * 0.5),
-        .addButtonWidth = this->showAddButton_ ? tabHeight : 0,
+        .addButtonWidth = (this->addButton_->isHidden() ? 0 : tabHeight) +
+                          (this->groupButton_->isHidden() ? 0 : tabHeight),
         .lineThickness = static_cast<int>(2 * scale),
         .tabSpacer = std::max(1, static_cast<int>(scale)),
         .buttonWidth = tabHeight,
@@ -786,12 +2486,16 @@ void Notebook::performLayout(bool animated)
     if (this->showTabs_)
     {
         // raise elements
-        for (auto &i : this->items_)
+        for (auto &i : filteredItems)
         {
             i.tab->raise();
         }
 
-        if (this->showAddButton_)
+        if (!this->groupButton_->isHidden())
+        {
+            this->groupButton_->raise();
+        }
+        if (!this->addButton_->isHidden())
         {
             this->addButton_->raise();
         }
@@ -831,14 +2535,25 @@ void Notebook::performHorizontalLayout(const LayoutContext &ctx, bool animated)
         auto *firstInBottomRow =
             ctx.items.empty() ? nullptr : &ctx.items.front();
 
-        for (auto &item : ctx.items)
+        for (std::size_t itemIndex = 0; itemIndex < ctx.items.size();
+             ++itemIndex)
         {
+            auto &item = ctx.items[itemIndex];
             /// Break line if element doesn't fit.
-            auto isFirst = &item == &ctx.items.front();
-            auto isLast = &item == &ctx.items.back();
+            auto isFirst = itemIndex == 0;
+            auto isLast = itemIndex + 1 == ctx.items.size();
+
+            auto requiredWidth = item.tab->width();
+            if (item.tab->role() == NotebookTab::Role::GroupHeader &&
+                itemIndex + 1 < ctx.items.size() &&
+                ctx.items[itemIndex + 1].tab->groupId() == item.tab->groupId())
+            {
+                requiredWidth +=
+                    ctx.tabSpacer + ctx.items[itemIndex + 1].tab->width();
+            }
 
             auto fitsInLine = ((isLast ? ctx.addButtonWidth : 0) + x +
-                               item.tab->width()) <= this->width();
+                               requiredWidth) <= this->width();
 
             if (!isFirst && !fitsInLine)
             {
@@ -865,7 +2580,12 @@ void Notebook::performHorizontalLayout(const LayoutContext &ctx, bool animated)
         }
 
         // move misc buttons
-        if (this->showAddButton_)
+        if (!this->groupButton_->isHidden())
+        {
+            this->groupButton_->move(x, y);
+            x += this->groupButton_->width();
+        }
+        if (!this->addButton_->isHidden())
         {
             this->addButton_->move(x, y);
         }
@@ -987,7 +2707,18 @@ void Notebook::performVerticalLayout(const LayoutContext &ctx, bool animated)
     {
         return;
     }
-    int count = ctx.items.size() + (this->showAddButton_ ? 1 : 0);
+    QList<DrawnButton *> endButtons;
+    if (!this->groupButton_->isHidden())
+    {
+        endButtons.push_back(this->groupButton_);
+    }
+    if (!this->addButton_->isHidden())
+    {
+        endButtons.push_back(this->addButton_);
+    }
+
+    const auto tabCount = static_cast<int>(ctx.items.size());
+    const int count = tabCount + endButtons.size();
     int columnCount = ceil((float)count / tabsPerColumn);
 
     // only add width of all the tabs if they are not hidden
@@ -997,21 +2728,21 @@ void Notebook::performVerticalLayout(const LayoutContext &ctx, bool animated)
         {
             bool isLastColumn = col == columnCount - 1;
             auto largestWidth = 0;
-            int tabStart = col * tabsPerColumn;
-            int tabEnd =
-                std::min(static_cast<size_t>((col + 1) * tabsPerColumn),
-                         ctx.items.size());
+            const int itemStart = col * tabsPerColumn;
+            const int itemEnd = std::min((col + 1) * tabsPerColumn, count);
 
-            for (int i = tabStart; i < tabEnd; i++)
+            for (int i = itemStart; i < itemEnd; i++)
             {
-                largestWidth =
-                    std::max(ctx.items[i].tab->normalTabWidth(), largestWidth);
-            }
-
-            if (isLastColumn && this->showAddButton_)
-            {
-                largestWidth =
-                    std::max(largestWidth, this->addButton_->width());
+                if (i < tabCount)
+                {
+                    largestWidth = std::max(ctx.items[i].tab->normalTabWidth(),
+                                            largestWidth);
+                }
+                else
+                {
+                    largestWidth = std::max(largestWidth,
+                                            endButtons[i - tabCount]->width());
+                }
             }
 
             if (isLastColumn)
@@ -1034,20 +2765,22 @@ void Notebook::performVerticalLayout(const LayoutContext &ctx, bool animated)
                 x -= largestWidth + ctx.lineThickness;
             }
 
-            for (int i = tabStart; i < tabEnd; i++)
+            for (int i = itemStart; i < itemEnd; i++)
             {
-                auto item = ctx.items[i];
+                if (i < tabCount)
+                {
+                    auto item = ctx.items[i];
 
-                /// Layout tab
-                item.tab->growWidth(largestWidth);
-                item.tab->moveAnimated(QPoint(x, y), animated);
-                item.tab->setInLastRow(isLastColumn);
+                    /// Layout tab
+                    item.tab->growWidth(largestWidth);
+                    item.tab->moveAnimated(QPoint(x, y), animated);
+                    item.tab->setInLastRow(isLastColumn);
+                }
+                else
+                {
+                    endButtons[i - tabCount]->move(x, y);
+                }
                 y += ctx.tabHeight + ctx.tabSpacer;
-            }
-
-            if (isLastColumn && this->showAddButton_)
-            {
-                this->addButton_->move(x, y);
             }
 
             if (!isRight)
@@ -1135,6 +2868,11 @@ void Notebook::setTabLocation(NotebookTabLocation location)
             item.tab->setTabLocation(location);
         }
 
+        for (const auto &group : this->tabGroups_)
+        {
+            group->header->setTabLocation(location);
+        }
+
         this->performLayout();
     }
 }
@@ -1184,14 +2922,37 @@ bool Notebook::isNotebookLayoutLocked() const
 
 void Notebook::setLockNotebookLayout(bool value)
 {
+    if (this->lockNotebookLayout_ == value)
+    {
+        return;
+    }
+
     this->lockNotebookLayout_ = value;
     this->lockNotebookLayoutAction_->setChecked(value);
     getSettings()->lockNotebookLayout.setValue(value);
+    this->updateGroupButtonVisibility();
+
+    this->refreshPaused_ = true;
+    this->refreshRequested_ = false;
+    for (auto &item : this->items_)
+    {
+        if (item.tab)
+        {
+            item.tab->tabSizeChanged();
+        }
+    }
+    this->refreshPaused_ = false;
+    this->refreshRequested_ = false;
+    this->performLayout();
 }
 
-void Notebook::addNotebookActionsToMenu(QMenu *menu)
+void Notebook::addNotebookActionsToMenu(QMenu *menu, bool includeNewGroupAction)
 {
     menu->addAction(this->lockNotebookLayoutAction_);
+    if (includeNewGroupAction)
+    {
+        menu->addAction(this->newTabGroupAction_);
+    }
 
     menu->addAction(this->toggleTopMostAction_);
 }
@@ -1235,7 +2996,6 @@ void Notebook::setTabVisibilityFilter(TabVisibilityFilter filter)
 
     this->tabVisibilityFilter_ = std::move(filter);
     this->performLayout();
-    this->updateTabVisibility();
 }
 
 bool Notebook::shouldShowTab(const NotebookTab *tab) const
@@ -1257,11 +3017,73 @@ void Notebook::sortTabsAlphabetically()
 {
     assert(!this->isNotebookLayoutLocked() &&
            "sortTabsAlphabetically called while notebook layout is locked");
-    std::ranges::sort(this->items_, [](const Item &a, const Item &b) {
-        const QString &lhs = a.tab->getTitle();
-        const QString &rhs = b.tab->getTitle();
-        return lhs.compare(rhs, Qt::CaseInsensitive) < 0;
-    });
+
+    QHash<QString, int> memberCounts;
+    for (const auto &item : this->items_)
+    {
+        if (!item.tab->groupId().isEmpty())
+        {
+            ++memberCounts[item.tab->groupId()];
+        }
+    }
+    QHash<QString, QString> groupSortKeys;
+    for (const auto &group : this->tabGroups_)
+    {
+        groupSortKeys.insert(
+            group->id,
+            this->tabGroupDisplayName(*group, memberCounts.value(group->id)));
+    }
+
+    struct SortBlock {
+        QString title;
+        QList<Item> items;
+    };
+
+    std::vector<SortBlock> blocks;
+    blocks.reserve(this->items_.size());
+    QSet<QString> emittedGroups;
+    for (const auto &item : this->items_)
+    {
+        const auto groupId = item.tab->groupId();
+        if (groupId.isEmpty())
+        {
+            blocks.push_back({item.tab->getTitle(), {item}});
+            continue;
+        }
+        if (emittedGroups.contains(groupId))
+        {
+            continue;
+        }
+        emittedGroups.insert(groupId);
+
+        SortBlock block{.title = groupSortKeys.value(groupId)};
+        for (const auto &candidate : this->items_)
+        {
+            if (candidate.tab->groupId() == groupId)
+            {
+                block.items.push_back(candidate);
+            }
+        }
+        std::ranges::stable_sort(block.items, [](const Item &a, const Item &b) {
+            return a.tab->getTitle().compare(b.tab->getTitle(),
+                                             Qt::CaseInsensitive) < 0;
+        });
+        blocks.push_back(std::move(block));
+    }
+
+    std::ranges::stable_sort(
+        blocks, [](const SortBlock &a, const SortBlock &b) {
+            return a.title.compare(b.title, Qt::CaseInsensitive) < 0;
+        });
+
+    QList<Item> sortedItems;
+    sortedItems.reserve(this->items_.size());
+    for (auto &block : blocks)
+    {
+        sortedItems.append(std::move(block.items));
+    }
+    this->items_ = std::move(sortedItems);
+    this->syncUngroupedOrderToItems();
 
     getApp()->getWindows()->queueSave();
     this->performLayout(true);
@@ -1363,7 +3185,7 @@ SplitNotebook::SplitNotebook(Window *parent)
             {
                 case NotebookTabVisibility::LiveOnly:
                     this->setTabVisibilityFilter([](const NotebookTab *tab) {
-                        return tab->isLive();
+                        return tab->isLive() || tab->isAlwaysVisible();
                     });
                     break;
                 case NotebookTabVisibility::AllTabs:
@@ -1423,9 +3245,10 @@ SplitNotebook::SplitNotebook(Window *parent)
         });
 }
 
-void SplitNotebook::addNotebookActionsToMenu(QMenu *menu)
+void SplitNotebook::addNotebookActionsToMenu(QMenu *menu,
+                                             bool includeNewGroupAction)
 {
-    Notebook::addNotebookActionsToMenu(menu);
+    Notebook::addNotebookActionsToMenu(menu, includeNewGroupAction);
 
     menu->addAction(this->sortTabsAlphabeticallyAction_);
 
@@ -1641,6 +3464,7 @@ void SplitNotebook::select(QWidget *page, bool focusPage)
         if (split)
         {
             split->scheduleDeferredTwitchRefresh();
+            split->refreshSelectedYouTube();
         }
     }
 }

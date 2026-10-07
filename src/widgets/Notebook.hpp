@@ -9,13 +9,19 @@
 
 #include <pajlada/signals/signal.hpp>
 #include <pajlada/signals/signalholder.hpp>
+#include <QColor>
+#include <QHash>
 #include <QList>
 #include <QMenu>
 #include <QMessageBox>
+#include <QPointer>
 #include <QWidget>
 
 #include <functional>
+#include <memory>
+#include <optional>
 #include <span>
+#include <vector>
 
 namespace chatterino {
 
@@ -34,6 +40,18 @@ class Notebook : public BaseWidget
     Q_OBJECT
 
 public:
+    struct TabGroupSnapshot {
+        QString id;
+        QString name;
+        QString colorMode = QStringLiteral("theme");
+        QColor color;
+        QString icon = QStringLiteral("folder");
+        QString customIconPath;
+        bool collapsed = false;
+        bool muted = false;
+        bool openMenuOnClick = false;
+    };
+
     explicit Notebook(QWidget *parent);
     ~Notebook() override = default;
 
@@ -72,6 +90,27 @@ public:
     QWidget *tabAt(QPoint point, int &index, int maxWidth = 2000000000);
     void rearrangePage(QWidget *page, int index);
 
+    QString createTabGroup(QWidget *firstPage, QWidget *secondPage = nullptr);
+    void groupPageWith(QWidget *page, QWidget *targetPage);
+    void removePageFromTabGroup(QWidget *page);
+    void ungroupTabGroup(const QString &groupId);
+    QString pageTabGroup(QWidget *page) const;
+    void populateTabGroupMenu(QMenu *menu, QWidget *page);
+    void showTabGroupMenu(const QString &groupId, const QPoint &globalPos);
+    void activateTabGroup(const QString &groupId, const QPoint &globalPos);
+    void toggleTabGroup(const QString &groupId);
+    void moveTabGroup(const QString &groupId, int index);
+    void previewTabGroupDrop(QWidget *sourcePage, QWidget *targetPage);
+    bool commitTabGroupDrop(QWidget *sourcePage);
+    void cancelTabGroupDrop();
+    void tabStatusChanged(NotebookTab *tab);
+
+    std::vector<TabGroupSnapshot> tabGroups() const;
+    void restoreTabGroup(const TabGroupSnapshot &group);
+    void restorePageTabGroup(QWidget *page, const QString &groupId,
+                             int ungroupedIndex = -1);
+    void finishRestoringTabGroups();
+
     bool getAllowUserTabManagement() const;
     void setAllowUserTabManagement(bool value);
 
@@ -83,7 +122,8 @@ public:
     bool isNotebookLayoutLocked() const;
     virtual void setLockNotebookLayout(bool value);
 
-    virtual void addNotebookActionsToMenu(QMenu *menu);
+    virtual void addNotebookActionsToMenu(QMenu *menu,
+                                          bool includeNewGroupAction = true);
 
     void refresh();
 
@@ -97,6 +137,7 @@ protected:
     void paintEvent(QPaintEvent *) override;
 
     DrawnButton *addButton_;
+    DrawnButton *groupButton_;
 
     template <typename T>
     T *addCustomButton(auto &&...args)
@@ -127,6 +168,20 @@ protected:
     void sortTabsAlphabetically();
 
 private:
+    struct TabGroup {
+        QString id;
+        QString name;
+        QString colorMode = QStringLiteral("theme");
+        QColor color;
+        QString icon = QStringLiteral("folder");
+        QString customIconPath;
+        bool customIconDirty = false;
+        bool collapsed = false;
+        bool muted = false;
+        bool openMenuOnClick = false;
+        NotebookTab *header = nullptr;
+    };
+
     struct LayoutContext {
         int left = 0;
         int right = 0;
@@ -149,11 +204,37 @@ private:
 
     void showTabVisibilityInfoPopup();
 
-    void updateTabVisibility();
     void resizeAddButton();
 
+    void updateGroupButtonVisibility();
+    void openTabGroupEditor(const QString &groupId = {},
+                            QWidget *initialPage = nullptr);
+    void renameTabGroup(const QString &groupId);
+    void showTabGroupQuickSwitcher(const QString &groupId,
+                                   const QPoint &globalPos);
+    QString tabGroupMemberLabel(const Item &item) const;
+    bool setTabGroupCustomIcon(TabGroup &group, const QString &sourcePath);
+
+    TabGroup *findTabGroup(const QString &id);
+    const TabGroup *findTabGroup(const QString &id) const;
+    QList<Item *> tabGroupMembers(const QString &id);
+    QList<const Item *> tabGroupMembers(const QString &id) const;
+    void assignPageToTabGroup(QWidget *page, const QString &groupId,
+                              bool moveNextToGroup = true);
+    void removeTabGroup(const QString &groupId, bool keepMembers);
+    void normalizeTabGroups();
+    void ensureUngroupedOrder();
+    void restoreUngroupedOrder();
+    void updateUngroupedOrderAfterMove(QWidget *page, QWidget *targetPage,
+                                       bool afterTarget);
+    void syncUngroupedOrderToItems();
+    bool updateTabGroupHeader(TabGroup &group);
+    bool updateTabGroupHeader(TabGroup &group, const QList<Item *> &members);
+    QString tabGroupDisplayName(const TabGroup &group, int members) const;
+    bool tabPassesVisibilityFilter(const NotebookTab *tab) const;
+
     bool containsPage(QWidget *page);
-    Item *findItem(QWidget *page);
+    std::optional<Item> findItem(QWidget *page);
 
     static bool containsChild(const QObject *obj, const QObject *child);
     NotebookTab *getTabFromPage(QWidget *page);
@@ -161,6 +242,10 @@ private:
     size_t visibleButtonCount() const;
 
     QList<Item> items_;
+    std::vector<std::unique_ptr<TabGroup>> tabGroups_;
+    QPointer<QWidget> groupDropSource_;
+    QPointer<QWidget> groupDropTarget_;
+    QPointer<NotebookTab> groupDropVisual_;
     QMenu *menu_ = nullptr;
     QWidget *selectedPage_ = nullptr;
 
@@ -172,12 +257,14 @@ private:
     int lineOffset_ = 20;
     bool lockNotebookLayout_ = false;
 
+    pajlada::Signals::SignalHolder settingConnections_;
     bool refreshPaused_ = false;
     bool refreshRequested_ = false;
 
     NotebookTabLocation tabLocation_ = NotebookTabLocation::Top;
 
     QAction *lockNotebookLayoutAction_;
+    QAction *newTabGroupAction_{};
     QAction *toggleTopMostAction_;
 
     TabVisibilityFilter tabVisibilityFilter_;
@@ -195,7 +282,8 @@ public:
     void select(QWidget *page, bool focusPage = true) override;
     void themeChangedEvent() override;
 
-    void addNotebookActionsToMenu(QMenu *menu) override;
+    void addNotebookActionsToMenu(QMenu *menu,
+                                  bool includeNewGroupAction = true) override;
 
     void forEachSplit(const std::function<void(Split *)> &cb);
 

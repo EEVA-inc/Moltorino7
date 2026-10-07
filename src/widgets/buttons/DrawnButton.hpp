@@ -22,6 +22,7 @@ public:
         Plus,
 
         Kebab,
+        FolderPlus,
     };
 
     struct Options {

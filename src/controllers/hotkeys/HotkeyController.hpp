@@ -10,8 +10,10 @@
 #include <pajlada/signals/signal.hpp>
 #include <pajlada/signals/signalholder.hpp>
 
+#include <memory>
 #include <optional>
 #include <set>
+#include <vector>
 
 class QShortcut;
 
@@ -47,6 +49,12 @@ public:
     QKeySequence getDisplaySequence(
         HotkeyCategory category, const QString &action,
         const std::optional<std::vector<QString>> &arguments = {}) const;
+
+    std::vector<std::shared_ptr<Hotkey>> getHotkeys(
+        HotkeyCategory category, const QString &action,
+        const std::optional<std::vector<QString>> &arguments = {}) const;
+    int addHotkey(std::shared_ptr<Hotkey> hotkey);
+    bool removeHotkey(const QString &name);
 
     int replaceHotkey(QString oldName, std::shared_ptr<Hotkey> newHotkey);
     std::optional<HotkeyCategory> hotkeyCategoryFromName(QString categoryName);

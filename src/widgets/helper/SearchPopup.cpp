@@ -26,6 +26,9 @@
 #include <QHBoxLayout>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QScreen>
+
+#include <algorithm>
 
 namespace chatterino {
 
@@ -64,12 +67,7 @@ ChannelPtr SearchPopup::filter(const QString &text, const QString &channelName,
 }
 
 SearchPopup::SearchPopup(QWidget *parent, Split *split)
-    : BasePopup(
-          {
-              BaseWindow::DisableLayoutSave,
-              BaseWindow::BoundsCheckOnShow,
-          },
-          parent)
+    : BasePopup(BaseWindow::DisableLayoutSave, parent)
     , split_(split)
 {
     this->initLayout();
@@ -128,7 +126,7 @@ void SearchPopup::addChannel(ChannelView &channel)
         this->channelView_->setOverrideFlags(flags);
     }
 
-    this->searchChannels_.append(std::ref(channel));
+    this->searchChannels_.append(&channel);
 
     this->updateWindowTitle();
 }
@@ -137,7 +135,11 @@ void SearchPopup::goToMessage(const MessagePtr &message)
 {
     for (const auto &view : this->searchChannels_)
     {
-        const auto type = view.get().underlyingChannel()->getType();
+        if (!view)
+        {
+            continue;
+        }
+        const auto type = view->underlyingChannel()->getType();
         if (type == Channel::Type::TwitchMentions ||
             type == Channel::Type::TwitchAutomod)
         {
@@ -145,18 +147,69 @@ void SearchPopup::goToMessage(const MessagePtr &message)
             return;
         }
 
-        if (view.get().scrollToMessage(message))
+        if (view->scrollToMessage(message))
         {
             return;
         }
     }
 }
 
+ChannelView *SearchPopup::sourceViewForMessage(const MessagePtr &message) const
+{
+    ChannelView *fallback = nullptr;
+    for (const auto &view : this->searchChannels_)
+    {
+        if (!view || !view->containsMessage(message))
+        {
+            continue;
+        }
+
+        if (view->canReplyToMessage(message))
+        {
+            return view.data();
+        }
+        if (fallback == nullptr)
+        {
+            fallback = view.data();
+        }
+    }
+    return fallback;
+}
+
+bool SearchPopup::canReplyToMessage(const MessagePtr &message) const
+{
+    const auto *view = this->sourceViewForMessage(message);
+    return view != nullptr && view->canReplyToMessage(message);
+}
+
+bool SearchPopup::replyToMessage(const MessagePtr &message)
+{
+    auto *view = this->sourceViewForMessage(message);
+    if (view == nullptr || !view->replyToMessage(message))
+    {
+        return false;
+    }
+
+    this->close();
+    return true;
+}
+
+ChannelPtr SearchPopup::sourceChannelForMessage(const MessagePtr &message) const
+{
+    const auto *view = this->sourceViewForMessage(message);
+    if (view == nullptr)
+    {
+        return Channel::getEmpty();
+    }
+    return view->inferChannel(
+        *message, ChannelView::InferChannel::SourceChannelIfAvailable);
+}
+
 void SearchPopup::goToMessageId(const QString &messageId)
 {
     for (const auto &view : this->searchChannels_)
     {
-        if (view.get().scrollToMessageId(messageId))
+        if (view && view->scrollToMessageId(messageId))
         {
             return;
         }
@@ -200,6 +253,19 @@ void SearchPopup::updateWindowTitle()
 void SearchPopup::showEvent(QShowEvent *e)
 {
     this->search();
+    if (auto *parent = this->parentWidget();
+        parent != nullptr && !this->testAttribute(Qt::WA_Moved))
+    {
+        auto *owner = parent->window();
+        const auto position =
+            owner->geometry().center() - this->rect().center();
+        const auto screenOrigin =
+            owner->screen()->availableGeometry().topLeft();
+
+        this->moveTo(QPoint(std::max(position.x(), screenOrigin.x()),
+                            std::max(position.y(), screenOrigin.y())),
+                     widgets::BoundsChecking::DesiredPosition);
+    }
     BaseWindow::showEvent(e);
 }
 
@@ -242,13 +308,18 @@ std::vector<MessagePtr> SearchPopup::buildSnapshot()
     if (this->searchChannels_.length() == 1)
     {
         const auto channelPtr = this->searchChannels_.at(0);
-        return channelPtr.get().channel()->getMessageSnapshot();
+        return channelPtr ? channelPtr->channel()->getMessageSnapshot()
+                          : std::vector<MessagePtr>{};
     }
 
     auto combinedSnapshot = std::vector<std::shared_ptr<const Message>>{};
     for (auto &channel : this->searchChannels_)
     {
-        ChannelView &sharedView = channel.get();
+        if (!channel)
+        {
+            continue;
+        }
+        ChannelView &sharedView = *channel;
 
         const FilterSetPtr filterSet = sharedView.getFilterSet();
         std::vector<MessagePtr> snapshot =
@@ -319,7 +390,8 @@ void SearchPopup::initLayout()
         {
             this->channelView_ = new ChannelView(
                 this, this->split_, ChannelView::Context::Search,
-                getSettings()->scrollbackSplitLimit);
+                sanitizeScrollbackLimit(
+                    getSettings()->scrollbackSplitLimit.getValue()));
 
             layout1->addWidget(this->channelView_);
         }

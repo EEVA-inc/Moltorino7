@@ -10,17 +10,20 @@
 #include "common/QLogging.hpp"
 #include "controllers/hotkeys/HotkeyCategory.hpp"
 #include "controllers/hotkeys/HotkeyController.hpp"
+#include "controllers/recording/ChatRecordingController.hpp"
 #include "singletons/Fonts.hpp"
 #include "singletons/Settings.hpp"
 #include "singletons/Theme.hpp"
 #include "singletons/WindowManager.hpp"
 #include "util/Helpers.hpp"
 #include "widgets/dialogs/ColorPickerDialog.hpp"
+#include "widgets/dialogs/MoltorinoDialogTheme.hpp"
 #include "widgets/dialogs/SettingsDialog.hpp"
 #include "widgets/Notebook.hpp"
 #include "widgets/splits/DraggedSplit.hpp"
 #include "widgets/splits/Split.hpp"
 #include "widgets/splits/SplitContainer.hpp"
+#include "widgets/Window.hpp"
 
 #include <boost/bind/bind.hpp>
 #include <boost/container_hash/hash.hpp>
@@ -28,15 +31,22 @@
 #include <QApplication>
 #include <QDebug>
 #include <QDialogButtonBox>
+#include <QFileInfo>
 #include <QIcon>
+#include <QImageReader>
 #include <QLabel>
 #include <QLinearGradient>
 #include <QLineEdit>
 #include <QMimeData>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPixmap>
+#include <QPointer>
 
 #include <algorithm>
+#include <cmath>
+#include <numbers>
+#include <utility>
 
 namespace chatterino {
 namespace {
@@ -139,12 +149,173 @@ QColor opaqueTabColor(QColor color)
     color.setAlpha(255);
     return color;
 }
+struct GroupHeaderGeometry {
+    int edgeInset{};
+    int iconSize{};
+    int iconGap{};
+    int arrowInset{};
+    int arrowSize{};
+    int statusStep{};
+    int trailing{};
+
+    int textLeft(bool hasIcon) const
+    {
+        return this->edgeInset + (hasIcon ? this->iconSize + this->iconGap : 0);
+    }
+};
+
+GroupHeaderGeometry groupHeaderGeometry(float scale, int statusCount)
+{
+    GroupHeaderGeometry result{
+        .edgeInset = std::max(2, static_cast<int>(std::round(5 * scale))),
+        .iconSize = std::max(5, static_cast<int>(std::round(11 * scale))),
+        .iconGap = std::max(1, static_cast<int>(std::round(3 * scale))),
+        .arrowInset = std::max(4, static_cast<int>(std::round(8 * scale))),
+        .arrowSize = std::max(1, static_cast<int>(std::round(3 * scale))),
+        .statusStep = std::max(4, static_cast<int>(std::round(9 * scale))),
+    };
+    const auto contentGap =
+        std::max(1, static_cast<int>(std::round(3 * scale)));
+    result.trailing = result.arrowInset + result.arrowSize + contentGap +
+                      statusCount * result.statusStep;
+    return result;
+}
+
+int groupHeaderStatusCount(bool selected, HighlightState highlightState)
+{
+    return selected && highlightState != HighlightState::None ? 1 : 0;
+}
+
+QImage trimTransparentMargins(QImage image)
+{
+    if (image.isNull() || !image.hasAlphaChannel())
+    {
+        return image;
+    }
+
+    image = image.convertToFormat(QImage::Format_ARGB32);
+    auto left = image.width();
+    auto top = image.height();
+    auto right = -1;
+    auto bottom = -1;
+    for (auto y = 0; y < image.height(); ++y)
+    {
+        const auto *line =
+            reinterpret_cast<const QRgb *>(image.constScanLine(y));
+        for (auto x = 0; x < image.width(); ++x)
+        {
+            if (qAlpha(line[x]) <= 8)
+            {
+                continue;
+            }
+            left = std::min(left, x);
+            top = std::min(top, y);
+            right = std::max(right, x);
+            bottom = std::max(bottom, y);
+        }
+    }
+
+    if (right < left || bottom < top)
+    {
+        return image;
+    }
+
+    const QRect content(left, top, right - left + 1, bottom - top + 1);
+    return content == image.rect() ? image : image.copy(content);
+}
+
+QPainterPath tabBackgroundPath(const QRectF &rect, NotebookTabLocation location,
+                               qreal radius, bool roundStart, bool roundEnd)
+{
+    if (location == NotebookTabLocation::Top)
+    {
+        return themeTopTabPath(rect, radius, roundStart, roundEnd);
+    }
+
+    QPainterPath path;
+    if (radius <= 0 || (!roundStart && !roundEnd))
+    {
+        path.addRect(rect);
+        return path;
+    }
+
+    const auto left = rect.left();
+    const auto right = rect.right();
+    const auto top = rect.top();
+    const auto bottom = rect.bottom();
+
+    const auto shoulder = themeTabCornerShoulder(radius, rect.height());
+    constexpr qreal K = 0.58;
+    switch (location)
+    {
+        case NotebookTabLocation::Top:
+            break;
+        case NotebookTabLocation::Bottom:
+            path.moveTo(left, top);
+            path.lineTo(left, roundStart ? bottom - shoulder : bottom);
+            if (roundStart)
+            {
+                path.cubicTo(left, bottom - shoulder * (1.0 - K),
+                             left + radius * (1.0 - K), bottom, left + radius,
+                             bottom);
+            }
+            path.lineTo(roundEnd ? right - radius : right, bottom);
+            if (roundEnd)
+            {
+                path.cubicTo(right - radius * (1.0 - K), bottom, right,
+                             bottom - shoulder * (1.0 - K), right,
+                             bottom - shoulder);
+            }
+            path.lineTo(right, top);
+            break;
+        case NotebookTabLocation::Left:
+            path.moveTo(right, top);
+            path.lineTo(roundStart ? left + shoulder : left, top);
+            if (roundStart)
+            {
+                path.cubicTo(left + shoulder * (1.0 - K), top, left,
+                             top + radius * (1.0 - K), left, top + radius);
+            }
+            path.lineTo(left, roundEnd ? bottom - radius : bottom);
+            if (roundEnd)
+            {
+                path.cubicTo(left, bottom - radius * (1.0 - K),
+                             left + shoulder * (1.0 - K), bottom,
+                             left + shoulder, bottom);
+            }
+            path.lineTo(right, bottom);
+            break;
+        case NotebookTabLocation::Right:
+            path.moveTo(left, top);
+            path.lineTo(roundStart ? right - shoulder : right, top);
+            if (roundStart)
+            {
+                path.cubicTo(right - shoulder * (1.0 - K), top, right,
+                             top + radius * (1.0 - K), right, top + radius);
+            }
+            path.lineTo(right, roundEnd ? bottom - radius : bottom);
+            if (roundEnd)
+            {
+                path.cubicTo(right, bottom - radius * (1.0 - K),
+                             right - shoulder * (1.0 - K), bottom,
+                             right - shoulder, bottom);
+            }
+            path.lineTo(left, bottom);
+            break;
+    }
+    path.closeSubpath();
+    return path;
+}
 }  // namespace
 
-NotebookTab::NotebookTab(Notebook *notebook)
+QPainterPath groupIconPath(const QString &icon, const QRectF &rect);
+QPixmap loadGroupIconPixmap(const QString &path);
+
+NotebookTab::NotebookTab(Notebook *notebook, Role role)
     : Button(notebook)
     , positionChangedAnimation_(this, "pos")
     , notebook_(notebook)
+    , role_(role)
     , menu_(this)
 {
     this->setContentCacheEnabled(false);
@@ -154,6 +325,16 @@ NotebookTab::NotebookTab(Notebook *notebook)
         QEasingCurve(QEasingCurve::InCubic));
 
     getSettings()->showTabCloseButton.connect(
+        [this] {
+            this->tabSizeChanged();
+        },
+        this->managedConnections_);
+    getSettings()->hideTabCloseButtonWhenLocked.connect(
+        [this] {
+            this->tabSizeChanged();
+        },
+        this->managedConnections_);
+    getSettings()->keepTabWidthWhenLocked.connect(
         [this] {
             this->tabSizeChanged();
         },
@@ -168,6 +349,11 @@ NotebookTab::NotebookTab(Notebook *notebook)
             this->update();
         },
         this->managedConnections_);
+    getSettings()->thinTabLines.connect(
+        [this] {
+            this->update();
+        },
+        this->managedConnections_);
     getSettings()->colorTabHighlightsByMessage.connect(
         [this](auto, auto) {
             this->update();
@@ -176,9 +362,39 @@ NotebookTab::NotebookTab(Notebook *notebook)
 
     this->setMouseTracking(true);
 
+    if (this->role_ == Role::GroupHeader)
+    {
+        this->setToolTip(
+            "Click to expand or collapse this group. Right click for more "
+            "options.");
+        return;
+    }
+
     this->menu_.addAction("Rename Tab", [this]() {
         this->showRenameDialog();
     });
+
+    if (auto *recordings = getApp()->getChatRecordings())
+    {
+        auto *action =
+            this->menu_.addAction("Record tab", this, [this, recordings] {
+                recordings->toggle(dynamic_cast<SplitContainer *>(this->page));
+            });
+        connect(
+            &this->menu_, &QMenu::aboutToShow, this,
+            [this, recordings, action] {
+                auto *tab = dynamic_cast<SplitContainer *>(this->page);
+                const bool active = recordings->isActive(tab);
+                action->setText(active ? "Stop tab recording" : "Record tab");
+                action->setEnabled(active ? recordings->status(tab) != "Saving"
+                                          : recordings->canStart(tab));
+            });
+        connect(recordings, &ChatRecordingController::stateChanged, this,
+                [this] {
+                    this->updateSize();
+                    this->update();
+                });
+    }
 
     // XXX: this doesn't update after changing hotkeys
 
@@ -213,6 +429,21 @@ NotebookTab::NotebookTab(Notebook *notebook)
     this->menu_.addAction("Duplicate Tab", [this]() {
         this->notebook_->duplicatePage(this->page);
     });
+
+    this->tabGroupMenu_ = this->menu_.addMenu("Tab group");
+    QObject::connect(this->tabGroupMenu_, &QMenu::aboutToShow, this, [this] {
+        this->notebook_->populateTabGroupMenu(this->tabGroupMenu_, this->page);
+    });
+
+    this->alwaysVisibleAction_ = new QAction("Always visible", &this->menu_);
+    this->alwaysVisibleAction_->setCheckable(true);
+    this->alwaysVisibleAction_->setToolTip(
+        "Keep this tab visible when Only show live tabs is enabled.");
+    QObject::connect(this->alwaysVisibleAction_, &QAction::toggled, this,
+                     [this](bool checked) {
+                         this->setAlwaysVisible(checked);
+                     });
+    this->menu_.addAction(this->alwaysVisibleAction_);
 
     this->highlightNewMessagesAction_ =
         new QAction("Mark Tab as Unread on New Messages", &this->menu_);
@@ -274,7 +505,7 @@ NotebookTab::NotebookTab(Notebook *notebook)
 
     this->menu_.addSeparator();
 
-    this->notebook_->addNotebookActionsToMenu(&this->menu_);
+    this->notebook_->addNotebookActionsToMenu(&this->menu_, false);
 }
 
 void NotebookTab::recreateCloseMultipleTabsMenu(
@@ -452,7 +683,8 @@ void NotebookTab::recreateCloseMultipleTabsMenu(
 
 void NotebookTab::showRenameDialog()
 {
-    auto *dialog = new QDialog(this);
+    const QPointer<NotebookTab> self(this);
+    QPointer<QDialog> dialog = new QDialog(this);
 
     auto *vbox = new QVBoxLayout;
 
@@ -490,12 +722,19 @@ void NotebookTab::showRenameDialog()
         Qt::Dialog | Qt::MSWindowsFixedSizeDialogHint);
 
     dialog->setWindowTitle("Rename Tab");
+    installMoltorinoDialogTheme(dialog);
 
-    if (dialog->exec() == QDialog::Accepted)
+    const auto result = dialog->exec();
+    if (!self || !dialog)
+    {
+        return;
+    }
+    if (result == QDialog::Accepted)
     {
         QString newTitle = lineEdit->text();
         this->setCustomTitle(newTitle);
     }
+    delete dialog;
 }
 
 void NotebookTab::themeChangedEvent()
@@ -533,7 +772,16 @@ int NotebookTab::normalTabWidthForHeight(int height) const
         getApp()->getFonts()->getFontMetrics(FontStyle::UiTabs, scale);
 
     float compactDivider = getCompactDivider(getSettings()->tabStyle);
-    if (this->hasXButton())
+    if (this->role_ == Role::GroupHeader)
+    {
+        const auto hasIcon = this->groupIcon_ != "none";
+        const auto statusCount =
+            groupHeaderStatusCount(this->selected_, this->highlightState_);
+        const auto geometry = groupHeaderGeometry(scale, statusCount);
+        width = metrics.horizontalAdvance(this->getTitle()) +
+                geometry.textLeft(hasIcon) + geometry.trailing;
+    }
+    else if (this->reservesXButtonSpace())
     {
         width = static_cast<int>(metrics.horizontalAdvance(this->getTitle()) +
                                  (32 / compactDivider * scale));
@@ -544,13 +792,24 @@ int NotebookTab::normalTabWidthForHeight(int height) const
                                  (16 / compactDivider * scale));
     }
 
+    if (this->role_ == Role::Page)
+    {
+        if (auto *recordings = getApp()->getChatRecordings();
+            recordings &&
+            recordings->isActive(dynamic_cast<SplitContainer *>(this->page)))
+        {
+            width += static_cast<int>(12 * scale);
+        }
+    }
+
     if (static_cast<float>(height) > 150 * scale)
     {
         width = height;
     }
     else
     {
-        width = std::clamp(width, height, static_cast<int>(150 * scale));
+        const auto maximum = this->role_ == Role::GroupHeader ? 260 : 150;
+        width = std::clamp(width, height, static_cast<int>(maximum * scale));
     }
 
     return width;
@@ -656,6 +915,307 @@ const QString &NotebookTab::getTitle() const
                                         : this->customTitle_;
 }
 
+NotebookTab::Role NotebookTab::role() const
+{
+    return this->role_;
+}
+
+const QString &NotebookTab::groupId() const
+{
+    return this->groupId_;
+}
+
+void NotebookTab::setGroupId(const QString &groupId)
+{
+    this->groupId_ = groupId;
+}
+
+bool NotebookTab::setGroupHeaderState(
+    const QString &title, int memberCount, bool collapsed, bool selected,
+    bool live, HighlightState highlightState, const QString &colorMode,
+    const QColor &color, const QString &icon, const QString &customIconPath,
+    bool muted, bool openMenuOnClick, bool forceCustomIconReload)
+{
+    assert(this->role_ == Role::GroupHeader);
+
+    const auto normalizedColorMode =
+        colorMode == "none" || colorMode == "custom" ? colorMode
+                                                     : QStringLiteral("theme");
+    const auto normalizedIcon = icon == "star" || icon == "heart" ||
+                                        icon == "bell" || icon == "shield" ||
+                                        icon == "none" || icon == "custom"
+                                    ? icon
+                                    : QStringLiteral("folder");
+    const auto oldStatusCount =
+        groupHeaderStatusCount(this->selected_, this->highlightState_);
+    const auto newStatusCount =
+        groupHeaderStatusCount(selected, highlightState);
+    const bool iconChanged = forceCustomIconReload ||
+                             this->groupIcon_ != normalizedIcon ||
+                             this->groupCustomIconPath_ != customIconPath;
+    const bool sizeChanged = this->defaultTitle_ != title ||
+                             this->groupMemberCount_ != memberCount ||
+                             this->groupIcon_ != normalizedIcon ||
+                             oldStatusCount != newStatusCount;
+    this->defaultTitle_ = title;
+    this->groupMemberCount_ = memberCount;
+    this->groupCollapsed_ = collapsed;
+    this->groupMuted_ = muted;
+    this->selected_ = selected;
+    this->isLive_ = live;
+    this->isRerun_ = false;
+
+    this->highlightState_ = highlightState;
+    this->groupColorMode_ = normalizedColorMode;
+    this->customTabColor_ =
+        normalizedColorMode == "custom" && color.isValid() ? color : QColor();
+    this->groupIcon_ = normalizedIcon;
+    this->groupCustomIconPath_ = customIconPath;
+    if (iconChanged)
+    {
+        this->groupCustomIcon_ = normalizedIcon == "custom"
+                                     ? loadGroupIconPixmap(customIconPath)
+                                     : QPixmap();
+    }
+    this->setAccessibleName(title);
+    const auto clickHint =
+        openMenuOnClick ? QStringLiteral("Click to open the tab list.")
+                        : QStringLiteral("Click to %1 the group.")
+                              .arg(collapsed ? QStringLiteral("expand")
+                                             : QStringLiteral("collapse"));
+    const auto tabCount = memberCount == 1
+                              ? QStringLiteral("1 tab")
+                              : QStringLiteral("%1 tabs").arg(memberCount);
+    auto toolTip = QStringLiteral("%1 (%2)\n%3\nRight click for more options.")
+                       .arg(title, tabCount, clickHint);
+    if (muted)
+    {
+        toolTip.append(QStringLiteral("\nAlerts are muted for this group."));
+    }
+    this->setToolTip(toolTip);
+
+    if (sizeChanged)
+    {
+        const auto height =
+            static_cast<int>(NOTEBOOK_TAB_HEIGHT * this->scale());
+        this->resize(this->normalTabWidthForHeight(height), height);
+    }
+    this->update();
+    return sizeChanged;
+}
+
+int NotebookTab::ungroupedIndex() const
+{
+    return this->ungroupedIndex_;
+}
+
+void NotebookTab::setUngroupedIndex(int index)
+{
+    this->ungroupedIndex_ = index;
+}
+
+QPainterPath groupIconPath(const QString &icon, const QRectF &rect)
+{
+    QPainterPath path;
+    const auto x = rect.left();
+    const auto y = rect.top();
+    const auto w = rect.width();
+    const auto h = rect.height();
+
+    if (icon == "folder")
+    {
+        path.addRoundedRect(QRectF(x, y + h * 0.24, w, h * 0.7), w * 0.12,
+                            w * 0.12);
+        path.addRoundedRect(
+            QRectF(x + w * 0.08, y + h * 0.08, w * 0.48, h * 0.34), w * 0.1,
+            w * 0.1);
+    }
+    else if (icon == "star")
+    {
+        constexpr auto POINTS = 10;
+        const auto center = rect.center();
+        const auto outer = std::min(w, h) * 0.48;
+        const auto inner = outer * 0.45;
+        for (int i = 0; i < POINTS; ++i)
+        {
+            const auto angle =
+                -std::numbers::pi / 2.0 + i * std::numbers::pi / 5.0;
+            const auto radius = i % 2 == 0 ? outer : inner;
+            const QPointF point(center.x() + std::cos(angle) * radius,
+                                center.y() + std::sin(angle) * radius);
+            if (i == 0)
+            {
+                path.moveTo(point);
+            }
+            else
+            {
+                path.lineTo(point);
+            }
+        }
+        path.closeSubpath();
+    }
+    else if (icon == "heart")
+    {
+        path.moveTo(x + w * 0.5, y + h * 0.92);
+        path.cubicTo(x + w * 0.34, y + h * 0.76, x + w * 0.04, y + h * 0.55,
+                     x + w * 0.08, y + h * 0.28);
+        path.cubicTo(x + w * 0.12, y + h * 0.02, x + w * 0.42, y + h * 0.03,
+                     x + w * 0.5, y + h * 0.23);
+        path.cubicTo(x + w * 0.58, y + h * 0.03, x + w * 0.88, y + h * 0.02,
+                     x + w * 0.92, y + h * 0.28);
+        path.cubicTo(x + w * 0.96, y + h * 0.55, x + w * 0.66, y + h * 0.76,
+                     x + w * 0.5, y + h * 0.92);
+    }
+    else if (icon == "bell")
+    {
+        path.moveTo(x + w * 0.18, y + h * 0.72);
+        path.cubicTo(x + w * 0.28, y + h * 0.6, x + w * 0.25, y + h * 0.42,
+                     x + w * 0.32, y + h * 0.25);
+        path.cubicTo(x + w * 0.4, y + h * 0.08, x + w * 0.6, y + h * 0.08,
+                     x + w * 0.68, y + h * 0.25);
+        path.cubicTo(x + w * 0.75, y + h * 0.42, x + w * 0.72, y + h * 0.6,
+                     x + w * 0.82, y + h * 0.72);
+        path.closeSubpath();
+        path.addEllipse(QRectF(x + w * 0.42, y + h * 0.76, w * 0.16, h * 0.14));
+    }
+    else if (icon == "shield")
+    {
+        path.moveTo(x + w * 0.5, y + h * 0.04);
+        path.lineTo(x + w * 0.88, y + h * 0.2);
+        path.lineTo(x + w * 0.82, y + h * 0.62);
+        path.cubicTo(x + w * 0.77, y + h * 0.78, x + w * 0.61, y + h * 0.9,
+                     x + w * 0.5, y + h * 0.96);
+        path.cubicTo(x + w * 0.39, y + h * 0.9, x + w * 0.23, y + h * 0.78,
+                     x + w * 0.18, y + h * 0.62);
+        path.lineTo(x + w * 0.12, y + h * 0.2);
+        path.closeSubpath();
+    }
+    return path;
+}
+
+QPixmap loadGroupIconPixmap(const QString &path)
+{
+    const QFileInfo source(path);
+    if (!source.isFile() || source.size() <= 0 ||
+        source.size() > 10 * 1024 * 1024)
+    {
+        return {};
+    }
+
+    QImageReader reader(source.absoluteFilePath());
+    reader.setAutoTransform(true);
+    const auto sourceSize = reader.size();
+    if (sourceSize.isValid() &&
+        (sourceSize.width() > 64 || sourceSize.height() > 64))
+    {
+        reader.setScaledSize(sourceSize.scaled(64, 64, Qt::KeepAspectRatio));
+    }
+    auto image = trimTransparentMargins(reader.read());
+    if (image.isNull())
+    {
+        return {};
+    }
+    if (image.width() > 64 || image.height() > 64)
+    {
+        image =
+            image.scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    }
+    return QPixmap::fromImage(std::move(image));
+}
+
+void NotebookTab::setGroupDropTarget(bool value)
+{
+    if (this->groupDropTarget_ == value)
+    {
+        return;
+    }
+    this->groupDropTarget_ = value;
+    this->update();
+}
+
+void NotebookTab::setGroupMuted(bool value, bool notifyNotebook)
+{
+    if (this->groupMuted_ == value)
+    {
+        return;
+    }
+
+    this->groupMuted_ = value;
+    if (value)
+    {
+        this->highlightSources_.clear();
+        this->highlightColor_.reset();
+        this->highlightState_ = HighlightState::None;
+    }
+    this->update();
+    if (notifyNotebook)
+    {
+        this->notebook_->tabStatusChanged(this);
+    }
+}
+
+bool NotebookTab::isGroupMuted() const
+{
+    return this->groupMuted_;
+}
+
+void NotebookTab::setVisibleEdgeFlags(bool first, bool last)
+{
+    if (this->isFirstVisible_ == first && this->isLastVisible_ == last)
+    {
+        return;
+    }
+
+    this->isFirstVisible_ = first;
+    this->isLastVisible_ = last;
+    this->update();
+}
+
+void NotebookTab::setAlwaysVisible(bool value)
+{
+    if (this->alwaysVisible_ == value)
+    {
+        return;
+    }
+
+    const bool shouldSelectAnotherTab =
+        !value && this->isSelected() && !this->isLive() &&
+        getSettings()->tabVisibility.getEnum() ==
+            NotebookTabVisibility::LiveOnly;
+
+    this->alwaysVisible_ = value;
+    if (this->alwaysVisibleAction_ != nullptr &&
+        this->alwaysVisibleAction_->isChecked() != value)
+    {
+        this->alwaysVisibleAction_->setChecked(value);
+    }
+    getApp()->getWindows()->queueSave();
+
+    if (shouldSelectAnotherTab)
+    {
+        this->notebook_->selectNextTab();
+        if (this->isSelected())
+        {
+            this->notebook_->select(nullptr);
+        }
+    }
+    this->notebook_->refresh();
+}
+
+bool NotebookTab::isAlwaysVisible() const
+{
+    return this->alwaysVisible_;
+}
+
+bool NotebookTab::reservesXButtonSpace() const
+{
+    return this->role_ == Role::Page && getSettings()->showTabCloseButton &&
+           this->notebook_->getAllowUserTabManagement() &&
+           (!this->notebook_->isNotebookLayoutLocked() ||
+            !getSettings()->hideTabCloseButtonWhenLocked ||
+            getSettings()->keepTabWidthWhenLocked);
+}
+
 void NotebookTab::titleUpdated()
 {
     // Queue up save because: Tab title changed
@@ -697,13 +1257,13 @@ void NotebookTab::newHighlightSourceAdded(const ChannelView &channelViewSource)
     this->removeHighlightSource(channelViewId);
     this->updateHighlightStateDueSourcesChange();
 
-    auto *splitNotebook = dynamic_cast<SplitNotebook *>(this->notebook_);
-    if (splitNotebook)
+    for (auto *window : getApp()->getWindows()->windows())
     {
-        for (int i = 0; i < splitNotebook->getPageCount(); ++i)
+        auto &splitNotebook = window->getNotebook();
+        for (int i = 0; i < splitNotebook.getPageCount(); ++i)
         {
             auto *splitContainer =
-                dynamic_cast<SplitContainer *>(splitNotebook->getPageAt(i));
+                dynamic_cast<SplitContainer *>(splitNotebook.getPageAt(i));
             if (splitContainer)
             {
                 auto *tab = splitContainer->getTab();
@@ -752,12 +1312,13 @@ void NotebookTab::updateHighlightStateDueSourcesChange()
         this->highlightState_ = newState;
         this->highlightColor_ = std::move(newColor);
         this->update();
+        this->notebook_->tabStatusChanged(this);
     }
 }
 
 void NotebookTab::copyHighlightStateAndSourcesFrom(const NotebookTab *sourceTab)
 {
-    if (this->isSelected())
+    if (this->isSelected() || this->groupMuted_)
     {
         assert(this->highlightSources_.empty());
         assert(this->highlightState_ == HighlightState::None);
@@ -784,6 +1345,7 @@ void NotebookTab::copyHighlightStateAndSourcesFrom(const NotebookTab *sourceTab)
 
     this->highlightState_ = sourceTab->highlightState_;
     this->update();
+    this->notebook_->tabStatusChanged(this);
 }
 
 void NotebookTab::setSelected(bool value)
@@ -792,13 +1354,13 @@ void NotebookTab::setSelected(bool value)
 
     if (value)
     {
-        auto *splitNotebook = dynamic_cast<SplitNotebook *>(this->notebook_);
-        if (splitNotebook)
+        for (auto *window : getApp()->getWindows()->windows())
         {
-            for (int i = 0; i < splitNotebook->getPageCount(); ++i)
+            auto &splitNotebook = window->getNotebook();
+            for (int i = 0; i < splitNotebook.getPageCount(); ++i)
             {
                 auto *splitContainer =
-                    dynamic_cast<SplitContainer *>(splitNotebook->getPageAt(i));
+                    dynamic_cast<SplitContainer *>(splitNotebook.getPageAt(i));
                 if (splitContainer)
                 {
                     auto *tab = splitContainer->getTab();
@@ -818,6 +1380,7 @@ void NotebookTab::setSelected(bool value)
     this->highlightState_ = HighlightState::None;
 
     this->update();
+    this->notebook_->tabStatusChanged(this);
 }
 
 void NotebookTab::setInLastRow(bool value)
@@ -844,6 +1407,7 @@ bool NotebookTab::setRerun(bool isRerun)
     {
         this->isRerun_ = isRerun;
         this->update();
+        this->notebook_->tabStatusChanged(this);
         return true;
     }
 
@@ -856,6 +1420,7 @@ bool NotebookTab::setLive(bool isLive)
     {
         this->isLive_ = isLive;
         this->update();
+        this->notebook_->tabStatusChanged(this);
         return true;
     }
 
@@ -874,7 +1439,7 @@ HighlightState NotebookTab::highlightState() const
 
 void NotebookTab::setHighlightState(HighlightState newHighlightStyle)
 {
-    if (this->isSelected())
+    if (this->isSelected() || this->groupMuted_)
     {
         assert(this->highlightSources_.empty());
         assert(this->highlightState_ == HighlightState::None);
@@ -898,6 +1463,7 @@ void NotebookTab::setHighlightState(HighlightState newHighlightStyle)
 
     this->highlightState_ = newHighlightStyle;
     this->update();
+    this->notebook_->tabStatusChanged(this);
 }
 
 void NotebookTab::updateHighlightState(const TabHighlight &highlight,
@@ -962,17 +1528,24 @@ void NotebookTab::updateHighlightState(const TabHighlight &highlight,
 bool NotebookTab::shouldMessageHighlight(
     const ChannelView &channelViewSource) const
 {
-    auto *visibleSplitContainer =
-        dynamic_cast<SplitContainer *>(this->notebook_->getSelectedPage());
-    if (visibleSplitContainer != nullptr)
+    if (this->groupMuted_)
     {
-        const auto &visibleSplits = visibleSplitContainer->getSplits();
-        for (const auto &visibleSplit : visibleSplits)
+        return false;
+    }
+
+    for (auto *window : getApp()->getWindows()->windows())
+    {
+        auto *visibleSplitContainer = window->getNotebook().getSelectedPage();
+        if (visibleSplitContainer != nullptr)
         {
-            if (channelViewSource.getID() ==
-                visibleSplit->getChannelView().getID())
+            const auto &visibleSplits = visibleSplitContainer->getSplits();
+            for (const auto &visibleSplit : visibleSplits)
             {
-                return false;
+                if (channelViewSource.getID() ==
+                    visibleSplit->getChannelView().getID())
+                {
+                    return false;
+                }
             }
         }
     }
@@ -982,7 +1555,10 @@ bool NotebookTab::shouldMessageHighlight(
 
 void NotebookTab::setHighlightsEnabled(const bool &newVal)
 {
-    this->highlightNewMessagesAction_->setChecked(newVal);
+    if (this->highlightNewMessagesAction_)
+    {
+        this->highlightNewMessagesAction_->setChecked(newVal);
+    }
     this->highlightEnabled_ = newVal;
 }
 
@@ -998,7 +1574,11 @@ QRect NotebookTab::getDesiredRect() const
 
 void NotebookTab::tabSizeChanged()
 {
+    this->mouseDownX_ = false;
+    this->mouseOverX_ = false;
     this->updateSize();
+
+    this->notebook_->refresh();
     this->update();
 }
 
@@ -1064,7 +1644,8 @@ void NotebookTab::paintEvent(QPaintEvent *)
         (windowFocused ? colors.backgrounds.regular
                        : colors.backgrounds.unfocused);
 
-    auto selectionOffset = ceil((this->selected_ ? 0.f : 1.f) * scale);
+    const auto tabLineWidth = getSettings()->thinTabLines ? 1 : 2;
+    auto selectionOffset = ceil((this->selected_ ? 0 : tabLineWidth) * scale);
 
     // fill the tab background
     auto bgRect = this->rect();
@@ -1084,18 +1665,63 @@ void NotebookTab::paintEvent(QPaintEvent *)
             break;
     }
 
-    painter.fillRect(bgRect, tabBackground);
-
-    if (this->hasCustomTabColor())
+    const auto &appearance = this->theme->customization;
+    const auto tabRadius =
+        std::min(appearance.tabCornerRadius * scale, 10.0F * scale);
+    const bool individual = appearance.tabShape == ThemeTabShape::Individual;
+    auto shapedRect = QRectF(bgRect);
+    if (individual)
     {
-        painter.fillRect(
-            bgRect,
-            tabColorFill(this->customTabColor_, this->selected_,
-                         windowFocused));
+        const auto gap = appearance.tabSpacing * scale;
+        if (this->tabLocation_ == NotebookTabLocation::Top ||
+            this->tabLocation_ == NotebookTabLocation::Bottom)
+        {
+            shapedRect.adjust(gap / 2, 0, -gap / 2, 0);
+        }
+        else
+        {
+            shapedRect.adjust(0, gap / 2, 0, -gap / 2);
+        }
+    }
+    const auto backgroundPath =
+        tabBackgroundPath(shapedRect, this->tabLocation_, tabRadius,
+                          individual || this->isFirstVisible_,
+                          individual || this->isLastVisible_);
+    painter.setRenderHint(QPainter::Antialiasing, tabRadius > 0);
+    painter.fillPath(backgroundPath, tabBackground);
+
+    QColor groupTint;
+    if (this->role_ == Role::GroupHeader && this->groupColorMode_ == "theme")
+    {
+        groupTint = this->theme->accent;
+    }
+    else if (this->hasCustomTabColor())
+    {
+        groupTint = this->customTabColor_;
+    }
+    if (groupTint.isValid())
+    {
+        painter.fillPath(
+            backgroundPath,
+            tabColorFill(groupTint, this->selected_, windowFocused));
+    }
+
+    if (this->groupDropTarget_)
+    {
+        auto dropFill = this->theme->accent;
+        dropFill.setAlpha(48);
+        painter.fillPath(backgroundPath, dropFill);
+
+        auto dropBorder = this->theme->accent;
+        dropBorder.setAlpha(230);
+        painter.setPen(QPen(dropBorder, std::max(1.0F, 2 * scale)));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawPath(backgroundPath);
     }
 
     // draw color indicator line
-    auto lineThickness = ceil((this->selected_ ? 2.f : 1.f) * scale);
+    auto lineThickness =
+        ceil((tabLineWidth + (this->selected_ ? 1 : 0)) * scale);
     auto lineColor = this->mouseOver_ ? colors.line.hover
                                       : (windowFocused ? colors.line.regular
                                                        : colors.line.unfocused);
@@ -1127,7 +1753,14 @@ void NotebookTab::paintEvent(QPaintEvent *)
             break;
     }
 
+    painter.save();
+    painter.setClipPath(backgroundPath);
     painter.fillRect(lineRect, lineColor);
+    painter.restore();
+
+    const auto groupStatusCount =
+        groupHeaderStatusCount(this->selected_, this->highlightState_);
+    const auto groupGeometry = groupHeaderGeometry(scale, groupStatusCount);
 
     // draw live indicator
     if ((this->isLive_ || this->isRerun_) && getSettings()->showTabLive)
@@ -1158,6 +1791,26 @@ void NotebookTab::paintEvent(QPaintEvent *)
         painter.drawEllipse(liveIndicatorRect);
     }
 
+    if (this->role_ == Role::GroupHeader && this->selected_ &&
+        this->highlightState_ != HighlightState::None)
+    {
+        const bool liveDotVisible =
+            (this->isLive_ || this->isRerun_) && getSettings()->showTabLive;
+        const auto &stateColors =
+            this->highlightState_ == HighlightState::Highlighted
+                ? this->theme->tabs.highlighted
+                : this->theme->tabs.newMessage;
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(stateColors.line.regular);
+        const auto diameter = std::max(3, static_cast<int>(4 * scale));
+        const auto statusIndex = liveDotVisible ? 2 : 1;
+        const auto center = this->width() - groupGeometry.arrowInset -
+                            statusIndex * groupGeometry.statusStep;
+        const auto x = center - diameter / 2;
+        const auto y = (height - diameter) / 2;
+        painter.drawEllipse(QRect(x, y, diameter, diameter));
+    }
+
     // set the pen color
     painter.setPen(colors.text);
 
@@ -1171,22 +1824,131 @@ void NotebookTab::paintEvent(QPaintEvent *)
     // draw text
     int offset = int(scale * 4 / compactDivider);
     QRect textRect(offset, 0, this->width() - offset - offset, height);
-    translateRectForLocation(textRect, this->tabLocation_,
-                             this->selected_ ? -1 : -2);
+    if (this->role_ == Role::Page)
+    {
+        if (auto *recordings = app->getChatRecordings())
+        {
+            const auto state =
+                recordings->status(dynamic_cast<SplitContainer *>(this->page));
+            if (!state.isEmpty())
+            {
+                painter.save();
+                painter.setRenderHint(QPainter::Antialiasing);
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(state == "Recording" ? QColor("#e95762")
+                                                      : QColor("#d6a34a"));
+                painter.drawEllipse(QRectF(textRect.left() + 2 * scale,
+                                           (height - 6 * scale) / 2, 6 * scale,
+                                           6 * scale));
+                painter.restore();
+                textRect.setLeft(textRect.left() +
+                                 static_cast<int>(12 * scale));
+            }
+        }
+    }
+    const auto textPositionOffset =
+        this->role_ == Role::GroupHeader
+            ? -std::clamp(static_cast<int>(std::round(scale)) + 1, 1, 3)
+            : (this->selected_ ? -1 : -2);
+    translateRectForLocation(textRect, this->tabLocation_, textPositionOffset);
 
-    if (this->shouldDrawXButton())
+    if (this->reservesXButtonSpace() && (this->mouseOver_ || this->selected_))
     {
         textRect.setRight(textRect.right() - this->height() / 2);
     }
 
-    int width = metrics.horizontalAdvance(this->getTitle());
-    Qt::Alignment alignment = width > textRect.width()
-                                  ? Qt::AlignLeft | Qt::AlignVCenter
-                                  : Qt::AlignHCenter | Qt::AlignVCenter;
+    if (this->role_ == Role::GroupHeader)
+    {
+        const auto hasIcon = this->groupIcon_ != "none";
+        const auto iconSize = groupGeometry.iconSize;
+        const auto iconLeft = groupGeometry.edgeInset;
+        const auto centerY = textRect.center().y();
+        QRect iconRect(0, 0, iconSize, iconSize);
+        iconRect.moveCenter(QPoint(iconLeft + (iconSize - 1) / 2, centerY));
+
+        if (hasIcon)
+        {
+            if (this->groupIcon_ == "custom" &&
+                !this->groupCustomIcon_.isNull())
+            {
+                painter.save();
+                painter.setRenderHint(QPainter::SmoothPixmapTransform);
+                const auto target = this->groupCustomIcon_.size().scaled(
+                    iconRect.size(), Qt::KeepAspectRatio);
+                QRect targetRect(QPoint(), target);
+                targetRect.moveCenter(iconRect.center());
+                painter.drawPixmap(targetRect, this->groupCustomIcon_,
+                                   this->groupCustomIcon_.rect());
+                painter.restore();
+            }
+            else
+            {
+                auto icon = groupIconPath(this->groupIcon_ == "custom"
+                                              ? QStringLiteral("folder")
+                                              : this->groupIcon_,
+                                          iconRect);
+                painter.fillPath(icon, colors.text);
+            }
+
+            if (this->groupMuted_)
+            {
+                painter.save();
+                painter.setPen(QPen(tabBackground, std::max(1.0F, 1.5F * scale),
+                                    Qt::SolidLine, Qt::RoundCap));
+                painter.drawLine(
+                    iconRect.bottomLeft() +
+                        QPointF(iconSize * 0.12, -iconSize * 0.08),
+                    iconRect.topRight() +
+                        QPointF(-iconSize * 0.08, iconSize * 0.08));
+                painter.restore();
+            }
+
+            textRect.setLeft(groupGeometry.textLeft(true));
+        }
+        else
+        {
+            textRect.setLeft(groupGeometry.textLeft(false));
+        }
+        textRect.setRight(this->width() - groupGeometry.trailing - 1);
+
+        QPainterPath chevron;
+        const auto arrowX = this->width() - groupGeometry.arrowInset;
+
+        const auto arrowY = static_cast<qreal>(centerY);
+        const auto arrow = groupGeometry.arrowSize;
+        if (this->groupCollapsed_)
+        {
+            chevron.moveTo(arrowX - arrow / 2.0, arrowY - arrow);
+            chevron.lineTo(arrowX + arrow / 2.0, arrowY);
+            chevron.lineTo(arrowX - arrow / 2.0, arrowY + arrow);
+        }
+        else
+        {
+            chevron.moveTo(arrowX - arrow, arrowY - arrow / 2.0);
+            chevron.lineTo(arrowX, arrowY + arrow / 2.0);
+            chevron.lineTo(arrowX + arrow, arrowY - arrow / 2.0);
+        }
+
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(colors.text, std::max(1.0F, scale), Qt::SolidLine,
+                            Qt::RoundCap, Qt::RoundJoin));
+        painter.drawPath(chevron);
+    }
+
+    const auto displayTitle =
+        this->role_ == Role::GroupHeader
+            ? metrics.elidedText(this->getTitle(), Qt::ElideRight,
+                                 std::max(0, textRect.width()))
+            : this->getTitle();
+    int width = metrics.horizontalAdvance(displayTitle);
+    const bool alignLeft = this->role_ == Role::GroupHeader ||
+                           width > textRect.width();
+    Qt::Alignment alignment = alignLeft ? Qt::AlignLeft | Qt::AlignVCenter
+                                        : Qt::AlignHCenter | Qt::AlignVCenter;
 
     QTextOption option(alignment);
     option.setWrapMode(QTextOption::NoWrap);
-    painter.drawText(textRect, this->getTitle(), option);
+    painter.drawText(textRect, displayTitle, option);
 
     // draw close x
     if (this->shouldDrawXButton())
@@ -1248,8 +2010,9 @@ void NotebookTab::paintEvent(QPaintEvent *)
 
 bool NotebookTab::hasXButton() const
 {
-    return getSettings()->showTabCloseButton &&
-           this->notebook_->getAllowUserTabManagement();
+    return this->reservesXButtonSpace() &&
+           (!this->notebook_->isNotebookLayoutLocked() ||
+            !getSettings()->hideTabCloseButtonWhenLocked);
 }
 
 bool NotebookTab::shouldDrawXButton() const
@@ -1259,12 +2022,44 @@ bool NotebookTab::shouldDrawXButton() const
 
 void NotebookTab::mousePressEvent(QMouseEvent *event)
 {
+    if (this->role_ == Role::GroupHeader)
+    {
+        if (event->button() == Qt::LeftButton)
+        {
+            this->mouseDown_ = true;
+            this->dragMoved_ = false;
+            this->dragActive_ = false;
+            this->dragStartGlobal_ = event->globalPosition().toPoint();
+            this->update();
+        }
+        else if (event->button() == Qt::RightButton)
+        {
+            this->notebook_->showTabGroupMenu(
+                this->groupId_,
+                event->globalPosition().toPoint() + QPoint(0, 8));
+        }
+        return;
+    }
+
     if (event->button() == Qt::LeftButton)
     {
         this->mouseDown_ = true;
-        this->mouseDownX_ = this->getXRect().contains(event->pos());
+        this->dragMoved_ = false;
+        this->dragActive_ = false;
+        this->dragStartGlobal_ = event->globalPosition().toPoint();
+        this->mouseDownX_ =
+            this->hasXButton() && this->getXRect().contains(event->pos());
+        const auto canDrag = !this->mouseDownX_ &&
+                             this->notebook_->getAllowUserTabManagement() &&
+                             !this->notebook_->isNotebookLayoutLocked();
+        this->groupDragRequested_ =
+            canDrag && event->modifiers().testFlag(Qt::ShiftModifier);
+        this->selectionDeferred_ = canDrag && !this->selected_;
 
-        this->notebook_->select(this->page);
+        if (!this->selectionDeferred_)
+        {
+            this->notebook_->select(this->page);
+        }
     }
 
     this->update();
@@ -1298,7 +2093,49 @@ void NotebookTab::mousePressEvent(QMouseEvent *event)
 
 void NotebookTab::mouseReleaseEvent(QMouseEvent *event)
 {
+    if (this->role_ == Role::GroupHeader)
+    {
+        const auto toggle = event->button() == Qt::LeftButton &&
+                            this->mouseDown_ && !this->dragMoved_ &&
+                            this->rect().contains(event->pos());
+        this->mouseDown_ = false;
+        this->dragMoved_ = false;
+        this->update();
+        if (toggle)
+        {
+            this->notebook_->activateTabGroup(
+                this->groupId_,
+                this->mapToGlobal(this->rect().bottomLeft() + QPoint(0, 4)));
+        }
+        return;
+    }
+
+    const auto wasMouseDown = this->mouseDown_;
+    const auto wasDragged = this->dragMoved_;
+    const auto selectDeferredTab =
+        event->button() == Qt::LeftButton && this->selectionDeferred_ &&
+        wasMouseDown && !wasDragged && this->rect().contains(event->pos());
+    const bool grouped = event->button() == Qt::LeftButton &&
+                         this->mouseDown_ && this->dragActive_ &&
+                         this->notebook_->commitTabGroupDrop(this->page);
+    this->notebook_->cancelTabGroupDrop();
+    this->unsetCursor();
     this->mouseDown_ = false;
+    this->dragMoved_ = false;
+    this->dragActive_ = false;
+    this->groupDragRequested_ = false;
+    this->selectionDeferred_ = false;
+    if (grouped)
+    {
+        this->mouseDownX_ = false;
+        this->update();
+        return;
+    }
+
+    if (selectDeferredTab)
+    {
+        this->notebook_->select(this->page);
+    }
 
     auto removeThisPage = [this] {
         auto reply = QMessageBox::question(
@@ -1338,6 +2175,14 @@ void NotebookTab::mouseReleaseEvent(QMouseEvent *event)
 
 void NotebookTab::mouseDoubleClickEvent(QMouseEvent *event)
 {
+    if (this->role_ == Role::GroupHeader)
+    {
+        this->mouseDown_ = false;
+        this->dragMoved_ = true;
+        event->accept();
+        return;
+    }
+
     const auto canRenameTab = this->notebook_->getAllowUserTabManagement() &&
                               getSettings()->disableTabRenamingOnClick == false;
 
@@ -1372,6 +2217,11 @@ void NotebookTab::leaveEvent(QEvent *event)
 
 void NotebookTab::dragEnterEvent(QDragEnterEvent *event)
 {
+    if (this->role_ == Role::GroupHeader)
+    {
+        return;
+    }
+
     if (!event->mimeData()->hasFormat("chatterino/split"))
     {
         return;
@@ -1393,6 +2243,11 @@ void NotebookTab::dragEnterEvent(QDragEnterEvent *event)
 
 void NotebookTab::dropEvent(QDropEvent *event)
 {
+    if (this->role_ == Role::GroupHeader)
+    {
+        return;
+    }
+
     if (!event->mimeData()->hasFormat("chatterino/split"))
     {
         return;
@@ -1421,32 +2276,70 @@ void NotebookTab::dropEvent(QDropEvent *event)
 
 void NotebookTab::mouseMoveEvent(QMouseEvent *event)
 {
-    if (getSettings()->showTabCloseButton &&
-        this->notebook_->getAllowUserTabManagement())
+    const bool overX =
+        this->hasXButton() && this->getXRect().contains(event->pos());
+    if (overX != this->mouseOverX_)
     {
-        bool overX = this->getXRect().contains(event->pos());
-
-        if (overX != this->mouseOverX_)
-        {
-            // Over X state has been changed (we either left or entered it;
-            this->mouseOverX_ = overX;
-
-            this->update();
-        }
+        // Over X state has been changed (we either left or entered it;
+        this->mouseOverX_ = overX;
+        this->update();
     }
 
-    QPoint relPoint = this->mapToParent(event->pos());
+    const auto globalPoint = event->globalPosition().toPoint();
+    const auto relPoint = this->notebook_->mapFromGlobal(globalPoint);
+    const auto crossedDragThreshold =
+        (globalPoint - this->dragStartGlobal_).manhattanLength() >=
+        QApplication::startDragDistance();
 
-    if (this->mouseDown_ && !this->getDesiredRect().contains(relPoint) &&
-        this->notebook_->getAllowUserTabManagement())
+    if (this->role_ == Role::GroupHeader)
     {
-        int index;
-        QWidget *clickedPage =
-            this->notebook_->tabAt(relPoint, index, this->width());
-
-        if (clickedPage != nullptr && clickedPage != this->page)
+        if (this->mouseDown_ && crossedDragThreshold &&
+            this->notebook_->getAllowUserTabManagement() &&
+            !this->notebook_->isNotebookLayoutLocked())
         {
-            this->notebook_->rearrangePage(this->page, index);
+            this->dragMoved_ = true;
+            this->dragActive_ = true;
+            int index = -1;
+            if (this->notebook_->tabAt(relPoint, index))
+            {
+                this->notebook_->moveTabGroup(this->groupId_, index);
+            }
+        }
+        Button::mouseMoveEvent(event);
+        return;
+    }
+
+    if (this->mouseDown_ && crossedDragThreshold &&
+        this->notebook_->getAllowUserTabManagement() &&
+        !this->notebook_->isNotebookLayoutLocked())
+    {
+        this->dragMoved_ = true;
+        this->dragActive_ = true;
+        this->mouseDownX_ = false;
+        int index;
+        QWidget *clickedPage = this->notebook_->tabAt(relPoint, index);
+
+        if (this->groupDragRequested_)
+        {
+            if (clickedPage != nullptr && clickedPage != this->page)
+            {
+                this->notebook_->previewTabGroupDrop(this->page, clickedPage);
+                this->setCursor(Qt::DragCopyCursor);
+            }
+            else
+            {
+                this->notebook_->cancelTabGroupDrop();
+                this->unsetCursor();
+            }
+        }
+        else
+        {
+            this->notebook_->cancelTabGroupDrop();
+            this->unsetCursor();
+            if (clickedPage != nullptr && clickedPage != this->page)
+            {
+                this->notebook_->rearrangePage(this->page, index);
+            }
         }
     }
 

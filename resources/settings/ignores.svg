@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <mask id="ignoreSlash">
+    <rect x="0" y="0" width="24" height="24" fill="#FFFFFF"/>
+    <path fill="#000000" d="M2.08,3.92 L3.92,2.08 L21.92,20.08 L20.08,21.92 Z"/>
+  </mask>
+  <circle cx="12" cy="12" r="9" fill="#FFFFFF" mask="url(#ignoreSlash)"/>
+</svg>

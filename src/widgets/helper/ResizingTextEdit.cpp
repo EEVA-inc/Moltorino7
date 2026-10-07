@@ -16,6 +16,7 @@
 #include <QMimeData>
 #include <QMimeDatabase>
 #include <QObject>
+#include <QPainter>
 #include <QTextDocument>
 #include <QtMath>
 
@@ -47,17 +48,57 @@ ResizingTextEdit::ResizingTextEdit()
         }
         qCDebug(chatterinoCommon)
             << "Finishing completion because cursor moved";
-        this->completionInProgress_ = false;
+        this->finishCompletion();
     });
 
     // Whenever the setting for emote completion changes, force a
     // refresh on the completion model the next time "Tab" is pressed
-    getSettings()->prefixOnlyEmoteCompletion.connect([this] {
-        this->completionInProgress_ = false;
-    });
+    getSettings()->prefixOnlyEmoteCompletion.connect(
+        [this] {
+            this->finishCompletion();
+        },
+        this->connections_);
 
     this->setFocusPolicy(Qt::ClickFocus);
     this->installEventFilter(this);
+}
+
+ResizingTextEdit::~ResizingTextEdit()
+{
+    this->connections_.clear();
+    this->setCompleter(nullptr);
+}
+
+void ResizingTextEdit::paintEvent(QPaintEvent *event)
+{
+    QTextEdit::paintEvent(event);
+    const auto cursor = this->textCursor();
+    if (this->ghostText_.isEmpty() || !this->hasFocus() ||
+        cursor.hasSelection() ||
+        cursor.position() != this->document()->characterCount() - 1)
+    {
+        return;
+    }
+
+    const auto caret = this->cursorRect();
+    const auto available = this->viewport()->width() - caret.right() - 3;
+    if (available <= 0)
+    {
+        return;
+    }
+
+    QPainter painter(this->viewport());
+    painter.setFont(this->font());
+    auto color = this->palette().color(QPalette::Text);
+    color.setAlphaF(0.42F);
+    painter.setPen(color);
+    const QFontMetrics metrics(this->font());
+    const auto text =
+        metrics.elidedText(this->ghostText_, Qt::ElideRight, available);
+    const auto baseline = caret.top() +
+                          (caret.height() - metrics.height()) / 2 +
+                          metrics.ascent();
+    painter.drawText(QPointF(caret.right() + 1, baseline), text);
 }
 
 void ResizingTextEdit::changeEvent(QEvent *event)
@@ -219,6 +260,7 @@ void ResizingTextEdit::keyPressEvent(QKeyEvent *event)
         // check if there is a completer
         if (!this->completer_)
         {
+            this->finishCompletion();
             return;
         }
 
@@ -227,6 +269,7 @@ void ResizingTextEdit::keyPressEvent(QKeyEvent *event)
         // check if there is something to complete
         if (currentCompletion.size() <= 1)
         {
+            this->finishCompletion();
             return;
         }
 
@@ -243,12 +286,21 @@ void ResizingTextEdit::keyPressEvent(QKeyEvent *event)
             completionModel->updateResults(
                 currentCompletion, this->toPlainText(),
                 this->textCursor().position(), this->isFirstWord());
+            if (this->completer_->completionCount() <= 0)
+            {
+                completionModel->clearResults();
+                this->finishCompletion();
+                return;
+            }
             this->completionInProgress_ = true;
             {
                 // this blocks cursor movement events from resetting tab completion
                 QSignalBlocker dontTriggerCursorMovement(this);
                 this->completer_->complete();
             }
+            this->textChanged();
+            this->tabCompletionChanged.invoke(completionModel,
+                                              this->completer_->currentRow());
             return;
         }
 
@@ -278,12 +330,15 @@ void ResizingTextEdit::keyPressEvent(QKeyEvent *event)
             QSignalBlocker dontTriggerCursorMovement(this);
             this->completer_->complete();
         }
+        this->textChanged();
+        this->tabCompletionChanged.invoke(completionModel,
+                                          this->completer_->currentRow());
         return;
     }
 
     if (!event->text().isEmpty())
     {
-        this->completionInProgress_ = false;
+        this->finishCompletion();
     }
 
     if (!event->isAccepted())
@@ -308,12 +363,18 @@ void ResizingTextEdit::focusOutEvent(QFocusEvent *event)
 
     if (event->lostFocus())
     {
+        this->finishCompletion();
         this->focusLost.invoke();
     }
 }
 
 void ResizingTextEdit::setCompleter(QCompleter *c)
 {
+    if (c == this->completer_)
+    {
+        return;
+    }
+    this->finishCompletion();
     delete this->completer_;
 
     this->completer_ = c;
@@ -323,6 +384,7 @@ void ResizingTextEdit::setCompleter(QCompleter *c)
         return;
     }
 
+    this->completer_->setParent(this);
     this->completer_->setWidget(this);
     this->completer_->setCompletionMode(QCompleter::InlineCompletion);
     this->completer_->setCaseSensitivity(Qt::CaseInsensitive);
@@ -335,7 +397,68 @@ void ResizingTextEdit::setCompleter(QCompleter *c)
 
 void ResizingTextEdit::resetCompletion()
 {
+    this->finishCompletion();
+}
+
+bool ResizingTextEdit::selectCompletionRow(int row)
+{
+    if (!this->completionInProgress_ || this->completer_ == nullptr ||
+        row < 0 || row >= this->completer_->completionCount() ||
+        !this->completer_->setCurrentRow(row))
+    {
+        return false;
+    }
+
+    auto *completionModel =
+        dynamic_cast<TabCompletionModel *>(this->completer_->model());
+    if (completionModel == nullptr)
+    {
+        this->finishCompletion();
+        return false;
+    }
+
+    {
+        QSignalBlocker dontTriggerCursorMovement(this);
+        this->completer_->complete();
+    }
+    this->textChanged();
+    this->tabCompletionChanged.invoke(completionModel, row);
+    return true;
+}
+
+void ResizingTextEdit::finishCompletion()
+{
+    if (!this->completionInProgress_)
+    {
+        return;
+    }
+
     this->completionInProgress_ = false;
+    this->tabCompletionHidden.invoke();
+
+    if (this->completer_ != nullptr)
+    {
+        if (auto *model =
+                dynamic_cast<TabCompletionModel *>(this->completer_->model()))
+        {
+            model->clearResults();
+        }
+    }
+}
+
+void ResizingTextEdit::setGhostText(QString text)
+{
+    if (this->ghostText_ == text)
+    {
+        return;
+    }
+    this->ghostText_ = std::move(text);
+    this->viewport()->update();
+}
+
+const QString &ResizingTextEdit::ghostText() const
+{
+    return this->ghostText_;
 }
 
 void ResizingTextEdit::insertCompletion(const QString &completion)
