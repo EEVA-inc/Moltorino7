@@ -58,6 +58,8 @@
         "text": "#ffffff"
       },
       "input": {
+        "searchFailText": "#ff0000",
+        "searchHighlightBackground": "#506e6eff",
         "background": "#080808",
         "backgroundPulse": "#083808",
         "text": "#ffffff"

@@ -6,6 +6,7 @@
 
 #include "common/ChatterinoSetting.hpp"
 #include "singletons/Paths.hpp"
+#include "singletons/ThemeCustomization.hpp"
 #include "util/RapidJsonSerializeQString.hpp"
 
 #include <pajlada/settings/setting.hpp>
@@ -33,6 +34,7 @@ struct ThemeDescriptor {
     QString name;
 
     bool custom{};
+    bool operator==(const ThemeDescriptor &) const = default;
 };
 
 class Theme final
@@ -68,6 +70,7 @@ public:
         QColor caret;
         QColor link;
         QColor system;
+        QColor timestamp;
         QColor chatPlaceholder;
     };
 
@@ -142,6 +145,8 @@ public:
         struct {
             QColor background;
             QColor backgroundPulse;
+            QColor searchHighlightBackground;
+            QColor searchFailText;
             QColor text;
 
             QString styleSheet;
@@ -153,6 +158,7 @@ public:
     } buttons;
 
     QPalette palette;
+    ThemeCustomizationProfile customization;
 
     void normalizeColor(QColor &color) const;
     void update();
@@ -162,7 +168,14 @@ public:
 
     std::vector<std::pair<QString, QVariant>> availableThemes() const;
 
+    const std::vector<ThemeDescriptor> &availableThemeDescriptors() const;
+    void reloadAvailableThemes();
+    std::optional<QJsonObject> themeJson(const QString &key) const;
+    const QString &themesDirectory() const;
+    void selectTheme(const QString &key);
+
     pajlada::Signals::NoArgSignal updated;
+    pajlada::Signals::NoArgSignal availableThemesChanged;
 
     QStringSetting themeName{"/appearance/theme/name", "Dark"};
     QStringSetting lightSystemThemeName{"/appearance/theme/lightSystem",
@@ -170,6 +183,11 @@ public:
     QStringSetting darkSystemThemeName{"/appearance/theme/darkSystem", "Dark"};
 
 private:
+    BoolSetting defaultApplied{"/appearance/theme/defaultApplied", false};
+    BoolSetting bluzyrinoMigrated{"/appearance/theme/bluzyrinoMigrated", false};
+    QStringSetting moltorinoSelection{"/appearance/theme/moltorinoSelection",
+                                      ""};
+    QString themesDirectory_;
     bool isLight_ = false;
 
     std::vector<ThemeDescriptor> availableThemes_;
@@ -182,6 +200,7 @@ private:
     QObject lifetime_;
 
     void loadAvailableThemes(const Paths &paths);
+    void migrateBluzyrinoTheme(const Paths &paths, bool preserveSelection);
 
     std::optional<ThemeDescriptor> findThemeByKey(const QString &key);
 

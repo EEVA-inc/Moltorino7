@@ -58,6 +58,8 @@
         "text": "#000000"
       },
       "input": {
+        "searchFailText": "#ff0000",
+        "searchHighlightBackground": "#501414ff",
         "background": "#dbdbdb",
         "backgroundPulse": "#dbffdb",
         "text": "#000000"

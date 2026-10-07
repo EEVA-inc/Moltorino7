@@ -1,0 +1,13 @@
+Moltorino uses FFmpeg 7.1.5 as a separate program to prepare video backgrounds.
+This build has GPL and nonfree components disabled and uses LGPL 2.1 or later.
+
+Upstream source: https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz
+SHA-256: de668509caf9e35e3cd162473441fdb29538c6d96ed080292b3cf9e6fc5d558f
+
+The corresponding Moltorino release source includes the exact configuration in
+conanfile.py (Windows) and .CI/build-video-dependencies.sh (Linux and macOS).
+Those recipes pin the additional codec dependencies and include their licenses.
+Moltorino source and release archives: https://github.com/EEVA-inc/chatterino7
+
+The FFmpeg source is unmodified. Its bundled LGPL text is in
+ffmpeg-LGPL-2.1.txt on Windows and COPYING.LGPLv2.1 on Linux and macOS.

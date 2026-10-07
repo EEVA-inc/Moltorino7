@@ -13,10 +13,15 @@ namespace chatterino {
 
 namespace {
 
-QStringList getFontFamilies()
+QStringList getFontFamilies(const QString &selected)
 {
     QStringList families = QFontDatabase::families();
     families.removeIf(QFontDatabase::isPrivateFamily);
+    if (!selected.isEmpty() && !families.contains(selected))
+    {
+        families.append(selected);
+        families.sort();
+    }
     return families;
 }
 
@@ -25,7 +30,7 @@ QStringList getFontFamilies()
 FontFamilyWidget::FontFamilyWidget(const QFont &startFont, QWidget *parent)
     : QWidget(parent)
     , list(new QListView)
-    , model(new QStringListModel(getFontFamilies(), this))
+    , model(new QStringListModel(getFontFamilies(startFont.family()), this))
     , proxy(new QSortFilterProxyModel(this))
 {
     auto *layout = new QVBoxLayout;

@@ -7,12 +7,14 @@
 #include "Application.hpp"
 #include "singletons/Fonts.hpp"
 #include "singletons/Settings.hpp"
+#include "singletons/Theme.hpp"
 #include "widgets/dialogs/font/FontSettingDialog.hpp"
 
 #include <QFont>
 #include <QHBoxLayout>
 #include <QString>
 #include <QToolButton>
+#include <QVBoxLayout>
 
 namespace chatterino {
 
@@ -23,6 +25,8 @@ FontSettingWidget::FontSettingWidget(QStringSetting &family, IntSetting &size,
     , sizeSetting(size)
     , weightSetting(weight)
     , currentLabel(new QLabel)
+    , themeFontNotice(new QLabel("Theme font settings are active. Change them "
+                                 "in Customization > Text."))
     , listener([this] {
         this->updateCurrentLabel();
     })
@@ -30,7 +34,11 @@ FontSettingWidget::FontSettingWidget(QStringSetting &family, IntSetting &size,
     auto *layout = new QHBoxLayout;
     auto *button = new QToolButton;
 
-    this->setLayout(layout);
+    auto *outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    outer->addLayout(layout);
+    this->themeFontNotice->setWordWrap(true);
+    outer->addWidget(this->themeFontNotice);
     this->updateCurrentLabel();
 
     this->listener.add(getApp()->getFonts()->fontChanged);
@@ -53,6 +61,12 @@ void FontSettingWidget::updateCurrentLabel()
     QString family = font.family();
     QString ptSize = QString::number(font.pointSize());
     this->currentLabel->setText(family + ", " + ptSize + "pt");
+    const auto &theme = getTheme()->customization;
+    this->themeFontNotice->setVisible(
+        !theme.chatFontFamily.isEmpty() ||
+        !theme.usernameFontFamily.isEmpty() || theme.chatFontWeight > 0 ||
+        theme.usernameFontWeight > 0 || theme.chatFontSize > 0 ||
+        theme.usernameFontSize > 0);
 }
 
 void FontSettingWidget::showDialog()

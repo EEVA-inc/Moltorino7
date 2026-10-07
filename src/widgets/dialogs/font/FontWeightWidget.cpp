@@ -45,10 +45,14 @@ FontWeightWidget::FontWeightWidget(const QFont &startFont, QWidget *parent)
     this->setLayout(layout);
 
     this->setFamily(startFont.family());
-    if (IntItem *item = findIntItemInList(this->list, startFont.weight()))
+    auto *item = findIntItemInList(this->list, startFont.weight());
+    if (item == nullptr)
     {
-        this->list->setCurrentItem(item);
+        item = new IntItem(startFont.weight());
+        this->list->addItem(item);
+        this->list->sortItems();
     }
+    this->list->setCurrentItem(item);
 
     layout->addWidget(new QLabel("Weight"));
     layout->addWidget(this->list);

@@ -66,6 +66,7 @@ ColorPickerDialog::ColorPickerDialog(QColor color, QWidget *parent)
               BaseWindow::EnableCustomFrame,
               BaseWindow::DisableLayoutSave,
               BaseWindow::BoundsCheckOnShow,
+              BaseWindow::UseSettingsStylesheet,
           },
           parent)
     , color_(color)

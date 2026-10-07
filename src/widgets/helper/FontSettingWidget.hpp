@@ -31,6 +31,7 @@ private:
     IntSetting &weightSetting;
 
     QLabel *currentLabel;
+    QLabel *themeFontNotice;
     SignalListener listener;
 };
 
