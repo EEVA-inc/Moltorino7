@@ -30,7 +30,8 @@ chatterino::NetworkRequest tuneSeventvRequest(
     return std::move(request)
         .timeout(30000);
 }
-using SeventvJsonCallback = std::function<void(const QJsonObject &)>;
+using SeventvJsonCallback =
+    std::function<void(const QJsonObject &, const QByteArray &)>;
 using SeventvErrorCallback =
     std::function<void(const chatterino::NetworkResult &)>;
 
@@ -54,7 +55,7 @@ auto makeJsonSuccessCallback(SeventvJsonCallback &&onSuccess,
             return;
         }
 
-        callback(json);
+        callback(json, result.getData());
     };
 }
 
@@ -70,10 +71,13 @@ auto makeNetworkErrorCallback(std::shared_ptr<SeventvErrorCallback> onError)
 }
 
 }
+
+// NOLINTBEGIN(readability-convert-member-functions-to-static)
 namespace chatterino {
 
 void SeventvAPI::getUserByTwitchID(
-    const QString &twitchID, SuccessCallback<const QJsonObject &> &&onSuccess,
+    const QString &twitchID,
+    SuccessCallback<const QJsonObject &, const QByteArray &> &&onSuccess,
     ErrorCallback &&onError)
 {
     auto sharedOnError = makeSharedErrorCallback(std::move(onError));
@@ -87,7 +91,8 @@ void SeventvAPI::getUserByTwitchID(
 }
 
 void SeventvAPI::getUserByKickID(
-    uint64_t userID, SuccessCallback<const QJsonObject &> &&onSuccess,
+    uint64_t userID,
+    SuccessCallback<const QJsonObject &, const QByteArray &> &&onSuccess,
     ErrorCallback &&onError)
 {
     auto sharedOnError = makeSharedErrorCallback(std::move(onError));
@@ -100,9 +105,10 @@ void SeventvAPI::getUserByKickID(
         .execute();
 }
 
-void SeventvAPI::getEmoteSet(const QString &emoteSet,
-                             SuccessCallback<const QJsonObject &> &&onSuccess,
-                             ErrorCallback &&onError)
+void SeventvAPI::getEmoteSet(
+    const QString &emoteSet,
+    SuccessCallback<const QJsonObject &, const QByteArray &> &&onSuccess,
+    ErrorCallback &&onError)
 {
     auto sharedOnError = makeSharedErrorCallback(std::move(onError));
     tuneSeventvRequest(
@@ -119,26 +125,8 @@ void SeventvAPI::updatePresence(const QString &twitchChannelID,
                                 SuccessCallback<> &&onSuccess,
                                 ErrorCallback &&onError)
 {
-    QJsonObject payload{
-        {u"kind"_s, 1},
-        {u"data"_s,
-         QJsonObject{
-             {u"id"_s, twitchChannelID},
-             {u"platform"_s, u"TWITCH"_s},
-         }},
-    };
-
-    tuneSeventvRequest(NetworkRequest(API_URL_PRESENCES.arg(seventvUserID),
-                                      NetworkRequestType::Post))
-        .json(payload)
-        .timeout(10000)
-        .onSuccess([callback = std::move(onSuccess)](const auto &) {
-            callback();
-        })
-        .onError([callback = std::move(onError)](const NetworkResult &result) {
-            callback(result);
-        })
-        .execute();
+    this->updatePresence(u"TWITCH"_s, twitchChannelID, seventvUserID,
+                         std::move(onSuccess), std::move(onError));
 }
 
 void SeventvAPI::updateKickPresence(uint64_t kickUserID,
@@ -146,12 +134,22 @@ void SeventvAPI::updateKickPresence(uint64_t kickUserID,
                                     SuccessCallback<> &&onSuccess,
                                     ErrorCallback &&onError)
 {
+    this->updatePresence(u"KICK"_s, QString::number(kickUserID), seventvUserID,
+                         std::move(onSuccess), std::move(onError));
+}
+
+void SeventvAPI::updatePresence(const QString &platform,
+                                const QString &platformID,
+                                const QString &seventvUserID,
+                                SuccessCallback<> &&onSuccess,
+                                ErrorCallback &&onError)
+{
     QJsonObject payload{
         {u"kind"_s, 1},
         {u"data"_s,
          QJsonObject{
-             {u"id"_s, QString::number(kickUserID)},
-             {u"platform"_s, u"KICK"_s},
+             {u"id"_s, platformID},
+             {u"platform"_s, platform},
          }},
     };
 
@@ -169,3 +167,4 @@ void SeventvAPI::updateKickPresence(uint64_t kickUserID,
 }
 
 }
+// NOLINTEND(readability-convert-member-functions-to-static)

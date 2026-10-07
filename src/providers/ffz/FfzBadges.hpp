@@ -5,16 +5,18 @@
 #pragma once
 
 #include "common/Aliases.hpp"
+#include "util/QStringHash.hpp"  // IWYU pragma: keep
 #include "util/ThreadGuard.hpp"
 
+#include <boost/unordered/unordered_flat_map.hpp>
 #include <QColor>
 #include <QString>
+#include <QVarLengthArray>
 
+#include <cstdint>
 #include <memory>
 #include <optional>
-#include <set>
 #include <shared_mutex>
-#include <unordered_map>
 #include <vector>
 
 namespace chatterino {
@@ -43,9 +45,12 @@ public:
 private:
     std::shared_mutex mutex_;
 
-    std::unordered_map<QString, std::set<int>> userBadges;
+    void insertUserBadge(const QString &userID, int badgeID);
 
-    std::unordered_map<int, Badge> badges;
+    boost::unordered_flat_map<uint64_t, QVarLengthArray<int, 2>> userBadges;
+    boost::unordered_flat_map<QString, QVarLengthArray<int, 2>> otherUserBadges;
+
+    boost::unordered_flat_map<int, Badge> badges;
     ThreadGuard tgBadges;
 };
 

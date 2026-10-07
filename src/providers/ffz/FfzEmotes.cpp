@@ -15,6 +15,8 @@
 #include "singletons/Settings.hpp"
 #include "util/Helpers.hpp"
 
+#include <limits>
+
 namespace {
 
 using namespace chatterino;
@@ -58,20 +60,64 @@ void fillInEmoteData(const QJsonObject &emote, const QJsonObject &urls,
     emoteData.tooltip = {tooltip};
 }
 
+uint32_t modifierFlags(const QJsonObject &jsonEmote)
+{
+    const auto value = jsonEmote.value("modifier_flags").toInteger(-1);
+    if (value < 0 || value > std::numeric_limits<uint32_t>::max())
+    {
+        return 0;
+    }
+    return static_cast<uint32_t>(value);
+}
+
+void applyModifierMetadata(const QJsonObject &jsonEmote, Emote &emote)
+{
+    if (!jsonEmote.value("modifier").toBool())
+    {
+        return;
+    }
+
+    const auto providerFlags = modifierFlags(jsonEmote);
+    if ((providerFlags & emote_modifiers::EFFECTS) == 0)
+    {
+        return;
+    }
+
+    const bool isPrefix = jsonEmote.value("modifier_prefix").toBool(false);
+    emote.modifierFlags = providerFlags;
+    emote.modifierPlacement = isPrefix ? EmoteModifierPlacement::Prefix
+                                       : EmoteModifierPlacement::Suffix;
+    emote.modifierSource = EmoteModifierSource::FrankerFaceZ;
+    emote.tooltip =
+        Tooltip{emote.name.string + "<br>FrankerFaceZ emote effect"};
+}
+
 EmotePtr cachedOrMake(Emote &&emote, const EmoteId &id)
 {
-    static std::unordered_map<EmoteId, std::weak_ptr<const Emote>> cache;
+    static WeakEmoteCache cache;
     static std::mutex mutex;
+    static size_t newEntriesSinceSweep = 0;
 
-    return cachedOrMakeEmotePtr(std::move(emote), cache, mutex, id);
+    return cachedOrMakeEmotePtr(std::move(emote), cache, mutex,
+                               newEntriesSinceSweep, id);
 }
 
 void parseEmoteSetInto(const QJsonObject &emoteSet, const QString &kind,
-                       EmoteMap &map)
+                       EmoteMap &map, bool modifiersOnly = false)
 {
     for (const auto emoteRef : emoteSet["emoticons"].toArray())
     {
         const auto emoteJson = emoteRef.toObject();
+
+        if (modifiersOnly)
+        {
+            const auto providerFlags = modifierFlags(emoteJson);
+            if (!emoteJson.value("modifier").toBool() ||
+                (providerFlags & emote_modifiers::EFFECTS) == 0)
+            {
+                continue;
+            }
+        }
 
         auto id = EmoteId{QString::number(emoteJson["id"].toInt())};
         auto name = EmoteName{emoteJson["name"].toString()};
@@ -93,38 +139,13 @@ void parseEmoteSetInto(const QJsonObject &emoteSet, const QString &kind,
             Url{QString("https://www.frankerfacez.com/emoticon/%1-%2")
                     .arg(id.string)
                     .arg(name.string)};
+        applyModifierMetadata(emoteJson, emote);
 
-        map[name] = cachedOrMake(std::move(emote), id);
-    }
-}
-
-EmoteMap parseGlobalEmotes(const QJsonObject &jsonRoot)
-{
-
-    std::unordered_set<int> defaultSets{};
-    auto jsonDefaultSets = jsonRoot["default_sets"].toArray();
-    for (auto jsonDefaultSet : jsonDefaultSets)
-    {
-        defaultSets.insert(jsonDefaultSet.toInt());
-    }
-
-    auto emotes = EmoteMap();
-
-    for (const auto emoteSetRef : jsonRoot["sets"].toObject())
-    {
-        const auto emoteSet = emoteSetRef.toObject();
-        auto emoteSetID = emoteSet["id"].toInt();
-        if (!defaultSets.contains(emoteSetID))
+        if (!modifiersOnly || !map.contains(name))
         {
-            qCDebug(LOG) << "Skipping global emote set" << emoteSetID
-                         << "as it's not part of the default sets";
-            continue;
+            map[name] = cachedOrMake(std::move(emote), id);
         }
-
-        parseEmoteSetInto(emoteSet, "Global", emotes);
     }
-
-    return emotes;
 }
 
 std::optional<EmotePtr> parseAuthorityBadge(const QJsonObject &badgeUrls,
@@ -163,6 +184,46 @@ std::optional<EmotePtr> parseAuthorityBadge(const QJsonObject &badgeUrls,
 namespace chatterino {
 
 using namespace ffz::detail;
+
+EmoteMap ffz::detail::parseGlobalEmotes(const QJsonObject &jsonRoot)
+{
+
+    std::unordered_set<int> defaultSets{};
+    auto jsonDefaultSets = jsonRoot["default_sets"].toArray();
+    for (auto jsonDefaultSet : jsonDefaultSets)
+    {
+        defaultSets.insert(jsonDefaultSet.toInt());
+    }
+
+    auto emotes = EmoteMap();
+
+    for (const auto emoteSetRef : jsonRoot["sets"].toObject())
+    {
+        const auto emoteSet = emoteSetRef.toObject();
+        auto emoteSetID = emoteSet["id"].toInt();
+        if (!defaultSets.contains(emoteSetID))
+        {
+            qCDebug(LOG) << "Skipping global emote set" << emoteSetID
+                         << "as it's not part of the default sets";
+            continue;
+        }
+
+        parseEmoteSetInto(emoteSet, "Global", emotes);
+    }
+
+    for (const auto emoteSetRef : jsonRoot["sets"].toObject())
+    {
+        const auto emoteSet = emoteSetRef.toObject();
+        if (defaultSets.contains(emoteSet["id"].toInt()))
+        {
+            continue;
+        }
+
+        parseEmoteSetInto(emoteSet, "Global", emotes, true);
+    }
+
+    return emotes;
+}
 
 EmoteMap ffz::detail::parseChannelEmotes(const QJsonObject &jsonRoot)
 {
@@ -300,7 +361,7 @@ void FfzEmotes::loadChannel(
             modBadgeCallback(std::move(modBadge));
             vipBadgeCallback(std::move(vipBadge));
             channelBadgesCallback(std::move(channelBadges));
-            if (auto shared = channel.lock(); manualRefresh)
+            if (auto shared = channel.lock(); manualRefresh && shared)
             {
                 if (hasEmotes)
                 {

@@ -17,7 +17,47 @@
 #include <QThread>
 #include <QUrl>
 
+#include <algorithm>
+#include <limits>
+
 namespace chatterino {
+
+namespace {
+
+std::optional<uint64_t> canonicalUserID(QStringView value)
+{
+    if (value.isEmpty() || value.size() > 20 ||
+        (value.size() > 1 && value.front() == u'0'))
+    {
+        return std::nullopt;
+    }
+    uint64_t id = 0;
+    for (const auto character : value)
+    {
+        if (character < u'0' || character > u'9')
+        {
+            return std::nullopt;
+        }
+        const auto digit = static_cast<uint64_t>(character.unicode() - u'0');
+        if (id > (std::numeric_limits<uint64_t>::max() - digit) / 10)
+        {
+            return std::nullopt;
+        }
+        id = id * 10 + digit;
+    }
+    return id;
+}
+
+void insertBadgeID(QVarLengthArray<int, 2> &badges, int badgeID)
+{
+    const auto position = std::ranges::lower_bound(badges, badgeID);
+    if (position == badges.end() || *position != badgeID)
+    {
+        badges.insert(position, badgeID);
+    }
+}
+
+}
 
 std::vector<FfzBadges::Badge> FfzBadges::getUserBadges(const UserId &id)
 {
@@ -25,16 +65,27 @@ std::vector<FfzBadges::Badge> FfzBadges::getUserBadges(const UserId &id)
 
     std::shared_lock lock(this->mutex_);
 
-    auto it = this->userBadges.find(id.string);
-    if (it != this->userBadges.end())
-    {
-        for (const auto &badgeID : it->second)
+    const auto append = [&](const auto &assignments, const auto &key) {
+        const auto it = assignments.find(key);
+        if (it == assignments.end())
+        {
+            return;
+        }
+        for (const auto badgeID : it->second)
         {
             if (auto badge = this->getBadge(badgeID); badge)
             {
                 badges.emplace_back(*badge);
             }
         }
+    };
+    if (const auto numericID = canonicalUserID(id.string))
+    {
+        append(this->userBadges, *numericID);
+    }
+    else
+    {
+        append(this->otherUserBadges, id.string);
     }
 
     return badges;
@@ -103,15 +154,11 @@ void FfzBadges::load()
                                             .value(badgeIDString)
                                             .toArray())
                 {
-                    auto userIDString = QString::number(user.toInt());
-
-                    auto [userBadges, created] = this->userBadges.emplace(
-                        std::make_pair<QString, std::set<int>>(
-                            std::move(userIDString), {badgeID}));
-                    if (!created)
+                    const auto userID = user.toInteger(-1);
+                    if (userID > 0)
                     {
-
-                        userBadges->second.emplace(badgeID);
+                        this->insertUserBadge(QString::number(userID),
+                                              badgeID);
                     }
                 }
             }
@@ -134,14 +181,18 @@ void FfzBadges::assignBadgeToUser(const UserId &userID, int badgeID)
 
     std::unique_lock lock(this->mutex_);
 
-    auto it = this->userBadges.find(userID.string);
-    if (it != this->userBadges.end())
+    this->insertUserBadge(userID.string, badgeID);
+}
+
+void FfzBadges::insertUserBadge(const QString &userID, int badgeID)
+{
+    if (const auto numericID = canonicalUserID(userID))
     {
-        it->second.emplace(badgeID);
+        insertBadgeID(this->userBadges[*numericID], badgeID);
     }
     else
     {
-        this->userBadges.emplace(userID.string, std::set{badgeID});
+        insertBadgeID(this->otherUserBadges[userID], badgeID);
     }
 }
 

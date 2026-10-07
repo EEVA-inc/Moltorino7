@@ -81,10 +81,12 @@ struct CreateEmoteResult {
 
 EmotePtr cachedOrMake(Emote &&emote, const EmoteId &id)
 {
-    static std::unordered_map<EmoteId, std::weak_ptr<const Emote>> cache;
+    static WeakEmoteCache cache;
     static std::mutex mutex;
+    static size_t newEntriesSinceSweep = 0;
 
-    return cachedOrMakeEmotePtr(std::move(emote), cache, mutex, id);
+    return cachedOrMakeEmotePtr(std::move(emote), cache, mutex,
+                                newEntriesSinceSweep, id);
 }
 
 /**
@@ -313,9 +315,8 @@ void SeventvEmotes::loadGlobalEmotes()
 
     getApp()->getSeventvAPI()->getEmoteSet(
         u"global"_s,
-        [this](const auto &json) {
-            writeProviderEmotesCache("global", "seventv",
-                                     QJsonDocument(json).toJson());
+        [this](const auto &json, const auto &raw) {
+            writeProviderEmotesCache("global", "seventv", raw);
             QJsonArray parsedEmotes = json["emotes"].toArray();
 
             auto emoteMap =
@@ -352,12 +353,11 @@ void SeventvEmotes::loadChannelEmotes(
     getApp()->getSeventvAPI()->getUserByTwitchID(
         channelId,
         [callback, channel, channelId, manualRefresh,
-         loadAttempt](const auto &json) {
+         loadAttempt](const auto &json, const auto &raw) {
             auto cleanup = qScopeGuard([loadAttempt] {
                 *loadAttempt = {};
             });
-            writeProviderEmotesCache(channelId, "seventv",
-                                     QJsonDocument(json).toJson());
+            writeProviderEmotesCache(channelId, "seventv", raw);
             const auto emoteSet = json["emote_set"].toObject();
             const auto parsedEmotes = emoteSet["emotes"].toArray();
 
@@ -486,12 +486,12 @@ void SeventvEmotes::loadKickChannelEmotes(
     getApp()->getSeventvAPI()->getUserByKickID(
         userID,
         [callback, channel, manualRefresh, userID,
-         loadAttempt](const auto &json) {
+         loadAttempt](const auto &json, const auto &raw) {
             auto cleanup = qScopeGuard([loadAttempt] {
                 *loadAttempt = {};
             });
             writeProviderEmotesCache(u"kick." % QString::number(userID),
-                                     "seventv", QJsonDocument(json).toJson());
+                                     "seventv", raw);
             const auto emoteSet = json["emote_set"].toObject();
             const auto parsedEmotes = emoteSet["emotes"].toArray();
 
@@ -681,7 +681,8 @@ void SeventvEmotes::getEmoteSet(
 
     getApp()->getSeventvAPI()->getEmoteSet(
         emoteSetId,
-        [callback = std::move(successCallback), emoteSetId](const auto &json) {
+        [callback = std::move(successCallback), emoteSetId](
+            const auto &json, const auto &) {
             assert(!isAppAboutToQuit());
 
             auto parsedEmotes = json["emotes"].toArray();
@@ -780,6 +781,23 @@ ImageSet SeventvEmotes::createImageSet(const QJsonObject &emoteData,
             Image::fromUrl({QString("https:%1/%2").arg(baseUrl, name)}, scale,
                            {static_cast<int>(width), file["height"].toInt(16)});
         image->setFrameCacheLifetime(SEVENTV_DECODED_FRAME_CACHE_LIFETIME);
+        if (targetFormat == u"AVIF"_s && !useStatic)
+        {
+            for (const auto &alternativeItem : files)
+            {
+                const auto alternative = alternativeItem.toObject();
+                if (alternative["format"].toString() == u"WEBP"_s &&
+                    alternative["width"] == file["width"] &&
+                    alternative["height"] == file["height"] &&
+                    !alternative["name"].toString().isEmpty())
+                {
+                    image->setPickerUrl(
+                        {QString("https:%1/%2")
+                             .arg(baseUrl, alternative["name"].toString())});
+                    break;
+                }
+            }
+        }
 
         sizes.at(nextSize) = image;
         nextSize++;

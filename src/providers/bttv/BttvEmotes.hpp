@@ -8,6 +8,7 @@
 #include "common/Atomic.hpp"
 
 #include <pajlada/signals/scoped-connection.hpp>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
 
@@ -28,6 +29,8 @@ struct BttvLiveUpdateEmoteRemoveMessage;
 
 namespace bttv::detail {
 
+EmoteMap parseGlobalEmotes(const QJsonArray &jsonEmotes,
+                           const EmoteMap &currentEmotes);
 EmoteMap parseChannelEmotes(const QJsonObject &jsonRoot,
                             const QString &channelDisplayName);
 

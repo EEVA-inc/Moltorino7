@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include <pajlada/signals/signal.hpp>
 #include <QTimer>
 
 namespace chatterino {
@@ -16,7 +15,7 @@ class GIFTimer
 public:
     void initialize();
 
-    pajlada::Signals::NoArgSignal signal;
+    bool shouldAnimate() const;
     long unsigned position()
     {
         return this->position_;

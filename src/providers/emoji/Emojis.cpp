@@ -179,10 +179,10 @@ void Emojis::loadEmojis()
         qCWarning(chatterinoEmoji) << "Resources not available";
         return;
     }
-    QTextStream s1(&file);
-    QString data = s1.readAll();
+    const QByteArray data = file.readAll();
     rapidjson::Document root;
-    rapidjson::ParseResult result = root.Parse(data.toUtf8(), data.length());
+    rapidjson::ParseResult result =
+        root.Parse(data.constData(), static_cast<std::size_t>(data.size()));
 
     if (result.Code() != rapidjson::kParseErrorNone)
     {
@@ -253,46 +253,73 @@ void Emojis::sortEmojis()
 
 void Emojis::loadEmojiSet()
 {
-    getSettings()->emojiSet.connect([this](const auto &emojiSet) {
-        auto setCapability = qmagicenum::enumCast<EmojiData::Capability>(
-                                 emojiSet, qmagicenum::CASE_INSENSITIVE)
-                                 .value_or(EmojiData::Capability::Google);
+    getSettings()->emojiSet.connect(
+        [this](const QString &) {
+            const auto emojiSet = getSettings()->emojiSet.getEnum();
 
-        for (const auto &emoji : this->emojis)
-        {
-            QString emojiSetToUse = emojiSet;
-
-            static std::map<QString, QString, QCompareCaseInsensitive> emojiSets = {
-
-                {"Twitter", "https://pajbot.com/static/emoji-v2/img/twitter/64/"},
-                {"Facebook", "https://pajbot.com/static/emoji-v2/img/facebook/64/"},
-                {"Apple", "https://pajbot.com/static/emoji-v2/img/apple/64/"},
-                {"Google", "https://pajbot.com/static/emoji-v2/img/google/64/"},
-
-            };
-
-            if (!emoji->capabilities.has(setCapability))
+            std::scoped_lock lock(this->emoteMutex_);
+            this->emojiSet_ = qmagicenum::enumNameString(emojiSet);
+            this->emojiSetCapability_ = emojiSet;
+            for (const auto &emoji : this->emojis)
             {
-                emojiSetToUse = QStringLiteral("Twitter");
+                emoji->emote.reset();
             }
+        },
+        this->emojiSetConnection_);
+}
 
-            QString code = emoji->unifiedCode.toLower();
-            QString urlPrefix =
-                "https://pajbot.com/static/emoji-v2/img/twitter/64/";
-            auto it = emojiSets.find(emojiSetToUse);
-            if (it != emojiSets.end())
-            {
-                urlPrefix = it->second;
-            }
-            QString url = urlPrefix + code + ".png";
-            emoji->emote = std::make_shared<Emote>(Emote{
-                .name = EmoteName{emoji->value},
-                .images = ImageSet{Image::fromUrl({url}, 0.35, {64, 64})},
-                .tooltip = Tooltip{":" + emoji->shortCodes[0] + ":<br/>Emoji"},
-                .homePage = Url{},
-            });
-        }
+EmotePtr Emojis::getEmote(const EmojiPtr &emoji) const
+{
+    return this->getEmote(emoji.get());
+}
+
+EmotePtr Emojis::getEmote(EmojiData *emoji) const
+{
+    if (!emoji)
+    {
+        return nullptr;
+    }
+
+    std::scoped_lock lock(this->emoteMutex_);
+    if (emoji->emote)
+    {
+        return emoji->emote;
+    }
+
+    // clang-format off
+    static std::map<QString, QString, QCompareCaseInsensitive> emojiSets = {
+
+        {"Twitter", "https://pajbot.com/static/emoji-v2/img/twitter/64/"},
+        {"Facebook", "https://pajbot.com/static/emoji-v2/img/facebook/64/"},
+        {"Apple", "https://pajbot.com/static/emoji-v2/img/apple/64/"},
+        {"Google", "https://pajbot.com/static/emoji-v2/img/google/64/"},
+
+    };
+    // clang-format on
+
+    QString emojiSetToUse = this->emojiSet_;
+
+    if (!emoji->capabilities.has(this->emojiSetCapability_))
+    {
+        emojiSetToUse = QStringLiteral("Twitter");
+    }
+
+    QString code = emoji->unifiedCode.toLower();
+    QString urlPrefix =
+        "https://pajbot.com/static/emoji-v2/img/twitter/64/";
+    auto it = emojiSets.find(emojiSetToUse);
+    if (it != emojiSets.end())
+    {
+        urlPrefix = it->second;
+    }
+    QString url = urlPrefix + code + ".png";
+    emoji->emote = std::make_shared<Emote>(Emote{
+        .name = EmoteName{emoji->value},
+        .images = ImageSet{Image::fromUrl({url}, 0.35, {64, 64})},
+        .tooltip = Tooltip{":" + emoji->shortCodes[0] + ":<br/>Emoji"},
+        .homePage = Url{},
     });
+    return emoji->emote;
 }
 
 std::vector<std::variant<EmotePtr, QStringView>> Emojis::parse(
@@ -379,7 +406,7 @@ std::vector<std::variant<EmotePtr, QStringView>> Emojis::parse(
                                          charactersFromLastParsedEmoji));
         }
 
-        result.emplace_back(matchedEmoji->emote);
+        result.emplace_back(this->getEmote(matchedEmoji));
 
         lastParsedEmojiEndIndex = currentParsedEmojiEndIndex;
 

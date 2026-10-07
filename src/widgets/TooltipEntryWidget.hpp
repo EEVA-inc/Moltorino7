@@ -40,6 +40,8 @@ private:
 
     ImagePtr image_ = nullptr;
     QSize customSize;
+    qint64 displayedFrameKey_ = 0;
+    qreal displayedPixelRatio_ = 0;
 };
 
 }

@@ -35,7 +35,8 @@ inline constexpr T *tooltipParentFor(T *desiredParent)
 
 namespace chatterino {
 
-TooltipEntry TooltipEntry::scaled(ImagePtr image, QString text, float scale)
+TooltipEntry TooltipEntry::scaled(ImagePtr image, QString text, float scale,
+                                  int maxDimension)
 {
     auto entry = TooltipEntry{
         .image = std::move(image),
@@ -48,6 +49,15 @@ TooltipEntry TooltipEntry::scaled(ImagePtr image, QString text, float scale)
         auto imgHeight = entry.image->height() / entry.image->scale();
         entry.customWidth = static_cast<int>(imgWidth * scale);
         entry.customHeight = static_cast<int>(imgHeight * scale);
+        if (maxDimension > 0 && (entry.customWidth > maxDimension ||
+                                 entry.customHeight > maxDimension))
+        {
+            const auto size =
+                QSize(entry.customWidth, entry.customHeight)
+                    .scaled(maxDimension, maxDimension, Qt::KeepAspectRatio);
+            entry.customWidth = size.width();
+            entry.customHeight = size.height();
+        }
     }
     return entry;
 }

@@ -9,6 +9,7 @@
 #include "providers/seventv/eventapi/Client.hpp"
 
 #include <QJsonArray>
+#include <QRandomGenerator>
 
 #include <utility>
 
@@ -37,7 +38,7 @@ public:
 
     std::unordered_set<QString> subscribedUsers;
 
-    std::unordered_set<QString> subscribedTwitchChannels;
+    std::unordered_set<ChannelCondition> subscribedChannels;
 
     std::chrono::milliseconds heartbeatInterval;
     QTimer heartbeatTimer;
@@ -130,7 +131,7 @@ void SeventvEventAPI::subscribeTwitchChannel(const QString &id)
 void SeventvEventAPI::subscribePlatformChannel(const QString &userID,
                                                const QString &platform)
 {
-    if (this->private_->subscribedTwitchChannels.insert(userID).second)
+    if (this->private_->subscribedChannels.insert({userID, platform}).second)
     {
         this->private_->subscribe({
             ChannelCondition{userID, platform},
@@ -182,7 +183,7 @@ void SeventvEventAPI::unsubscribeKickChannel(const QString &id)
 void SeventvEventAPI::unsubscribePlatformChannel(const QString &userID,
                                                  const QString &platform)
 {
-    if (this->private_->subscribedTwitchChannels.erase(userID) > 0)
+    if (this->private_->subscribedChannels.erase({userID, platform}) > 0)
     {
         this->private_->unsubscribe({
             ChannelCondition{userID, platform},
@@ -206,6 +207,33 @@ void SeventvEventAPI::unsubscribePlatformChannel(const QString &userID,
 void SeventvEventAPI::stop()
 {
     this->private_->stop();
+}
+
+void SeventvEventAPI::reconnect()
+{
+    for (const auto &[id, c] : this->private_->clients())
+    {
+        c->close();
+    }
+}
+
+void SeventvEventAPI::reconnectRandom()
+{
+    if (this->private_->clients().empty())
+    {
+        return;
+    }
+    size_t i = QRandomGenerator::global()->bounded(
+        static_cast<quint32>(this->private_->clients().size()));
+    for (const auto &[id, c] : this->private_->clients())
+    {
+        if (i == 0)
+        {
+            c->close();
+            break;
+        }
+        --i;
+    }
 }
 
 const liveupdates::Diag &SeventvEventAPI::diag() const

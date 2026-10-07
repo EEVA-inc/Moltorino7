@@ -33,6 +33,10 @@ public:
         const QString &emoteSetID,
         std::span<const seventv::eventapi::User> users);
 
+    void unassignUsersFromEmoteSet(
+        const QString &emoteSetID,
+        std::span<const seventv::eventapi::User> users);
+
     void updateEmoteSet(const QString &id,
                         const seventv::eventapi::EmoteAddDispatch &dispatch);
     void updateEmoteSet(const QString &id,

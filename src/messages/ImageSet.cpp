@@ -15,39 +15,49 @@ ImageSet::ImageSet()
     : imageX1_(Image::getEmpty())
     , imageX2_(Image::getEmpty())
     , imageX3_(Image::getEmpty())
+    , imageX4_(Image::getEmpty())
 {
 }
 
 ImageSet::ImageSet(const ImagePtr &image1, const ImagePtr &image2,
-                   const ImagePtr &image3)
+                   const ImagePtr &image3, const ImagePtr &image4)
     : imageX1_(image1)
     , imageX2_(image2)
     , imageX3_(image3)
+    , imageX4_(image4 ? image4 : Image::getEmpty())
 {
 }
 
-ImageSet::ImageSet(const Url &image1, const Url &image2, const Url &image3)
+ImageSet::ImageSet(const Url &image1, const Url &image2, const Url &image3,
+                   const Url &image4)
     : imageX1_(Image::fromUrl(image1, 1))
     , imageX2_(image2.string.isEmpty() ? Image::getEmpty()
                                        : Image::fromUrl(image2, 0.5))
     , imageX3_(image3.string.isEmpty() ? Image::getEmpty()
                                        : Image::fromUrl(image3, 0.25))
+    , imageX4_(image4.string.isEmpty() ? Image::getEmpty()
+                                       : Image::fromUrl(image4, 0.125))
 {
 }
 
 void ImageSet::setImage1(const ImagePtr &image)
 {
-    this->imageX1_ = image;
+    this->imageX1_ = image ? image : Image::getEmpty();
 }
 
 void ImageSet::setImage2(const ImagePtr &image)
 {
-    this->imageX2_ = image;
+    this->imageX2_ = image ? image : Image::getEmpty();
 }
 
 void ImageSet::setImage3(const ImagePtr &image)
 {
-    this->imageX3_ = image;
+    this->imageX3_ = image ? image : Image::getEmpty();
+}
+
+void ImageSet::setImage4(const ImagePtr &image)
+{
+    this->imageX4_ = image ? image : Image::getEmpty();
 }
 
 const ImagePtr &ImageSet::getImage1() const
@@ -65,11 +75,25 @@ const ImagePtr &ImageSet::getImage3() const
     return this->imageX3_;
 }
 
-const std::shared_ptr<Image> &getImagePriv(const ImageSet &set, float scale)
+const ImagePtr &ImageSet::getImage4() const
 {
-    scale *= getSettings()->emoteScale;
+    return this->imageX4_;
+}
+
+const std::shared_ptr<Image> &getImagePriv(const ImageSet &set, float scale,
+                                           ImageSet::ScaleMode scaleMode)
+{
+    if (scaleMode == ImageSet::ScaleMode::Emote)
+    {
+        scale *= getSettings()->emoteScale;
+    }
 
     int quality = 1;
+
+    if (scale > 4.001f && !set.getImage4()->isEmpty())
+    {
+        return set.getImage4();
+    }
 
     if (scale > 2.001f)
     {
@@ -93,9 +117,10 @@ const std::shared_ptr<Image> &getImagePriv(const ImageSet &set, float scale)
     return set.getImage1();
 }
 
-const ImagePtr &ImageSet::getImageOrLoaded(float scale) const
+const ImagePtr &ImageSet::getImageOrLoaded(float scale,
+                                           ScaleMode scaleMode) const
 {
-    auto &&result = getImagePriv(*this, scale);
+    auto &&result = getImagePriv(*this, scale, scaleMode);
 
     result->load();
 
@@ -117,15 +142,20 @@ const ImagePtr &ImageSet::getImageOrLoaded(float scale) const
     {
         return this->imageX1_;
     }
+    else if (!this->imageX4_->isEmpty() && this->imageX4_->loaded())
+    {
+        return this->imageX4_;
+    }
     else
     {
         return result;
     }
 }
 
-const ImagePtr &ImageSet::getImageOrLoadedNoLoad(float scale) const
+const ImagePtr &ImageSet::getImageOrLoadedNoLoad(float scale,
+                                                 ScaleMode scaleMode) const
 {
-    auto &&result = getImagePriv(*this, scale);
+    auto &&result = getImagePriv(*this, scale, scaleMode);
 
     if (!result->isEmpty() && result->loaded())
     {
@@ -146,21 +176,26 @@ const ImagePtr &ImageSet::getImageOrLoadedNoLoad(float scale) const
     {
         return this->imageX1_;
     }
+    else if (!this->imageX4_->isEmpty() && this->imageX4_->loaded())
+    {
+        return this->imageX4_;
+    }
     else
     {
         return result;
     }
 }
 
-const ImagePtr &ImageSet::getImage(float scale) const
+const ImagePtr &ImageSet::getImage(float scale, ScaleMode scaleMode) const
 {
-    return getImagePriv(*this, scale);
+    return getImagePriv(*this, scale, scaleMode);
 }
 
 bool ImageSet::operator==(const ImageSet &other) const
 {
-    return std::tie(this->imageX1_, this->imageX2_, this->imageX3_) ==
-           std::tie(other.imageX1_, other.imageX2_, other.imageX3_);
+    return std::tie(this->imageX1_, this->imageX2_, this->imageX3_,
+                    this->imageX4_) == std::tie(other.imageX1_, other.imageX2_,
+                                                other.imageX3_, other.imageX4_);
 }
 
 bool ImageSet::operator!=(const ImageSet &other) const
@@ -182,6 +217,10 @@ QJsonObject ImageSet::toJson() const
     if (!this->imageX3_->isEmpty())
     {
         obj[u"3x"] = this->imageX3_->url().string;
+    }
+    if (!this->imageX4_->isEmpty())
+    {
+        obj[u"4x"] = this->imageX4_->url().string;
     }
     return obj;
 }

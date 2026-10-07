@@ -41,43 +41,78 @@ std::optional<std::shared_ptr<const EmoteMap>>
 {
     std::unique_lock<std::shared_mutex> lock(this->mutex_);
 
-    int64_t additions = 0;
-    auto tryAssign = [&](auto &list) {
-        if (list.contains(emoteSetID))
-        {
-            return false;
-        }
-        list.append(emoteSetID);
-        additions++;
-        return true;
-    };
-    for (const auto &user : users)
-    {
-        bool changed =
-            std::visit(variant::Overloaded{
-                           [&](const seventv::eventapi::TwitchUser &u) {
-                               return tryAssign(this->twitchEmoteSets_[u.id]);
-                           },
-                           [&](const seventv::eventapi::KickUser &u) {
-                               return tryAssign(this->kickEmoteSets_[u.id]);
-                           }},
-                       user);
-        if (!changed)
-        {
-
-            return std::nullopt;
-        }
-    }
-
-    DebugCount::increase(DebugObject::SeventvPersonalEmoteAssignments,
-                         additions);
-
     auto set = this->emoteSets_.find(emoteSetID);
     if (set == this->emoteSets_.end())
     {
         return std::nullopt;
     }
+
+    int64_t additions = 0;
+    auto tryAssign = [&](auto &list) {
+        if (list.contains(emoteSetID))
+        {
+            return;
+        }
+        list.append(emoteSetID);
+        additions++;
+    };
+    for (const auto &user : users)
+    {
+        std::visit(variant::Overloaded{
+                       [&](const seventv::eventapi::TwitchUser &u) {
+                           tryAssign(this->twitchEmoteSets_[u.id]);
+                       },
+                       [&](const seventv::eventapi::KickUser &u) {
+                           tryAssign(this->kickEmoteSets_[u.id]);
+                       }},
+                   user);
+    }
+
+    DebugCount::increase(DebugObject::SeventvPersonalEmoteAssignments,
+                         additions);
+
+    if (additions == 0)
+    {
+        return std::nullopt;
+    }
     return set->second.get();
+}
+
+void SeventvPersonalEmotes::unassignUsersFromEmoteSet(
+    const QString &emoteSetID,
+    std::span<const seventv::eventapi::User> users)
+{
+    std::unique_lock<std::shared_mutex> lock(this->mutex_);
+
+    int64_t removals = 0;
+    auto unassign = [&](auto &assignments, const auto &userID) {
+        auto user = assignments.find(userID);
+        if (user == assignments.end())
+        {
+            return;
+        }
+
+        removals += user->second.removeAll(emoteSetID);
+        if (user->second.isEmpty())
+        {
+            assignments.erase(user);
+        }
+    };
+
+    for (const auto &user : users)
+    {
+        std::visit(variant::Overloaded{
+                       [&](const seventv::eventapi::TwitchUser &u) {
+                           unassign(this->twitchEmoteSets_, u.id);
+                       },
+                       [&](const seventv::eventapi::KickUser &u) {
+                           unassign(this->kickEmoteSets_, u.id);
+                       }},
+                   user);
+    }
+
+    DebugCount::decrease(DebugObject::SeventvPersonalEmoteAssignments,
+                         removals);
 }
 
 void SeventvPersonalEmotes::updateEmoteSet(
@@ -131,8 +166,12 @@ void SeventvPersonalEmotes::addEmoteSetForTwitchUser(
     {
         DebugCount::increase(DebugObject::SeventvPersonalEmoteSets);
     }
-    this->twitchEmoteSets_[userTwitchID].append(emoteSetID);
-    DebugCount::increase(DebugObject::SeventvPersonalEmoteAssignments);
+    auto &assignments = this->twitchEmoteSets_[userTwitchID];
+    if (!assignments.contains(emoteSetID))
+    {
+        assignments.append(emoteSetID);
+        DebugCount::increase(DebugObject::SeventvPersonalEmoteAssignments);
+    }
 }
 
 void SeventvPersonalEmotes::addEmoteSetForKickUser(const QString &emoteSetID,
@@ -148,8 +187,12 @@ void SeventvPersonalEmotes::addEmoteSetForKickUser(const QString &emoteSetID,
     {
         DebugCount::increase(DebugObject::SeventvPersonalEmoteSets);
     }
-    this->kickEmoteSets_[kickUserID].append(emoteSetID);
-    DebugCount::increase(DebugObject::SeventvPersonalEmoteAssignments);
+    auto &assignments = this->kickEmoteSets_[kickUserID];
+    if (!assignments.contains(emoteSetID))
+    {
+        assignments.append(emoteSetID);
+        DebugCount::increase(DebugObject::SeventvPersonalEmoteAssignments);
+    }
 }
 
 bool SeventvPersonalEmotes::hasEmoteSet(const QString &id) const

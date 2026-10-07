@@ -48,6 +48,7 @@ void TooltipEntryWidget::setImageScale(int w, int h)
         return;
     }
     this->customSize = QSize{w, h};
+    this->displayedFrameKey_ = 0;
     this->refreshPixmap();
 }
 
@@ -71,8 +72,12 @@ void TooltipEntryWidget::setImage(ImagePtr image)
 void TooltipEntryWidget::clearImage()
 {
     this->displayImage_->hide();
+    this->displayImage_->clear();
     this->image_ = nullptr;
-    this->setImageScale(0, 0);
+    this->customSize = {};
+    this->displayedFrameKey_ = 0;
+    this->displayedPixelRatio_ = 0;
+    this->attemptRefresh_ = false;
 }
 
 bool TooltipEntryWidget::refreshPixmap()
@@ -88,22 +93,24 @@ bool TooltipEntryWidget::refreshPixmap()
         this->attemptRefresh_ = true;
         return false;
     }
-    pixmap->setDevicePixelRatio(this->devicePixelRatio());
-
+    const auto pixelRatio = this->devicePixelRatioF();
+    const auto frameKey = pixmap->cacheKey();
+    if (frameKey == this->displayedFrameKey_ &&
+        pixelRatio == this->displayedPixelRatio_)
+    {
+        this->attemptRefresh_ = false;
+        return true;
+    }
     if (!this->customSize.isEmpty())
     {
-        this->displayImage_->setPixmap(
-            pixmap->scaled(this->customSize, Qt::KeepAspectRatio));
-
-        if (this->displayImage_->pixmap().size() != this->customSize)
-        {
-            this->adjustSize();
-        }
+        *pixmap = pixmap->scaled(this->customSize * pixelRatio,
+                                 Qt::KeepAspectRatio, Qt::SmoothTransformation);
     }
-    else
-    {
-        this->displayImage_->setPixmap(*pixmap);
-    }
+    pixmap->setDevicePixelRatio(pixelRatio);
+    this->displayImage_->setPixmap(*pixmap);
+    this->displayedFrameKey_ = frameKey;
+    this->displayedPixelRatio_ = pixelRatio;
+    this->attemptRefresh_ = false;
     this->displayImage_->show();
 
     return true;

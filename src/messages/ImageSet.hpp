@@ -19,23 +19,35 @@ ImagePtr getEmptyImagePtr();
 class ImageSet
 {
 public:
+    enum class ScaleMode {
+        Emote,
+        Exact,
+    };
+
     ImageSet();
     ImageSet(const ImagePtr &image1,
              const ImagePtr &image2 = getEmptyImagePtr(),
-             const ImagePtr &image3 = getEmptyImagePtr());
-    ImageSet(const Url &image1, const Url &image2 = {}, const Url &image3 = {});
+             const ImagePtr &image3 = getEmptyImagePtr(),
+             const ImagePtr &image4 = getEmptyImagePtr());
+    ImageSet(const Url &image1, const Url &image2 = {}, const Url &image3 = {},
+             const Url &image4 = {});
 
     void setImage1(const ImagePtr &image);
     void setImage2(const ImagePtr &image);
     void setImage3(const ImagePtr &image);
+    void setImage4(const ImagePtr &image);
     const ImagePtr &getImage1() const;
     const ImagePtr &getImage2() const;
     const ImagePtr &getImage3() const;
+    const ImagePtr &getImage4() const;
 
-    const ImagePtr &getImageOrLoaded(float scale) const;
+    const ImagePtr &getImageOrLoaded(
+        float scale, ScaleMode scaleMode = ScaleMode::Emote) const;
 
-    const ImagePtr &getImageOrLoadedNoLoad(float scale) const;
-    const ImagePtr &getImage(float scale) const;
+    const ImagePtr &getImageOrLoadedNoLoad(
+        float scale, ScaleMode scaleMode = ScaleMode::Emote) const;
+    const ImagePtr &getImage(float scale,
+                             ScaleMode scaleMode = ScaleMode::Emote) const;
 
     bool operator==(const ImageSet &other) const;
     bool operator!=(const ImageSet &other) const;
@@ -46,6 +58,7 @@ private:
     ImagePtr imageX1_;
     ImagePtr imageX2_;
     ImagePtr imageX3_;
+    ImagePtr imageX4_;
 };
 
 }

@@ -5,6 +5,7 @@
 #include "singletons/helper/GifTimer.hpp"
 
 #include "Application.hpp"
+#include "messages/Image.hpp"
 #include "singletons/Settings.hpp"
 #include "singletons/WindowManager.hpp"
 
@@ -26,20 +27,61 @@ void GIFTimer::initialize()
         {
             this->timer.stop();
         }
+
+        if (auto *app = tryGetApp())
+        {
+            app->getWindows()->repaintTwitchGifs();
+        }
     });
 
+    getSettings()->animationsWhenFocused.connect([](bool, auto) {
+        if (auto *app = tryGetApp())
+        {
+            app->getWindows()->repaintTwitchGifs();
+        }
+    });
+
+    QObject::connect(qApp, &QGuiApplication::applicationStateChanged,
+                     &this->timer,
+                     [](Qt::ApplicationState) {
+                         if (auto *app = tryGetApp())
+                         {
+                             app->getWindows()->repaintTwitchGifs();
+                         }
+                     });
+    QObject::connect(qApp, &QApplication::focusChanged, &this->timer,
+                     [](QWidget *, QWidget *) {
+                         if (auto *app = tryGetApp())
+                         {
+                             app->getWindows()->repaintTwitchGifs();
+                         }
+                     });
+
     QObject::connect(&this->timer, &QTimer::timeout, [this] {
-        if (getSettings()->animationsWhenFocused &&
-            this->openOverlayWindows_ == 0 &&
-            QApplication::activeWindow() == nullptr)
+        if (!this->shouldAnimate())
         {
             return;
         }
 
         this->position_ += GIF_FRAME_LENGTH;
-        this->signal.invoke();
+        if (Image::takeStreamingGifRepaint(this->position_))
+        {
+            getApp()->getWindows()->repaintTwitchGifs();
+        }
         getApp()->getWindows()->repaintGifEmotes();
     });
+}
+
+bool GIFTimer::shouldAnimate() const
+{
+    if (!getSettings()->animateEmotes)
+    {
+        return false;
+    }
+
+    return !getSettings()->animationsWhenFocused ||
+           this->openOverlayWindows_ != 0 ||
+           QApplication::activeWindow() != nullptr;
 }
 
 }

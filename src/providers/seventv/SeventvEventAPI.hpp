@@ -68,6 +68,8 @@ public:
                                     const QString &platform);
 
     void stop();
+    void reconnect();
+    void reconnectRandom();
 
     const liveupdates::Diag &diag() const;
 
