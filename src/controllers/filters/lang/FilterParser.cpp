@@ -6,6 +6,7 @@
 
 #include "controllers/filters/lang/expressions/BinaryOperation.hpp"
 #include "controllers/filters/lang/expressions/Expression.hpp"
+#include "controllers/filters/lang/expressions/IdentifierExpression.hpp"
 #include "controllers/filters/lang/expressions/ListExpression.hpp"
 #include "controllers/filters/lang/expressions/RegexExpression.hpp"
 #include "controllers/filters/lang/expressions/UnaryOperation.hpp"
@@ -220,8 +221,7 @@ ExpressionPtr FilterParser::parseValue()
         }
         else if (type == TokenType::IDENTIFIER)
         {
-            return std::make_unique<ValueExpression>(this->tokenizer_.next(),
-                                                     type);
+            return createIdentifierExpression(this->tokenizer_.next());
         }
         else if (type == TokenType::REGULAR_EXPRESSION)
         {

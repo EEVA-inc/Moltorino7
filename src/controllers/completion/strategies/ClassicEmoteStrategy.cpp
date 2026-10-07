@@ -37,7 +37,7 @@ void ClassicEmoteStrategy::apply(const std::vector<EmoteItem> &items,
 
     for (const auto &item : items)
     {
-        if (zeroWidthOnly && !item.emote->zeroWidth)
+        if (zeroWidthOnly && !item.isZeroWidth())
         {
             continue;
         }

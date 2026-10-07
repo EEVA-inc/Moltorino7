@@ -6,6 +6,8 @@
 
 #include <QRegularExpression>
 
+#include <limits>
+
 namespace {
 
 bool looselyCompareVariants(QVariant &lhs, QVariant &rhs)
@@ -48,7 +50,7 @@ BinaryOperation::BinaryOperation(TokenType op, ExpressionPtr left,
 {
 }
 
-QVariant BinaryOperation::execute(const ContextMap &context) const
+QVariant BinaryOperation::execute(RunContext context) const
 {
     auto left = this->left_->execute(context);
     auto right = this->right_->execute(context);
@@ -78,15 +80,19 @@ QVariant BinaryOperation::execute(const ContextMap &context) const
             }
             return 0;
         case DIVIDE:
-            if (convertVariantTypes(left, right, QMetaType::Int))
-            {
-                return left.toInt() / right.toInt();
-            }
-            return 0;
         case MOD:
             if (convertVariantTypes(left, right, QMetaType::Int))
             {
-                return left.toInt() % right.toInt();
+                const auto dividend = left.toInt();
+                const auto divisor = right.toInt();
+                if (divisor == 0 ||
+                    (dividend == std::numeric_limits<int>::min() &&
+                     divisor == -1))
+                {
+                    return 0;
+                }
+                return this->op_ == DIVIDE ? dividend / divisor
+                                           : dividend % divisor;
             }
             return 0;
         case OR:

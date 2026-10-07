@@ -48,15 +48,59 @@ void TabCompletionModel::updateResults(const QString &query,
         {
             auto uniqueResults = std::unique(results.begin(), results.end());
             results.erase(uniqueResults, results.end());
+            this->sourceRows_.clear();
             this->setStringList(results);
             return;
         }
 #endif
+        const auto pluginResultCount = results.size();
         this->source_->addToStringList(results, 0, isFirstWord);
-        auto uniqueResults = std::unique(results.begin(), results.end());
-        results.erase(uniqueResults, results.end());
-        this->setStringList(results);
+
+        QStringList uniqueResults;
+        uniqueResults.reserve(results.size());
+        this->sourceRows_.clear();
+        this->sourceRows_.reserve(static_cast<size_t>(results.size()));
+        for (qsizetype sourceRow = 0; sourceRow < results.size(); ++sourceRow)
+        {
+            if (!uniqueResults.isEmpty() &&
+                uniqueResults.back() == results.at(sourceRow))
+            {
+                continue;
+            }
+
+            uniqueResults.push_back(results.at(sourceRow));
+            this->sourceRows_.push_back(sourceRow < pluginResultCount
+                                            ? -1
+                                            : sourceRow - pluginResultCount);
+        }
+        this->setStringList(uniqueResults);
+        return;
     }
+
+    this->sourceRows_.clear();
+    this->setStringList({});
+}
+
+void TabCompletionModel::clearResults()
+{
+    this->source_.reset();
+    this->sourceRows_ = std::vector<qsizetype>{};
+    if (this->rowCount() != 0)
+    {
+        this->setStringList({});
+    }
+}
+
+const completion::EmoteItem *TabCompletionModel::emoteAt(int row) const
+{
+    if (this->source_ == nullptr || row < 0 ||
+        static_cast<size_t>(row) >= this->sourceRows_.size())
+    {
+        return nullptr;
+    }
+
+    return this->source_->emoteAtTabCompletionIndex(
+        this->sourceRows_[static_cast<size_t>(row)]);
 }
 
 void TabCompletionModel::updateSourceFromQuery(const QString &query,
@@ -77,7 +121,13 @@ std::optional<TabCompletionModel::SourceKind>
     TabCompletionModel::deduceSourceKind(const QString &query,
                                          bool isFirstWord) const
 {
-    if (query.length() < 2 || !this->channel_.isTwitchOrKickChannel())
+    const bool commandPrefix =
+        isFirstWord && (query.startsWith('/') || query.startsWith('.') ||
+                        query.startsWith('#'));
+    if ((query.length() < 2 && !commandPrefix) ||
+        (!this->channel_.isTwitchOrKickChannel() &&
+         !this->channel_.isYouTubeChannel() &&
+         !this->channel_.isTikTokChannel()))
     {
         return std::nullopt;
     }
@@ -90,7 +140,7 @@ std::optional<TabCompletionModel::SourceKind>
     {
         return SourceKind::Emote;
     }
-    else if (isFirstWord && (query.startsWith('/') || query.startsWith('.')))
+    else if (commandPrefix)
     {
         return SourceKind::Command;
     }
@@ -126,7 +176,7 @@ std::unique_ptr<completion::Source> TabCompletionModel::buildSource(
             return this->buildUserSource(true);
         }
         case SourceKind::Command: {
-            return this->buildCommandSource();
+            return this->buildCommandSource(true);
         }
         case SourceKind::EmoteUser: {
             std::vector<std::unique_ptr<completion::Source>> sources;
@@ -181,12 +231,12 @@ std::unique_ptr<completion::Source> TabCompletionModel::buildUserSource(
         nullptr, prependAt);
 }
 
-std::unique_ptr<completion::Source> TabCompletionModel::buildCommandSource()
-    const
+std::unique_ptr<completion::Source> TabCompletionModel::buildCommandSource(
+    bool explicitCommand) const
 {
     return std::make_unique<completion::CommandSource>(
-        std::make_unique<completion::CommandStrategy>(true), nullptr,
-        &this->channel_);
+        std::make_unique<completion::CommandStrategy>(!explicitCommand),
+        nullptr, &this->channel_);
 }
 
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "controllers/completion/CommandUsage.hpp"
 #include "controllers/completion/sources/Source.hpp"
 #include "controllers/completion/strategies/Strategy.hpp"
 
@@ -15,11 +16,25 @@ class Channel;
 
 namespace chatterino::completion {
 
+enum class CommandHintMode {
+    Dynamic,
+    Static,
+    Nuke,
+};
+
 struct CommandItem {
     QString name{};
     QString prefix{};
     QString usage{};
+    CommandHintMode hintMode = CommandHintMode::Dynamic;
+    bool showArgumentHint = false;
+    bool builtIn = false;
+    std::shared_ptr<const CommandUsage> argumentHint;
 };
+
+QString remainingCommandUsage(const CommandItem &command,
+                              const QString &arguments,
+                              bool *appendDirectly = nullptr);
 
 class CommandSource : public Source
 {
@@ -36,6 +51,9 @@ public:
                         size_t maxCount = 0) const override;
     void addToStringList(QStringList &list, size_t maxCount = 0,
                          bool isFirstWord = false) const override;
+
+    qsizetype tabCompletionCount() const override;
+    const EmoteItem *emoteAtTabCompletionIndex(qsizetype index) const override;
 
     const std::vector<CommandItem> &output() const;
 

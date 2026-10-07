@@ -12,7 +12,7 @@ UnaryOperation::UnaryOperation(TokenType op, ExpressionPtr right)
 {
 }
 
-QVariant UnaryOperation::execute(const ContextMap &context) const
+QVariant UnaryOperation::execute(RunContext context) const
 {
     auto right = this->right_->execute(context);
     switch (this->op_)

@@ -18,6 +18,7 @@ namespace chatterino {
 struct HighlightResult;
 struct MessageParseArgs;
 class TwitchBadge;
+enum class MessagePlatform : std::uint8_t;
 
 enum class MessageFlag : std::int64_t;
 using MessageFlags = FlagsEnum<MessageFlag>;
@@ -27,7 +28,8 @@ struct HighlightCheck {
         const MessageParseArgs &args,
         const std::vector<TwitchBadge> &twitchBadges, const QString &senderName,
         const QString &originalMessage, const MessageFlags &messageFlags,
-        bool self)>;
+        bool self, MessagePlatform platform, const QString &channelName,
+        bool collectExactMatches)>;
     Checker cb;
 };
 

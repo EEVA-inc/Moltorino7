@@ -14,7 +14,7 @@ class UnaryOperation : public Expression
 public:
     UnaryOperation(TokenType op, ExpressionPtr right);
 
-    QVariant execute(const ContextMap &context) const override;
+    QVariant execute(RunContext context) const override;
     PossibleType synthesizeType(const TypingContext &context) const override;
     QString debug(const TypingContext &context) const override;
     QString filterString() const override;

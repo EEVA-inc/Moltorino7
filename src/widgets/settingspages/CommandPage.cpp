@@ -27,7 +27,8 @@ namespace {
 using namespace chatterino;
 using namespace literals;
 
-inline const QString HELP_TEXT = u"{1} => first word &nbsp;&nbsp;&nbsp; {1+} => first word and after &nbsp;&nbsp;&nbsp; {{ => { &nbsp;&nbsp;&nbsp; <a href='https://chatterino.com/help/commands'>more info</a>"_s;
+inline const QString HELP_TEXT =
+    u"{1} => first word &nbsp;&nbsp;&nbsp; {1+} => first word and after &nbsp;&nbsp;&nbsp; {user.last_message.id} inserts the latest local message ID &nbsp;&nbsp; {user.last_message.text} inserts its text &nbsp;&nbsp; {{ => { &nbsp;&nbsp;&nbsp; <a href='https://chatterino.com/help/commands'>more info</a>"_s;
 
 QString c1settingsPath()
 {
@@ -92,7 +93,8 @@ CommandPage::CommandPage()
                          getApp()->getCommands()->createModel(nullptr))
                      .getElement();
 
-    this->view->setTitles({"Trigger", "Command", "Show In\nMessage Menu"});
+    this->view->setTitles({"Trigger", "Command", "Show In\nMessage Menu",
+                           "Usercard label", "Usercard\nMore menu"});
     this->view->getTableView()->horizontalHeader()->setSectionResizeMode(
         1, QHeaderView::Stretch);
 
@@ -132,6 +134,20 @@ CommandPage::CommandPage()
     text->setWordWrap(true);
     text->setStyleSheet("color: #bbb");
     text->setOpenExternalLinks(true);
+
+    auto *usercardHelp =
+        layout
+            .emplace<QLabel>("Set a usercard label to add a button on Twitch "
+                             "and Kick usercards. "
+                             "Check More menu to move it off the bar. Clear "
+                             "the label to hide it.\n"
+                             "Use {user.name} or {user.id} for that user, and "
+                             "{channel.name} for the chat. "
+                             "Examples: /timeout {user.name} 60, /delete "
+                             "{user.last_message.id}, "
+                             "/openurl https://www.twitch.tv/{user.name}")
+            .getElement();
+    usercardHelp->setWordWrap(true);
 
     auto *duplicateWarning =
         layout

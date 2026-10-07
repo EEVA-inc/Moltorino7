@@ -27,6 +27,14 @@ namespace chatterino::recentmessages {
 using ResultCallback = std::function<void(const std::vector<MessagePtr> &)>;
 using ErrorCallback = std::function<void()>;
 
+struct Provider {
+    QString id;
+    QString name;
+    QString urlTemplate;
+};
+
+const std::vector<Provider> &providers();
+
 void load(
     const QString &channelName, std::weak_ptr<Channel> channelPtr,
     ResultCallback onLoaded, ErrorCallback onError, int limit,

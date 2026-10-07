@@ -27,6 +27,9 @@ public:
     void addToStringList(QStringList &list, size_t maxCount = 0,
                          bool isFirstWord = false) const override;
 
+    qsizetype tabCompletionCount() const override;
+    const EmoteItem *emoteAtTabCompletionIndex(qsizetype index) const override;
+
 private:
     std::vector<std::unique_ptr<Source>> sources_;
 };

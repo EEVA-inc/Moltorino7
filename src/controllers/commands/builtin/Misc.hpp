@@ -16,6 +16,8 @@ namespace chatterino::commands {
 
 QString follow(const CommandContext &ctx);
 QString unfollow(const CommandContext &ctx);
+QString hideUser(const CommandContext &ctx);
+QString unhideUser(const CommandContext &ctx);
 QString nameHistory(const CommandContext &ctx);
 QString logs(const CommandContext &ctx);
 QString modLogs(const CommandContext &ctx);
@@ -24,7 +26,12 @@ QString translateTo(const CommandContext &ctx);
 QString sayTranslate(const CommandContext &ctx);
 QString uptime(const CommandContext &ctx);
 QString user(const CommandContext &ctx);
-QString requests(const CommandContext &ctx);
+QString vanity(const CommandContext &ctx);
+QString selfbot(const CommandContext &ctx);
+QString rewardRequests(const CommandContext &ctx);
+QString unbanRequests(const CommandContext &ctx);
+QString crossBan(const CommandContext &ctx);
+QString crossUnban(const CommandContext &ctx);
 QString lowtrust(const CommandContext &ctx);
 QString clip(const CommandContext &ctx);
 QString marker(const CommandContext &ctx);

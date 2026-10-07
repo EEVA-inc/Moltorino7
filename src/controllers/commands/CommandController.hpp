@@ -69,7 +69,8 @@ private:
         std::variant<CommandFunction, CommandFunctionWithContext>;
 
     void registerCommand(const QString &commandName,
-                         CommandFunctionVariants commandFunction);
+                         CommandFunctionVariants commandFunction,
+                         bool addToAutoComplete = true);
 
     std::unordered_map<QString, CommandFunctionVariants> commands_;
 

@@ -7,6 +7,7 @@
 #include "controllers/commands/CommandContext.hpp"
 #include "providers/twitch/api/Helix.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
+#include "util/ChannelPointAmount.hpp"
 #include "util/Helpers.hpp"
 #include "util/Twitch.hpp"
 
@@ -251,12 +252,13 @@ ExpectedStr<StartUserParticipationAction> parseUserParticipationAction(
 
     if (parser.isSet(pointsOption))
     {
-        bool validPoints = true;
-        action.pointsPerVote = parser.value(pointsOption).toInt(&validPoints);
-        if (!validPoints)
+        const auto points = parseChannelPointAmount(parser.value(pointsOption),
+                                                    MAX_POLL_POINTS_PER_VOTE);
+        if (!points.has_value())
         {
             return makeUnexpected("Invalid points - " % usage);
         }
+        action.pointsPerVote = *points;
     }
 
     return action;

@@ -29,6 +29,7 @@ const QMap<QString, QString> VALID_IDENTIFIERS_MAP{
     {"author.no_color", "author has no color?"},
     {"author.subbed", "author subscribed?"},
     {"author.sub_length", "author sub length"},
+    {"bits.amount", "bits cheered"},
     {"channel.name", "channel name"},
     {"channel.watching", "/watching channel?"},
     {"channel.live", "channel live?"},
@@ -47,6 +48,7 @@ const QMap<QString, QString> VALID_IDENTIFIERS_MAP{
     {"flags.whisper", "whisper message?"},
     {"flags.reply", "reply message?"},
     {"flags.automod", "automod message?"},
+    {"flags.moderation_action", "moderation action message?"},
     {"flags.restricted", "restricted message?"},
     {"flags.monitored", "monitored message?"},
     {"flags.shared", "shared message?"},
@@ -55,6 +57,8 @@ const QMap<QString, QString> VALID_IDENTIFIERS_MAP{
     {"flags.repeated_messages", "repeated messages?"},
     {"flags.watch_streak", "watch streak message?"},
     {"flags.webchat_detected", "message detected as Twitch Web?"},
+    {"flags.announcement", "announcement message?"},
+    {"flags.emote_only", "message contains only emotes?"},
     {"message.content", "message text"},
     {"message.length", "message length"},
     {"moltorino.client_detection",
@@ -338,7 +342,7 @@ TokenType Tokenizer::tokenize(const QString &text)
             return TokenType::STRING;
         }
 
-        if (VALID_IDENTIFIERS_MAP.keys().contains(text))
+        if (VALID_IDENTIFIERS_MAP.contains(text))
         {
             return TokenType::IDENTIFIER;
         }

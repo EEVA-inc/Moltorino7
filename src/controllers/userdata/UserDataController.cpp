@@ -6,6 +6,7 @@
 
 #include "singletons/Paths.hpp"
 #include "util/CombinePath.hpp"
+#include "util/Backup.hpp"
 #include "util/Helpers.hpp"
 
 namespace {
@@ -37,7 +38,15 @@ UserDataController::UserDataController(const Paths &paths)
     : sm(initSettingsInstance(paths))
     , setting("/users", this->sm)
 {
-    this->sm->load();
+    backup::loadSettingManagerWithBackups(
+        backup::FileData{
+            .fileName = QStringLiteral("user-data.json"),
+            .directory = paths.settingsDirectory,
+            .fileKind = QStringLiteral("User notes and colors"),
+            .fileDescription = QStringLiteral(
+                "This file contains saved user notes and custom colors."),
+        },
+        this->sm);
     this->users = this->setting.getValue();
 }
 

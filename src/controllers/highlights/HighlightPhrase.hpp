@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "controllers/highlights/HighlightChannelScope.hpp"
+#include "controllers/highlights/HighlightResult.hpp"
 #include "util/RapidjsonHelpers.hpp"
 #include "util/RapidJsonSerializeQString.hpp"
 
@@ -14,6 +16,8 @@
 #include <QUrl>
 
 #include <memory>
+#include <utility>
+#include <vector>
 
 namespace chatterino {
 
@@ -24,11 +28,21 @@ public:
 
     HighlightPhrase(const QString &pattern, bool showInMentions, bool hasAlert,
                     bool hasSound, bool isRegex, bool isCaseSensitive,
-                    const QString &soundUrl, QColor color);
+                    const QString &soundUrl, QColor color,
+                    QColor matchColor = {},
+                    HighlightMatchStyle matchStyle =
+                        HighlightMatchStyle::Outline,
+                    QString matchPaintID = {},
+                    HighlightChannelScope channelScope = {});
 
     HighlightPhrase(const QString &pattern, bool showInMentions, bool hasAlert,
                     bool hasSound, bool isRegex, bool isCaseSensitive,
-                    const QString &soundUrl, std::shared_ptr<QColor> color);
+                    const QString &soundUrl, std::shared_ptr<QColor> color,
+                    std::shared_ptr<QColor> matchColor = nullptr,
+                    HighlightMatchStyle matchStyle =
+                        HighlightMatchStyle::Outline,
+                    QString matchPaintID = {},
+                    HighlightChannelScope channelScope = {});
 
     const QString &getPattern() const;
     bool showInMentions() const;
@@ -41,9 +55,15 @@ public:
     bool isRegex() const;
     bool isValid() const;
     bool isMatch(const QString &subject) const;
+    std::vector<QRegularExpressionMatch> findMatches(
+        const QString &subject) const;
     bool isCaseSensitive() const;
     const QUrl &getSoundUrl() const;
     const std::shared_ptr<QColor> getColor() const;
+    const std::shared_ptr<QColor> getMatchColor() const;
+    HighlightMatchStyle getMatchStyle() const;
+    const QString &getMatchPaintID() const;
+    const HighlightChannelScope &getChannelScope() const;
 
     static QColor FALLBACK_HIGHLIGHT_COLOR;
 
@@ -55,6 +75,11 @@ public:
     static QColor FALLBACK_ELEVATED_MESSAGE_HIGHLIGHT_COLOR;
     static QColor FALLBACK_THREAD_HIGHLIGHT_COLOR;
     static QColor FALLBACK_AUTOMOD_HIGHLIGHT_COLOR;
+    static QColor FALLBACK_ANNOUNCEMENT_HIGHLIGHT_COLOR;
+    static QColor ANNOUNCEMENT_BLUE_HIGHLIGHT_COLOR;
+    static QColor ANNOUNCEMENT_GREEN_HIGHLIGHT_COLOR;
+    static QColor ANNOUNCEMENT_ORANGE_HIGHLIGHT_COLOR;
+    static QColor ANNOUNCEMENT_PURPLE_HIGHLIGHT_COLOR;
 
 private:
     QString pattern_;
@@ -65,6 +90,10 @@ private:
     bool isCaseSensitive_;
     QUrl soundUrl_;
     std::shared_ptr<QColor> color_;
+    std::shared_ptr<QColor> matchColor_;
+    HighlightMatchStyle matchStyle_{HighlightMatchStyle::Outline};
+    QString matchPaintID_;
+    HighlightChannelScope channelScope_;
     QRegularExpression regex_;
 };
 
@@ -96,6 +125,26 @@ struct Serialize<chatterino::HighlightPhrase> {
         chatterino::rj::set(ret, "soundUrl", value.getSoundUrl().toString(), a);
         chatterino::rj::set(ret, "color",
                             value.getColor()->name(QColor::HexArgb), a);
+        chatterino::rj::set(ret, "matchColor",
+                            value.getMatchColor()->name(QColor::HexArgb), a);
+        chatterino::rj::set(ret, "matchStyle",
+                            chatterino::highlightMatchStyleName(
+                                value.getMatchStyle()),
+                            a);
+        chatterino::rj::set(ret, "matchPaintId", value.getMatchPaintID(), a);
+        chatterino::rj::set(
+            ret, "channelScope",
+            chatterino::highlightChannelScopeModeKey(
+                value.getChannelScope().mode()),
+            a);
+        std::vector<QString> channelTargets;
+        channelTargets.reserve(value.getChannelScope().targets().size());
+        for (const auto &target : value.getChannelScope().targets())
+        {
+            channelTargets.emplace_back(
+                chatterino::encodeHighlightChannelTarget(target));
+        }
+        chatterino::rj::set(ret, "channelTargets", channelTargets, a);
 
         return ret;
     }
@@ -121,6 +170,11 @@ struct Deserialize<chatterino::HighlightPhrase> {
         bool _isCaseSensitive = false;
         QString _soundUrl;
         QString encodedColor;
+        QString encodedMatchColor;
+        QString matchStyle;
+        QString matchPaintID;
+        QString channelScope;
+        std::vector<QString> encodedChannelTargets;
 
         chatterino::rj::getSafe(value, "pattern", _pattern);
         chatterino::rj::getSafe(value, "showInMentions", _showInMentions);
@@ -130,6 +184,79 @@ struct Deserialize<chatterino::HighlightPhrase> {
         chatterino::rj::getSafe(value, "case", _isCaseSensitive);
         chatterino::rj::getSafe(value, "soundUrl", _soundUrl);
         chatterino::rj::getSafe(value, "color", encodedColor);
+        chatterino::rj::getSafe(value, "matchColor", encodedMatchColor);
+        chatterino::rj::getSafe(value, "matchStyle", matchStyle);
+        chatterino::rj::getSafe(value, "matchPaintId", matchPaintID);
+        const bool hasChannelScope = chatterino::rj::getSafe(
+            value, "channelScope", channelScope);
+        chatterino::rj::getSafe(value, "channelTargets",
+                                encodedChannelTargets);
+
+        auto scopeMode = chatterino::highlightChannelScopeModeFromKey(
+            channelScope);
+        std::vector<chatterino::HighlightChannelTarget> channelTargets;
+        for (const auto &encoded : encodedChannelTargets)
+        {
+            if (auto target =
+                    chatterino::decodeHighlightChannelTarget(encoded))
+            {
+                channelTargets.emplace_back(std::move(*target));
+            }
+        }
+
+        if (!hasChannelScope)
+        {
+            bool legacyGlobal = true;
+            std::vector<QString> legacyIncluded;
+            std::vector<QString> legacyExcluded;
+            const bool hasLegacyGlobal = chatterino::rj::getSafe(
+                value, "global", legacyGlobal);
+            const bool hasLegacyIncluded = chatterino::rj::getSafe(
+                value, "channels", legacyIncluded);
+            const bool hasLegacyExcluded = chatterino::rj::getSafe(
+                value, "ExcludedChannels", legacyExcluded);
+            if (hasLegacyGlobal || hasLegacyIncluded || hasLegacyExcluded)
+            {
+                if (!legacyGlobal)
+                {
+                    scopeMode =
+                        chatterino::HighlightChannelScopeMode::OnlySelected;
+                    QSet<QString> excluded;
+                    for (const auto &channel : legacyExcluded)
+                    {
+                        excluded.insert(
+                            chatterino::normalizeHighlightChannelName(channel));
+                    }
+                    for (const auto &channel : legacyIncluded)
+                    {
+                        auto target = chatterino::makeHighlightChannelTarget(
+                            chatterino::HighlightChannelTargetPlatform::Any,
+                            channel);
+                        if (target &&
+                            !excluded.contains(
+                                chatterino::normalizeHighlightChannelName(
+                                    target->channel)))
+                        {
+                            channelTargets.emplace_back(std::move(*target));
+                        }
+                    }
+                }
+                else if (!legacyExcluded.empty())
+                {
+                    scopeMode =
+                        chatterino::HighlightChannelScopeMode::ExcludeSelected;
+                    for (const auto &channel : legacyExcluded)
+                    {
+                        if (auto target = chatterino::makeHighlightChannelTarget(
+                                chatterino::HighlightChannelTargetPlatform::Any,
+                                channel))
+                        {
+                            channelTargets.emplace_back(std::move(*target));
+                        }
+                    }
+                }
+            }
+        }
 
         auto _color = QColor(encodedColor);
         if (!_color.isValid())
@@ -137,9 +264,18 @@ struct Deserialize<chatterino::HighlightPhrase> {
             _color = chatterino::HighlightPhrase::FALLBACK_HIGHLIGHT_COLOR;
         }
 
-        return chatterino::HighlightPhrase(_pattern, _showInMentions, _hasAlert,
-                                           _hasSound, _isRegex,
-                                           _isCaseSensitive, _soundUrl, _color);
+        auto _matchColor = QColor(encodedMatchColor);
+        if (!_matchColor.isValid())
+        {
+            _matchColor = chatterino::defaultHighlightMatchColor(_color);
+        }
+
+        return chatterino::HighlightPhrase(
+            _pattern, _showInMentions, _hasAlert, _hasSound, _isRegex,
+            _isCaseSensitive, _soundUrl, _color, _matchColor,
+            chatterino::highlightMatchStyleFromName(matchStyle), matchPaintID,
+            chatterino::HighlightChannelScope{
+                scopeMode, std::move(channelTargets)});
     }
 };
 

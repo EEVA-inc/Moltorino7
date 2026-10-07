@@ -34,6 +34,9 @@ public:
     void addToStringList(QStringList &list, size_t maxCount = 0,
                          bool isFirstWord = false) const override;
 
+    qsizetype tabCompletionCount() const override;
+    const EmoteItem *emoteAtTabCompletionIndex(qsizetype index) const override;
+
     const std::vector<UserItem> &output() const;
 
 private:

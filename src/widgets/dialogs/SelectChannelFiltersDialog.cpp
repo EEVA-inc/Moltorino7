@@ -6,6 +6,7 @@
 
 #include "controllers/filters/FilterRecord.hpp"
 #include "singletons/Settings.hpp"
+#include "widgets/dialogs/MoltorinoDialogTheme.hpp"
 
 #include <QCheckBox>
 #include <QLabel>
@@ -89,6 +90,7 @@ SelectChannelFiltersDialog::SelectChannelFiltersDialog(
             itemVbox->addWidget(checkbox);
         }
     }
+    installMoltorinoDialogTheme(this);
 }
 
 const QList<QUuid> &SelectChannelFiltersDialog::getSelection() const

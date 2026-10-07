@@ -5,16 +5,22 @@
 #include "controllers/completion/sources/CommandSource.hpp"
 
 #include "Application.hpp"
+#include "controllers/accounts/AccountController.hpp"
+#include "controllers/commands/builtin/twitch/Chatters.hpp"
 #include "controllers/commands/Command.hpp"
 #include "controllers/commands/CommandController.hpp"
 #include "controllers/completion/sources/Helpers.hpp"
 #include "providers/moltorino/MoltorinoAuth.hpp"
+#include "providers/potat/PotatCommands.hpp"
 #include "providers/twitch/TwitchCommon.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
+#include "providers/youtube/YouTubeChannel.hpp"
 #include "singletons/Settings.hpp"
+#include "util/Helpers.hpp"
 #include "widgets/splits/InputCompletionItem.hpp"
 
 #include <QHash>
+#include <QProcess>
 #include <QSet>
 
 #include <algorithm>
@@ -46,6 +52,8 @@ QString commandUsage(const QString &command)
         {"/commercial", "<length>"},
         {"/completeprediction", "<outcome>"},
         {"/copy", "<text>"},
+        {"/crossban", "<username>"},
+        {"/crossunban", "<username>"},
         {"/debug-args", ""},
         {"/debug-env", ""},
         {"/debug-eventsub", ""},
@@ -68,9 +76,13 @@ QString commandUsage(const QString &command)
         {"/followers", "[duration]"},
         {"/followersoff", ""},
         {"/founders", ""},
+        {"/gigantify", "<Twitch emote>"},
         {"/help", ""},
+        {"/hide", "<username>"},
+        {"/hideuser", "<username>"},
         {"/host", "<username>"},
         {"/ignore", "<username>"},
+        {"/invis", "<message>"},
         {"/leadmod", "<username>"},
         {"/lockprediction", ""},
         {"/logs", "<username> [channel]"},
@@ -78,11 +90,11 @@ QString commandUsage(const QString &command)
         {"/marker", "[description]"},
         {"/me", "<message>"},
         {"/mod", "<username>"},
-        {"/modlogs", "[all|moderator] [range] [channel]"},
+        {"/modlogs", "[range] [channel]"},
         {"/mods", ""},
         {"/monitor", "<username>"},
         {"/namehistory", "<username>"},
-        {"/nuke", "<text> <timeout|ban|delete> <range>"},
+        {"/nuke", "<text> <timeout duration|ban|delete> <range>"},
         {"/openurl", "<url> [--incognito|--no-incognito]"},
         {"/pin", "<messageid/message/username>"},
         {"/poll", ""},
@@ -95,7 +107,7 @@ QString commandUsage(const QString &command)
         {"/raidsend", ""},
         {"/raw", "<message>"},
         {"/reply", "<username> <message>"},
-        {"/requests", "[channel]"},
+        {"/rewardrequests", "[channel]"},
         {"/restrict", "<username>"},
         {"/setgame", "<game>"},
         {"/settitle", "<stream title>"},
@@ -115,10 +127,13 @@ QString commandUsage(const QString &command)
         {"/translate", "<message>"},
         {"/translateto", "<language> <message>"},
         {"/unban", "<username>"},
+        {"/unbanrequests", "[channel]"},
         {"/unblock", "<username>"},
         {"/unblockterm", "<term>"},
         {"/uneditor", "<username>"},
         {"/unfollow", "[username]"},
+        {"/unhide", "<username>"},
+        {"/unhideuser", "<username>"},
         {"/unhost", ""},
         {"/unignore", "<username>"},
         {"/unleadmod", "<username>"},
@@ -132,11 +147,13 @@ QString commandUsage(const QString &command)
         {"/uniquechat", ""},
         {"/uniquechatoff", ""},
         {"/unstable-set-user-color", "<username> <color>"},
+        {"/vanity", ""},
         {"/user", "<username> [channel]"},
-        {"/usercard", "<username> [channel]"},
+        {"/usercard", "[username] [channel]"},
         {"/vip", "<username>"},
         {"/vips", ""},
         {"/warn", "<username> <reason>"},
+        {"/chatwarnings", ""},
         {".w", "<username> <message>"},
         {"/w", "<username> <message>"},
         {"/whisper", "<username> <message>"},
@@ -145,13 +162,18 @@ QString commandUsage(const QString &command)
     return usages.value(command.toLower());
 }
 
-void addCommand(const QString &command, std::vector<CommandItem> &out)
+void addCommand(const QString &command, std::vector<CommandItem> &out,
+                bool useBuiltInUsage)
 {
     const auto normalized =
         command.startsWith('/') || command.startsWith('.')
             ? command
             : QStringLiteral("/") + command;
-    const auto usage = commandUsage(normalized);
+    const auto usage = useBuiltInUsage ? commandUsage(normalized) : QString{};
+    const auto hintMode =
+        normalized.compare(QStringLiteral("/nuke"), Qt::CaseInsensitive) == 0
+            ? CommandHintMode::Nuke
+            : CommandHintMode::Dynamic;
 
     if (command.startsWith('/') || command.startsWith('.'))
     {
@@ -159,6 +181,9 @@ void addCommand(const QString &command, std::vector<CommandItem> &out)
             .name = command.mid(1),
             .prefix = command.at(0),
             .usage = usage,
+            .hintMode = hintMode,
+            .showArgumentHint = !usage.isEmpty(),
+            .builtIn = useBuiltInUsage,
         });
     }
     else
@@ -167,8 +192,50 @@ void addCommand(const QString &command, std::vector<CommandItem> &out)
             .name = command,
             .prefix = "",
             .usage = usage,
+            .hintMode = hintMode,
+            .showArgumentHint = !usage.isEmpty(),
+            .builtIn = useBuiltInUsage,
         });
     }
+}
+
+const QSet<QString> &gqlModeratorQueueCommands()
+{
+    static const QSet<QString> commands{
+        "/crossban",
+        "/crossunban",
+        "/rewardrequests",
+        "/unbanrequests",
+    };
+    return commands;
+}
+
+bool hasGqlModeratorQueueAccess(const Channel *channel)
+{
+    auto *twitchChannel = dynamic_cast<const TwitchChannel *>(channel);
+    if (twitchChannel == nullptr)
+    {
+        return false;
+    }
+
+    QString ignored;
+    const auto auth = MoltorinoAuth::resolveModerationToken(
+        twitchChannel->roomId(), twitchChannel->getName(), &ignored);
+    return auth.hasToken() && !auth.legacy;
+}
+
+const QSet<QString> &youtubeModerationCommands()
+{
+    static const QSet<QString> commands{
+        "/ban", "/delete", "/timeout", "/unban", "/untimeout",
+    };
+    return commands;
+}
+
+bool hasSelectedGqlAuth()
+{
+    QString ignored;
+    return MoltorinoAuth::resolveSelectedUserToken(&ignored).hasToken();
 }
 
 const QSet<QString> &currentAccountModCommands()
@@ -185,7 +252,6 @@ const QSet<QString> &currentAccountModCommands()
         "/bot",
         "/cancelpoll",
         "/cancelprediction",
-        "/chatters",
         "/clear",
         "/clearmessages",
         "/commercial",
@@ -206,7 +272,7 @@ const QSet<QString> &currentAccountModCommands()
         "/r9kbeta",
         "/r9kbetaoff",
         "/raid",
-        "/requests",
+        "/rewardrequests",
         "/restrict",
         "/setgame",
         "/settitle",
@@ -219,6 +285,7 @@ const QSet<QString> &currentAccountModCommands()
         "/subscribersoff",
         "/timeout",
         "/unban",
+        "/unbanrequests",
         "/unhost",
         "/unblockterm",
         "/unmod",
@@ -230,6 +297,7 @@ const QSet<QString> &currentAccountModCommands()
         "/unvip",
         "/vip",
         "/warn",
+        "/chatwarnings",
     };
     return commands;
 }
@@ -369,6 +437,10 @@ bool moltorinoFeatureHandlesCommand(const QString &command)
 bool needsMoltorinoModerationAccess(const std::vector<CommandItem> &items)
 {
     return std::any_of(items.begin(), items.end(), [](const auto &item) {
+        if (!item.builtIn)
+        {
+            return false;
+        }
         const auto command = normalizedCommand(item);
         return moltorinoFeatureHandlesCommand(command) &&
                (moltorinoModerationCommands().contains(command) ||
@@ -379,6 +451,10 @@ bool needsMoltorinoModerationAccess(const std::vector<CommandItem> &items)
 bool needsMoltorinoBroadcasterAccess(const std::vector<CommandItem> &items)
 {
     return std::any_of(items.begin(), items.end(), [](const auto &item) {
+        if (!item.builtIn)
+        {
+            return false;
+        }
         const auto command = normalizedCommand(item);
         return moltorinoFeatureHandlesCommand(command) &&
                currentAccountBroadcasterCommands().contains(command);
@@ -388,22 +464,42 @@ bool needsMoltorinoBroadcasterAccess(const std::vector<CommandItem> &items)
 bool needsMoltorinoRoleManagementAccess(const std::vector<CommandItem> &items)
 {
     return std::any_of(items.begin(), items.end(), [](const auto &item) {
-        return roleManagementCommands().contains(normalizedCommand(item));
+        return item.builtIn &&
+               roleManagementCommands().contains(normalizedCommand(item));
+    });
+}
+
+bool needsGqlModeratorQueueAccess(const std::vector<CommandItem> &items)
+{
+    return std::any_of(items.begin(), items.end(), [](const auto &item) {
+        return item.builtIn &&
+               gqlModeratorQueueCommands().contains(normalizedCommand(item));
     });
 }
 
 bool shouldHideCommand(const CommandItem &item, bool hideUnavailable,
                        bool hasCurrentAccountModRights,
                        bool hasCurrentAccountBroadcasterRights,
-                       bool hasMoltorinoModerationAccess,
+                       bool isYouTubeChannel, bool hasMoltorinoModerationAccess,
+                       bool hasGqlModeratorQueueAccess,
                        bool hasMoltorinoBroadcasterAccess,
                        bool hasMoltorinoRoleManagementAccess,
-                       bool hasBotBadgeAuth)
+                       bool hasBotBadgeAuth, bool hasSelectedGqlAuth,
+                       const Channel *channel)
 {
+    if (!item.builtIn)
+    {
+        return false;
+    }
     const auto command = normalizedCommand(item);
     if (isInternalCommand(command))
     {
         return true;
+    }
+
+    if (command == "/chatters" && channel != nullptr)
+    {
+        return !commands::isChattersCommandAvailable(channel);
     }
 
     if (roleManagementCommands().contains(command))
@@ -414,6 +510,39 @@ bool shouldHideCommand(const CommandItem &item, bool hideUnavailable,
     if (command == "/bot" && !hasBotBadgeAuth)
     {
         return true;
+    }
+
+    if (command == "/chatwarnings" && !hasCurrentAccountModRights)
+    {
+        return true;
+    }
+
+    if (command == "/invis")
+    {
+        if (isYouTubeChannel)
+        {
+            return true;
+        }
+        return !hasSelectedGqlAuth;
+    }
+
+    if (isYouTubeChannel)
+    {
+        if (youtubeModerationCommands().contains(command))
+        {
+            return hideUnavailable && !hasCurrentAccountModRights;
+        }
+        if (currentAccountModCommands().contains(command) ||
+            currentAccountBroadcasterCommands().contains(command) ||
+            moltorinoModerationCommands().contains(command))
+        {
+            return true;
+        }
+    }
+
+    if (gqlModeratorQueueCommands().contains(command))
+    {
+        return !hasGqlModeratorQueueAccess;
     }
 
     if (!hideUnavailable)
@@ -453,6 +582,71 @@ bool shouldHideCommand(const CommandItem &item, bool hideUnavailable,
 
 }  // namespace
 
+QString remainingCommandUsage(const CommandItem &command,
+                              const QString &arguments, bool *appendDirectly)
+{
+    if (appendDirectly)
+    {
+        *appendDirectly = false;
+    }
+    if (!command.showArgumentHint || command.usage.isEmpty())
+    {
+        return {};
+    }
+    if (command.argumentHint)
+    {
+        return remainingCommandUsage(*command.argumentHint, arguments,
+                                     appendDirectly);
+    }
+    if (command.hintMode == CommandHintMode::Static)
+    {
+        return command.usage;
+    }
+
+    const auto usageArguments = splitCommandUsageFields(command.usage);
+    if (usageArguments.isEmpty())
+    {
+        return {};
+    }
+
+    const auto typed = QProcess::splitCommand(arguments.trimmed());
+    if (command.hintMode == CommandHintMode::Nuke)
+    {
+        if (typed.isEmpty())
+        {
+            return usageArguments.join(QChar(' '));
+        }
+
+        static const QSet<QString> namedActions{
+            QStringLiteral("ban"),
+            QStringLiteral("delete"),
+        };
+        const auto isAction = [&](const QString &value) {
+            return namedActions.contains(value.toLower()) ||
+                   parseDurationToSeconds(value) > 0;
+        };
+        if (typed.size() < 2)
+        {
+            return usageArguments.mid(1).join(QChar(' '));
+        }
+        const auto last = typed.size() - 1;
+        if (typed.size() >= 3 && isAction(typed.at(last - 1)))
+        {
+            return parseDurationToSeconds(typed.at(last)) > 0
+                       ? QString{}
+                       : usageArguments.at(2);
+        }
+        if (!isAction(typed.at(last)))
+        {
+            return usageArguments.mid(1).join(QChar(' '));
+        }
+        return usageArguments.size() >= 3 ? usageArguments.at(2) : QString{};
+    }
+
+    return usageArguments.mid(std::min(typed.size(), usageArguments.size()))
+        .join(QChar(' '));
+}
+
 CommandSource::CommandSource(std::unique_ptr<CommandStrategy> strategy,
                              ActionCallback callback, const Channel *channel)
     : strategy_(std::move(strategy))
@@ -465,19 +659,88 @@ CommandSource::CommandSource(std::unique_ptr<CommandStrategy> strategy,
 void CommandSource::update(const QString &query)
 {
     this->output_.clear();
+    if (query.startsWith(QChar('#')))
+    {
+        if (!getSettings()->includePotatCommands ||
+            this->strategy_ == nullptr || this->channel_ == nullptr ||
+            this->channel_->getType() != Channel::Type::Twitch)
+        {
+            return;
+        }
+        auto *potat = getApp()->getPotatCommands();
+        if (potat == nullptr)
+        {
+            return;
+        }
+        potat->ensureLoaded();
+        std::vector<CommandItem> items;
+        items.reserve(potat->commands().size());
+        for (const auto &command : potat->commands())
+        {
+            if (command.alias && !getSettings()->showPotatCommandAliases)
+            {
+                continue;
+            }
+            items.push_back({
+                .name = command.name,
+                .prefix = QStringLiteral("#"),
+                .usage = command.usage,
+                .hintMode = command.dynamicUsage ? CommandHintMode::Dynamic
+                                                 : CommandHintMode::Static,
+                .showArgumentHint = (!command.alias || command.argumentHint) &&
+                                    !command.usage.isEmpty(),
+                .argumentHint = command.argumentHint,
+            });
+        }
+        this->strategy_->apply(items, this->output_, query);
+        return;
+    }
     if (this->strategy_)
     {
         this->strategy_->apply(this->items_, this->output_, query);
+        const bool isYouTubeChannel =
+            dynamic_cast<const YouTubeChannel *>(this->channel_) != nullptr;
+        if (isYouTubeChannel)
+        {
+            for (auto &item : this->output_)
+            {
+                if (!item.builtIn)
+                {
+                    continue;
+                }
+                const auto command = normalizedCommand(item);
+                if (command == "/ban")
+                {
+                    item.usage = "<name|id:channel-id>";
+                }
+                else if (command == "/timeout")
+                {
+                    item.usage = "<name|id:channel-id> [duration]";
+                }
+                else if (command == "/unban" || command == "/untimeout")
+                {
+                    item.usage = "<name|id:channel-id>";
+                }
+                else if (command == "/delete")
+                {
+                    item.usage = "<message-id>";
+                }
+            }
+        }
         const bool hideUnavailable =
             getSettings()->hideUnavailableModCommands;
         const bool hasCurrentAccountModRights =
             this->channel_ != nullptr && this->channel_->hasModRights();
         const bool hasCurrentAccountBroadcasterRights =
             this->channel_ != nullptr && this->channel_->isBroadcaster();
+        const bool needsQueueAccess =
+            needsGqlModeratorQueueAccess(this->output_);
         const bool moltorinoAccess =
             hideUnavailable && !hasCurrentAccountModRights &&
             needsMoltorinoModerationAccess(this->output_) &&
             hasMoltorinoModerationAccess(this->channel_);
+        const bool gqlModeratorQueueAccess =
+            needsQueueAccess && hasGqlModeratorQueueAccess(this->channel_);
         const bool moltorinoBroadcasterAccess =
             hideUnavailable && !hasCurrentAccountBroadcasterRights &&
             needsMoltorinoBroadcasterAccess(this->output_) &&
@@ -486,17 +749,25 @@ void CommandSource::update(const QString &query)
             needsMoltorinoRoleManagementAccess(this->output_) &&
             hasMoltorinoRoleManagementAccess(this->channel_);
         const bool botBadgeAuth = hasBotBadgeAuth();
+        const bool selectedGqlAuth =
+            std::any_of(this->output_.begin(), this->output_.end(),
+                        [](const auto &item) {
+                            return item.builtIn &&
+                                   normalizedCommand(item) == "/invis";
+                        }) &&
+            hasSelectedGqlAuth();
         this->output_.erase(
-            std::remove_if(this->output_.begin(), this->output_.end(),
-                           [&](const auto &item) {
-                               return shouldHideCommand(
-                                   item, hideUnavailable,
-                                   hasCurrentAccountModRights,
-                                   hasCurrentAccountBroadcasterRights,
-                                   moltorinoAccess,
-                                   moltorinoBroadcasterAccess,
-                                   moltorinoRoleManagementAccess, botBadgeAuth);
-                           }),
+            std::remove_if(
+                this->output_.begin(), this->output_.end(),
+                [&](const auto &item) {
+                    return shouldHideCommand(
+                        item, hideUnavailable, hasCurrentAccountModRights,
+                        hasCurrentAccountBroadcasterRights, isYouTubeChannel,
+                        moltorinoAccess, gqlModeratorQueueAccess,
+                        moltorinoBroadcasterAccess,
+                        moltorinoRoleManagementAccess, botBadgeAuth,
+                        selectedGqlAuth, this->channel_);
+                }),
             this->output_.end());
     }
 }
@@ -520,6 +791,16 @@ void CommandSource::addToStringList(QStringList &list, size_t maxCount,
                        });
 }
 
+qsizetype CommandSource::tabCompletionCount() const
+{
+    return static_cast<qsizetype>(this->output_.size());
+}
+
+const EmoteItem *CommandSource::emoteAtTabCompletionIndex(qsizetype) const
+{
+    return nullptr;
+}
+
 void CommandSource::initializeItems()
 {
     std::vector<CommandItem> commands;
@@ -527,27 +808,27 @@ void CommandSource::initializeItems()
 #ifdef CHATTERINO_HAVE_PLUGINS
     for (const auto &command : getApp()->getCommands()->pluginCommands())
     {
-        addCommand(command, commands);
+        addCommand(command, commands, false);
     }
 #endif
 
     // Custom Chatterino commands
     for (const auto &command : getApp()->getCommands()->items)
     {
-        addCommand(command.name, commands);
+        addCommand(command.name, commands, false);
     }
 
     // Default Chatterino commands
     auto x = getApp()->getCommands()->getDefaultChatterinoCommandList();
     for (const auto &command : x)
     {
-        addCommand(command, commands);
+        addCommand(command, commands, true);
     }
 
     // Default Twitch commands
     for (const auto &command : TWITCH_DEFAULT_COMMANDS)
     {
-        addCommand(command, commands);
+        addCommand(command, commands, true);
     }
 
     this->items_ = std::move(commands);

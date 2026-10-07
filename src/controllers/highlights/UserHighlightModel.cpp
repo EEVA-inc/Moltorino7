@@ -34,7 +34,11 @@ HighlightPhrase UserHighlightModel::getItemFromRow(
         row[Column::UseRegex]->data(Qt::CheckStateRole).toBool(),
         row[Column::CaseSensitive]->data(Qt::CheckStateRole).toBool(),
         row[Column::SoundPath]->data(Qt::UserRole).toString(),
-        highlightColor};
+        highlightColor,
+        original.getMatchColor(),
+        original.getMatchStyle(),
+        original.getMatchPaintID(),
+        HighlightModel::channelScopeFromItem(row[Column::ChannelScope])};
 }
 
 void UserHighlightModel::afterInit()
@@ -58,6 +62,9 @@ void UserHighlightModel::afterInit()
     auto selfColor =
         ColorProvider::instance().color(ColorType::SelfMessageHighlight);
     setColorItem(messagesRow[Column::Color], *selfColor, false);
+    messagesRow[Column::MatchAppearance]->setFlags({});
+    HighlightModel::setChannelScopeItem(messagesRow[Column::ChannelScope],
+                                        HighlightChannelScope{}, false);
 
     this->insertCustomRow(
         messagesRow, HighlightModel::UserHighlightRowIndexes::SelfMessageRow);
@@ -124,6 +131,9 @@ void UserHighlightModel::getRowFromItem(const HighlightPhrase &item,
     setBoolItem(row[Column::CaseSensitive], item.isCaseSensitive());
     setFilePathItem(row[Column::SoundPath], item.getSoundUrl());
     setColorItem(row[Column::Color], *item.getColor());
+    row[Column::MatchAppearance]->setFlags({});
+    HighlightModel::setChannelScopeItem(row[Column::ChannelScope],
+                                        item.getChannelScope());
 }
 
 }

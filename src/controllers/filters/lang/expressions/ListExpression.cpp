@@ -9,9 +9,10 @@ namespace chatterino::filters {
 ListExpression::ListExpression(ExpressionList &&list)
     : list_(std::move(list)) {};
 
-QVariant ListExpression::execute(const ContextMap &context) const
+QVariant ListExpression::execute(RunContext context) const
 {
     QList<QVariant> results;
+    results.reserve(static_cast<qsizetype>(this->list_.size()));
     bool allStrings = true;
     for (const auto &exp : this->list_)
     {

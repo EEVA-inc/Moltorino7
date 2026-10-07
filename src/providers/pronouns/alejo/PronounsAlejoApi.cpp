@@ -14,11 +14,14 @@
 #include <QStringBuilder>
 #include <QTimer>
 
+#include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 namespace {
 
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 const auto &LOG = chatterinoPronouns;
 
 constexpr QStringView API_URL = u"https://api.pronouns.alejo.io/v1";
@@ -26,6 +29,9 @@ constexpr QStringView API_USERS_ENDPOINT = u"/users";
 constexpr QStringView API_PRONOUNS_ENDPOINT = u"/pronouns";
 constexpr int API_TIMEOUT_MS = 5 * 1000;
 constexpr int MAX_PRONOUN_LIST_RETRIES = 5;
+constexpr int PRONOUN_LIST_COOLDOWN_MS = 5 * 60 * 1000;
+constexpr size_t MAX_CONCURRENT_USER_FETCHES = 4;
+constexpr size_t MAX_QUEUED_USER_FETCHES = 1000;
 
 }
 
@@ -40,62 +46,136 @@ void AlejoApi::fetch(
     const QString &username,
     const std::function<void(std::optional<UserPronouns>)> &onDone)
 {
+    bool needsPronounList = false;
+    bool queueFull = false;
+    bool cooldownActive = false;
     {
-        std::shared_lock lock(this->mutex);
-        if (this->pronouns.empty())
+        std::unique_lock lock(this->mutex);
+        cooldownActive = this->pronounsCooldownActive_.load();
+        if (!cooldownActive)
         {
-            this->loadAvailablePronouns();
-            runInGuiThread([this, username, onDone] {
-                QTimer::singleShot(750, [this, username, onDone] {
-                    if (isAppAboutToQuit())
-                    {
-                        return;
-                    }
-
-                    {
-                        std::shared_lock retryLock(this->mutex);
-                        if (this->pronouns.empty())
-                        {
-                            onDone({});
-                            return;
-                        }
-                    }
-                    this->fetch(username, onDone);
-                });
-            });
-            return;
+            queueFull = this->pendingFetches_.size() >= MAX_QUEUED_USER_FETCHES;
+            if (!queueFull)
+            {
+                needsPronounList = this->pronouns.empty();
+                this->pendingFetches_.push_back({username, onDone});
+            }
         }
     }
 
-    qCDebug(LOG) << "Fetching pronouns from alejo.io for" << username;
+    if (cooldownActive)
+    {
+        onDone({});
+        return;
+    }
+    if (queueFull)
+    {
+        qCWarning(LOG) << "Dropping pronoun request because the queue is full";
+        onDone({});
+        return;
+    }
 
+    if (needsPronounList)
+    {
+        this->loadAvailablePronouns();
+    }
+    this->drainPendingFetches();
+}
+
+void AlejoApi::drainPendingFetches()
+{
+    std::vector<PendingFetch> fetches;
+    {
+        std::unique_lock lock(this->mutex);
+        if (this->pronouns.empty())
+        {
+            return;
+        }
+
+        while (this->activeUserFetches_ < MAX_CONCURRENT_USER_FETCHES &&
+               !this->pendingFetches_.empty())
+        {
+            fetches.push_back(std::move(this->pendingFetches_.front()));
+            this->pendingFetches_.pop_front();
+            ++this->activeUserFetches_;
+        }
+    }
+
+    for (auto &fetch : fetches)
+    {
+        this->startUserFetch(std::move(fetch));
+    }
+}
+
+void AlejoApi::startUserFetch(PendingFetch fetch)
+{
+    qCDebug(LOG) << "Fetching pronouns from alejo.io for" << fetch.username;
+
+    const auto username = fetch.username;
     QString endpoint = API_URL % API_USERS_ENDPOINT % "/" % username;
+    auto onDone = std::make_shared<
+        std::function<void(std::optional<UserPronouns>)>>(
+        std::move(fetch.onDone));
 
     NetworkRequest(endpoint)
+        .caller(this)
         .timeout(API_TIMEOUT_MS)
-        .concurrent()
+        .maximumResponseSize(64 * 1024)
         .onSuccess([this, username, onDone](const auto &result) {
             auto object = result.parseJson();
             auto parsed = this->parsePronoun(object);
-            onDone({parsed});
+            this->finishUserFetch();
+            (*onDone)({parsed});
         })
-        .onError([onDone, username](auto result) {
+        .onError([this, onDone, username](auto result) {
             auto status = result.status();
             if (status.has_value() && status == 404)
             {
 
-                onDone({UserPronouns()});
+                this->finishUserFetch();
+                (*onDone)({UserPronouns()});
                 return;
             }
             qCWarning(LOG) << "alejo.io returned " << status.value_or(-1)
                            << " when fetching pronouns for " << username;
-            onDone({});
+            this->finishUserFetch();
+            (*onDone)({});
         })
         .execute();
 }
 
+void AlejoApi::finishUserFetch()
+{
+    {
+        std::unique_lock lock(this->mutex);
+        if (this->activeUserFetches_ > 0)
+        {
+            --this->activeUserFetches_;
+        }
+    }
+    this->drainPendingFetches();
+}
+
+void AlejoApi::failPendingFetches()
+{
+    std::deque<PendingFetch> pending;
+    {
+        std::unique_lock lock(this->mutex);
+        pending.swap(this->pendingFetches_);
+    }
+
+    for (auto &fetch : pending)
+    {
+        fetch.onDone({});
+    }
+}
+
 void AlejoApi::loadAvailablePronouns()
 {
+    if (this->pronounsRetryScheduled_)
+    {
+        return;
+    }
     if (this->pronounsLoadInFlight_.exchange(true))
     {
         return;
@@ -106,18 +186,20 @@ void AlejoApi::loadAvailablePronouns()
     QString endpoint = API_URL % API_PRONOUNS_ENDPOINT;
 
     NetworkRequest(endpoint)
+        .caller(this)
         .timeout(API_TIMEOUT_MS)
-        .concurrent()
+        .maximumResponseSize(64 * 1024)
         .onSuccess([this](const auto &result) {
             auto root = result.parseJson();
             if (root.isEmpty())
             {
-                this->pronounsLoadInFlight_ = false;
+                this->failPendingFetches();
                 this->scheduleAvailablePronounsRetry();
+                this->pronounsLoadInFlight_ = false;
                 return;
             }
 
-            std::unordered_map<QString, QString> newPronouns;
+            std::unordered_map<QString, PronounEntry> newPronouns;
 
             for (auto it = root.begin(); it != root.end(); ++it)
             {
@@ -135,47 +217,82 @@ void AlejoApi::loadAvailablePronouns()
                     continue;
                 }
 
-                if (singular)
-                {
-                    newPronouns[pronounId] = subject;
-                }
-                else
-                {
-                    newPronouns[pronounId] = subject % "/" % object;
-                }
+                newPronouns[pronounId] = {subject, object, singular};
+            }
+
+            if (newPronouns.empty())
+            {
+                qCWarning(LOG) << "alejo.io returned no usable pronouns";
+                this->failPendingFetches();
+                this->scheduleAvailablePronounsRetry();
+                this->pronounsLoadInFlight_ = false;
+                return;
             }
 
             {
                 std::unique_lock lock(this->mutex);
-                this->pronouns = newPronouns;
+                this->pronouns = std::move(newPronouns);
             }
             this->pronounsLoadRetryCount_ = 0;
+            this->pronounsRetryScheduled_ = false;
+            this->pronounsCooldownActive_ = false;
             this->pronounsLoadInFlight_ = false;
+            this->drainPendingFetches();
         })
         .onError([this](const NetworkResult &result) {
             qCWarning(LOG) << "Failed to load pronouns from alejo.io"
                            << result.formatError();
-            this->pronounsLoadInFlight_ = false;
+            this->failPendingFetches();
             this->scheduleAvailablePronounsRetry();
+            this->pronounsLoadInFlight_ = false;
         })
         .execute();
 }
 
 void AlejoApi::scheduleAvailablePronounsRetry()
 {
-    const auto retryCount = this->pronounsLoadRetryCount_.fetch_add(1);
-    if (retryCount >= MAX_PRONOUN_LIST_RETRIES)
+    if (this->pronounsRetryScheduled_.exchange(true))
     {
         return;
     }
 
+    const auto retryCount = this->pronounsLoadRetryCount_.fetch_add(1);
+    if (retryCount >= MAX_PRONOUN_LIST_RETRIES)
+    {
+        this->pronounsCooldownActive_ = true;
+
+        this->failPendingFetches();
+        postToThread([this] {
+            QTimer::singleShot(PRONOUN_LIST_COOLDOWN_MS, this, [this] {
+                if (isAppAboutToQuit())
+                {
+                    return;
+                }
+                this->pronounsCooldownActive_ = false;
+                this->pronounsRetryScheduled_ = false;
+                this->pronounsLoadRetryCount_ = 0;
+
+                {
+                    std::shared_lock lock(this->mutex);
+                    if (!this->pronouns.empty())
+                    {
+                        return;
+                    }
+                }
+                this->loadAvailablePronouns();
+            });
+        }, this);
+        return;
+    }
+
     const auto delayMs = (retryCount + 1) * 5000;
-    runInGuiThread([this, delayMs] {
-        QTimer::singleShot(delayMs, [this] {
+    postToThread([this, delayMs] {
+        QTimer::singleShot(delayMs, this, [this] {
             if (isAppAboutToQuit())
             {
                 return;
             }
+            this->pronounsRetryScheduled_ = false;
 
             {
                 std::shared_lock lock(this->mutex);
@@ -186,31 +303,47 @@ void AlejoApi::scheduleAvailablePronounsRetry()
             }
             this->loadAvailablePronouns();
         });
-    });
+    }, this);
 }
 
 UserPronouns AlejoApi::parsePronoun(const QJsonObject &object)
 {
+    const auto &primaryValue = object["pronoun_id"];
+    const auto &alternateValue = object["alt_pronoun_id"];
+
+    if (!primaryValue.isString())
+    {
+        return {};
+    }
+
     std::shared_lock lock(this->mutex);
     if (this->pronouns.empty())
     {
         return {};
     }
 
-    const auto &pronoun = object["pronoun_id"];
-
-    if (!pronoun.isString())
+    const auto primary = this->pronouns.find(primaryValue.toString());
+    if (primary == this->pronouns.end())
     {
         return {};
     }
 
-    auto pronounStr = pronoun.toString();
-    auto iter = this->pronouns.find(pronounStr);
-    if (iter != this->pronouns.end())
+    if (alternateValue.isString())
     {
-        return {iter->second};
+        const auto alternate =
+            this->pronouns.find(alternateValue.toString());
+        if (alternate != this->pronouns.end())
+        {
+            return {QString(primary->second.subject % "/" %
+                            alternate->second.subject)};
+        }
     }
-    return {};
+
+    if (primary->second.singular)
+    {
+        return {primary->second.subject};
+    }
+    return {QString(primary->second.subject % "/" % primary->second.object)};
 }
 
 }

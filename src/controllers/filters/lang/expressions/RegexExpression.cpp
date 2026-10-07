@@ -13,7 +13,7 @@ RegexExpression::RegexExpression(const QString &regex, bool caseInsensitive)
           regex, caseInsensitive ? QRegularExpression::CaseInsensitiveOption
                                  : QRegularExpression::NoPatternOption)) {};
 
-QVariant RegexExpression::execute(const ContextMap & ) const
+QVariant RegexExpression::execute(RunContext) const
 {
     return this->regex_;
 }

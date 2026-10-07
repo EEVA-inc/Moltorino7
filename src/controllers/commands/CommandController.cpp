@@ -23,6 +23,7 @@
 #include "controllers/commands/builtin/twitch/GetModerators.hpp"
 #include "controllers/commands/builtin/twitch/GetFounders.hpp"
 #include "controllers/commands/builtin/twitch/GetVIPs.hpp"
+#include "controllers/commands/builtin/twitch/InvisibleMessage.hpp"
 #include "controllers/commands/builtin/twitch/LowTrust.hpp"
 #include "controllers/commands/builtin/twitch/ModVipActions.hpp"
 #include "controllers/commands/builtin/twitch/Nuke.hpp"
@@ -50,16 +51,23 @@
 #include "messages/MessageBuilder.hpp"
 #include "providers/emoji/Emojis.hpp"
 #include "providers/kick/KickChannel.hpp"
+#include "providers/tiktok/TikTokChannel.hpp"
 #include "providers/twitch/TwitchAccount.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
 #include "providers/twitch/TwitchCommon.hpp"
+#include "providers/youtube/YouTubeAccount.hpp"
+#include "providers/youtube/YouTubeChannel.hpp"
 #include "singletons/Paths.hpp"
 #include "singletons/Settings.hpp"
+#include "util/Backup.hpp"
 #include "util/CombinePath.hpp"
+#include "util/MultiChannel.hpp"
 #include "util/QStringHash.hpp"
+#include "util/Twitch.hpp"
 
 #include <QString>
 #include <QStringBuilder>
+#include <QTime>
 
 #include <unordered_map>
 
@@ -81,13 +89,19 @@ const std::unordered_map<QString, VariableReplacer> COMMAND_VARS{
         [](const auto &altText, const auto &channel, const auto *message) {
             (void)(altText);  //unused
             (void)(message);  //unused
-            return channel->getName();
+            return channel->isYouTubeChannel() ? channel->getDisplayName()
+                                               : channel->getName();
         },
     },
     {
         "channel.id",
         [](const auto &altText, const auto &channel, const auto *message) {
             (void)(message);  //unused
+            if (auto *youtube = dynamic_cast<YouTubeChannel *>(channel.get()))
+            {
+                return youtube->channelID().isEmpty() ? altText
+                                                      : youtube->channelID();
+            }
             auto *tc = dynamic_cast<TwitchChannel *>(channel.get());
             if (tc == nullptr)
             {
@@ -104,7 +118,8 @@ const std::unordered_map<QString, VariableReplacer> COMMAND_VARS{
         [](const auto &altText, const auto &channel, const auto *message) {
             (void)(altText);  //unused
             (void)(message);  //unused
-            return channel->getName();
+            return channel->isYouTubeChannel() ? channel->getDisplayName()
+                                               : channel->getName();
         },
     },
     {
@@ -117,27 +132,48 @@ const std::unordered_map<QString, VariableReplacer> COMMAND_VARS{
                 return altText;
             }
             const auto &status = tc->accessStreamStatus();
-            return status->live ? status->game : altText;
+            return status->game.isEmpty() ? altText : status->game;
         },
     },
     {
         "stream.title",
         [](const auto &altText, const auto &channel, const auto *message) {
             (void)(message);  //unused
+            if (const auto *tiktok =
+                    dynamic_cast<TikTokChannel *>(channel.get()))
+            {
+                return tiktok->room().title.isEmpty() ? altText
+                                                      : tiktok->room().title;
+            }
+            if (auto *youtube = dynamic_cast<YouTubeChannel *>(channel.get()))
+            {
+                return youtube->streamTitle().isEmpty()
+                           ? altText
+                           : youtube->streamTitle();
+            }
             auto *tc = dynamic_cast<TwitchChannel *>(channel.get());
             if (tc == nullptr)
             {
                 return altText;
             }
             const auto &status = tc->accessStreamStatus();
-            return status->live ? status->title : altText;
+            return status->title.isEmpty() ? altText : status->title;
         },
     },
     {
         "my.id",
         [](const auto &altText, const auto &channel, const auto *message) {
-            (void)(channel);  //unused
             (void)(message);  //unused
+            if (channel->isTikTokChannel())
+            {
+                const auto account = getApp()->getAccounts()->tiktok.current();
+                return account->isAnonymous() ? altText : account->userID();
+            }
+            if (channel->isYouTubeChannel())
+            {
+                const auto account = getApp()->getAccounts()->youtube.current();
+                return account->isAnonymous() ? altText : account->channelID();
+            }
             auto uid =
                 getApp()->getAccounts()->twitch.getCurrent()->getUserId();
             return uid.isEmpty() ? altText : uid;
@@ -146,8 +182,18 @@ const std::unordered_map<QString, VariableReplacer> COMMAND_VARS{
     {
         "my.name",
         [](const auto &altText, const auto &channel, const auto *message) {
-            (void)(channel);  //unused
             (void)(message);  //unused
+            if (channel->isTikTokChannel())
+            {
+                const auto account = getApp()->getAccounts()->tiktok.current();
+                return account->isAnonymous() ? altText : account->handle();
+            }
+            if (channel->isYouTubeChannel())
+            {
+                const auto account = getApp()->getAccounts()->youtube.current();
+                return account->isAnonymous() ? altText
+                                              : account->displayName();
+            }
             auto name =
                 getApp()->getAccounts()->twitch.getCurrent()->getUserName();
             return name.isEmpty() ? altText : name;
@@ -170,6 +216,37 @@ const std::unordered_map<QString, VariableReplacer> COMMAND_VARS{
             }
 
             return v;
+        },
+    },
+    {
+        "user.display_name",
+        [](const auto &altText, const auto &channel, const auto *message) {
+            (void)(channel);
+            if (message == nullptr || message->displayName.isEmpty())
+            {
+                return altText;
+            }
+            return message->displayName;
+        },
+    },
+    {
+        "user.id",
+        [](const auto &altText, const auto &channel, const auto *message) {
+            (void)(channel);
+            if (message == nullptr || message->userID.isEmpty())
+            {
+                return altText;
+            }
+            return message->userID;
+        },
+    },
+    {
+        "time",
+        [](const auto &altText, const auto &channel, const auto *message) {
+            (void)(altText);
+            (void)(channel);
+            (void)(message);
+            return QTime::currentTime().toString(QStringLiteral("HH:mm"));
         },
     },
     {
@@ -275,7 +352,70 @@ const std::unordered_map<QString, VariableReplacer> COMMAND_VARS{
     },
     // variables used in mod buttons and the like, these make no sense in normal commands, so they are left empty
     {"input.text", NO_OP_PLACEHOLDER},
+    {"element.copytext", NO_OP_PLACEHOLDER},
 };
+
+bool usesLatestUserMessage(const QString &command)
+{
+    static const QRegularExpression latestMessageVariable(QStringLiteral(
+        R"((^|[^{])\{user\.last_message\.(?:id|text)(?:;[^}]*)?\})"));
+    return latestMessageVariable.match(command).hasMatch();
+}
+
+MessagePtr findLatestUserMessage(const ChannelPtr &channel,
+                                 const QString &login)
+{
+    if (channel == nullptr || login.isEmpty())
+    {
+        return nullptr;
+    }
+
+    ChannelPtr searchChannel = channel;
+    if (const auto *multiChannel =
+            dynamic_cast<const MultiChannel *>(channel.get()))
+    {
+        const auto *active = multiChannel->activeChannel();
+        if (active == nullptr)
+        {
+            return nullptr;
+        }
+        searchChannel = active->channel;
+    }
+
+    const auto *twitchChannel =
+        dynamic_cast<const TwitchChannel *>(searchChannel.get());
+    const auto roomID =
+        twitchChannel == nullptr ? QString{} : twitchChannel->roomId();
+    const auto snapshot = searchChannel->getMessageSnapshot();
+    for (auto it = snapshot.rbegin(); it != snapshot.rend(); ++it)
+    {
+        const auto &candidate = *it;
+        if (candidate == nullptr || candidate->id.isEmpty() ||
+            candidate->loginName.compare(login, Qt::CaseInsensitive) != 0)
+        {
+            continue;
+        }
+        if (candidate->flags.hasAny({MessageFlag::System, MessageFlag::Timeout,
+                                     MessageFlag::Disabled,
+                                     MessageFlag::Whisper,
+                                     MessageFlag::ModerationAction}))
+        {
+            continue;
+        }
+
+        if (!roomID.isEmpty() &&
+            candidate->flags.has(MessageFlag::SharedMessage) &&
+            !candidate->sharedChatSourceId.isEmpty() &&
+            candidate->sharedChatSourceId != roomID)
+        {
+            continue;
+        }
+
+        return candidate;
+    }
+
+    return nullptr;
+}
 
 }  // namespace
 
@@ -336,7 +476,15 @@ CommandController::CommandController(const Paths &paths)
     });
 
     // Load commands from commands.json
-    this->sm_->load();
+    backup::loadSettingManagerWithBackups(
+        backup::FileData{
+            .fileName = QStringLiteral("commands.json"),
+            .directory = paths.settingsDirectory,
+            .fileKind = QStringLiteral("Commands"),
+            .fileDescription =
+                QStringLiteral("This file contains your custom chat commands."),
+        },
+        this->sm_);
 
     // Add loaded commands to our vector of commands (which will update the map
     // of commands)
@@ -356,6 +504,11 @@ CommandController::CommandController(const Paths &paths)
     this->registerCommand("/unfollow", &commands::unfollow);
 
     /// Supported commands
+
+    this->registerCommand("/hide", &commands::hideUser);
+    this->registerCommand("/hideuser", &commands::hideUser);
+    this->registerCommand("/unhide", &commands::unhideUser);
+    this->registerCommand("/unhideuser", &commands::unhideUser);
 
     this->registerCommand("/namehistory", &commands::nameHistory);
     this->registerCommand("/logs", &commands::logs);
@@ -380,8 +533,14 @@ CommandController::CommandController(const Paths &paths)
     this->registerCommand("/user", &commands::user);
 
     this->registerCommand("/usercard", &commands::openUsercard);
+    this->registerCommand("/vanity", &commands::vanity);
+    this->registerCommand("/selfbot", &commands::selfbot);
 
-    this->registerCommand("/requests", &commands::requests);
+    this->registerCommand("/rewardrequests", &commands::rewardRequests);
+    this->registerCommand("/requests", &commands::rewardRequests, false);
+    this->registerCommand("/unbanrequests", &commands::unbanRequests);
+    this->registerCommand("/crossban", &commands::crossBan);
+    this->registerCommand("/crossunban", &commands::crossUnban);
 
     this->registerCommand("/lowtrust", &commands::lowtrust);
 
@@ -519,6 +678,19 @@ CommandController::CommandController(const Paths &paths)
 
     this->registerCommand("/debug-test", &commands::debugTest);
 
+#ifdef Q_OS_WIN
+    this->registerCommand("/debug-relaunch-with-console",
+                          &commands::relaunchWithConsole);
+#endif
+
+    this->registerCommand("/debug-disable-logfile", &commands::disableLogfile);
+    this->registerCommand("/debug-enable-logfile", &commands::enableLogfile);
+    this->registerCommand("/debug-relaunch-with-logfile",
+                          &commands::relaunchWithLogfile);
+
+    this->registerCommand("/debug-seventv-presence",
+                          &commands::seventvPresence);
+
     this->registerCommand("/shield", &commands::shieldModeOn);
     this->registerCommand("/shieldoff", &commands::shieldModeOff);
 
@@ -526,12 +698,15 @@ CommandController::CommandController(const Paths &paths)
 
     this->registerCommand("/pin", &commands::pinMessage);
     this->registerCommand("/unpin", &commands::unpinMessage);
+    this->registerCommand("/invis", &commands::sendInvisibleMessage);
     this->registerCommand("/spam", &commands::sendSpam);
     this->registerCommand("/pyramid", &commands::sendPyramid);
     this->registerCommand("/nuke", &commands::sendNuke);
 
     this->registerCommand("/poll", &commands::createPoll);
     this->registerCommand("/redeem", &commands::openChannelPointRewards);
+    this->registerCommand("/gif", &commands::openGifPicker);
+    this->registerCommand("/gigantify", &commands::sendGigantifiedEmote);
     this->registerCommand("/cancelpoll", &commands::cancelPoll);
     this->registerCommand("/endpoll", &commands::endPoll);
 
@@ -552,22 +727,16 @@ CommandController::CommandController(const Paths &paths)
         }
 
         auto &s = *getSettings();
-        const auto usage = QStringLiteral("Usage: /bot <message>");
         const bool botBadgeConfigured =
             !s.botBadgeAppAccessToken.getValue().trimmed().isEmpty() &&
             !s.botBadgeClientID.getValue().trimmed().isEmpty() &&
             !s.botBadgeUserID.getValue().trimmed().isEmpty();
-        const auto lockedMessage = [&usage] {
-            return QStringLiteral("Bot mode is locked. Ask Molto about it. ") +
-                   usage;
-        };
-
         if (ctx.words.size() < 2)
         {
             const bool enabling = !s.botBadgeAlwaysUse.getValue();
             if (enabling && !botBadgeConfigured)
             {
-                ctx.channel->addSystemMessage(lockedMessage());
+                ctx.twitchChannel->showBotBadgeSetup();
                 return "";
             }
 
@@ -586,7 +755,7 @@ CommandController::CommandController(const Paths &paths)
 
         if (!botBadgeConfigured)
         {
-            ctx.channel->addSystemMessage(lockedMessage());
+            ctx.twitchChannel->showBotBadgeSetup();
             return "";
         }
 
@@ -595,6 +764,28 @@ CommandController::CommandController(const Paths &paths)
 
         return "";
     });
+
+    this->registerCommand(
+        "/chatwarnings", [](const CommandContext &ctx) -> QString {
+            if (ctx.twitchChannel == nullptr ||
+                !ctx.twitchChannel->hasModRights())
+            {
+                ctx.channel->addSystemMessage("/chatwarnings only works in "
+                                              "Twitch channels you moderate.");
+                return "";
+            }
+
+            auto &settings = *getSettings();
+            const bool enabled = !settings.sendMessageAsWarnings.getValue();
+            settings.sendMessageAsWarnings = enabled;
+            settings.requestSave();
+            ctx.channel->addSystemMessage(
+                enabled
+                    ? QStringLiteral(
+                          "Warning chat enabled in channels you moderate.")
+                    : QStringLiteral("Warning chat disabled."));
+            return "";
+        });
 }
 
 void CommandController::save()
@@ -663,6 +854,8 @@ QString CommandController::execCommand(const QString &textNoEmoji,
                     .twitchChannel =
                         dynamic_cast<TwitchChannel *>(channel.get()),
                     .kickChannel = dynamic_cast<KickChannel *>(channel.get()),
+                    .youtubeChannel =
+                        dynamic_cast<YouTubeChannel *>(channel.get()),
                 };
                 return (*command)(ctx);
             }
@@ -720,28 +913,72 @@ bool CommandController::unregisterPluginCommand(const QString &commandName)
 #endif
 
 void CommandController::registerCommand(const QString &commandName,
-                                        CommandFunctionVariants commandFunction)
+                                        CommandFunctionVariants commandFunction,
+                                        bool addToAutoComplete)
 {
     assert(this->commands_.count(commandName) == 0);
 
     this->commands_[commandName] = std::move(commandFunction);
 
-    this->defaultChatterinoCommandAutoCompletions_.append(commandName);
+    if (addToAutoComplete)
+    {
+        this->defaultChatterinoCommandAutoCompletions_.append(commandName);
+    }
 }
 
 QString CommandController::execCustomCommand(
-    const QStringList &words, const Command &command, bool /* dryRun */,
+    const QStringList &words, const Command &command, bool dryRun,
     ChannelPtr channel, const Message *message,
     std::unordered_map<QString, QString> context)
 {
+    if (usesLatestUserMessage(command.func))
+    {
+        QString target = message == nullptr ? QString{} : message->loginName;
+        if (target.isEmpty())
+        {
+            const auto triggerWords =
+                command.name.split(' ', Qt::SkipEmptyParts).size();
+            if (words.size() > triggerWords)
+            {
+                target = words.at(triggerWords);
+                stripUserName(target);
+            }
+        }
+
+        if (target.isEmpty())
+        {
+            if (!dryRun && channel != nullptr)
+            {
+                channel->addSystemMessage("This command needs a username.");
+            }
+            return {};
+        }
+
+        const auto latest = findLatestUserMessage(channel, target);
+        if (latest == nullptr)
+        {
+            if (!dryRun && channel != nullptr)
+            {
+                channel->addSystemMessage(
+                    QStringLiteral("No recent message from %1 is in this chat.")
+                        .arg(target));
+            }
+            return {};
+        }
+
+        context.insert_or_assign(QStringLiteral("user.last_message.id"),
+                                 latest->id);
+        context.insert_or_assign(QStringLiteral("user.last_message.text"),
+                                 latest->messageText);
+    }
+
     QString result;
 
     static QRegularExpression parseCommand(
-        R"((^|[^{])({{)*{(\d+\+?|([a-zA-Z.-]+)(?:;(.+?))?)})");
+        R"((^|[^{])({{)*{((\d+\+?|[a-zA-Z_.-][a-zA-Z0-9_.-]*)(?:;(.+?))?)})");
 
     int lastCaptureEnd = 0;
 
-    auto globalMatch = parseCommand.globalMatch(command.func);
     int matchOffset = 0;
 
     while (true)
@@ -760,17 +997,17 @@ QString CommandController::execCustomCommand(
         lastCaptureEnd = match.capturedEnd();
         matchOffset = lastCaptureEnd - 1;
 
-        QString wordIndexMatch = match.captured(3);
+        QString wordIndexMatch = match.captured(4);
+        const auto altText = match.captured(5);  // alt text or empty string
 
         bool plus = wordIndexMatch.at(wordIndexMatch.size() - 1) == '+';
         wordIndexMatch = wordIndexMatch.replace("+", "");
 
         bool ok;
         int wordIndex = wordIndexMatch.replace("=", "").toInt(&ok);
-        if (!ok || wordIndex == 0)
+        if (!ok || wordIndex <= 0)
         {
             auto varName = match.captured(4);
-            auto altText = match.captured(5);  // alt text or empty string
 
             auto var = context.find(varName);
 
@@ -796,9 +1033,11 @@ QString CommandController::execCustomCommand(
 
         if (words.length() <= wordIndex)
         {
+            result += altText;
             continue;
         }
 
+        const auto valueStart = result.size();
         if (plus)
         {
             bool first = true;
@@ -815,6 +1054,10 @@ QString CommandController::execCustomCommand(
         else
         {
             result += words[wordIndex];
+        }
+        if (result.size() == valueStart)
+        {
+            result += altText;
         }
     }
 

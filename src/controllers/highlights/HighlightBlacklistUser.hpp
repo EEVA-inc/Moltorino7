@@ -63,6 +63,11 @@ public:
         return subject.toLower() == this->pattern_.toLower();
     }
 
+    bool isLiteralMatch(const QString &subject) const
+    {
+        return !this->isRegex() && this->isMatch(subject);
+    }
+
 private:
     QString pattern_;
     bool isRegex_;

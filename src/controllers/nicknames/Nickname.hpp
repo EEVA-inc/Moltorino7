@@ -139,8 +139,8 @@ struct Deserialize<chatterino::Nickname> {
 
         QString _name;
         QString _replace;
-        bool _isRegex;
-        bool _isCaseSensitive;
+        bool _isRegex = false;
+        bool _isCaseSensitive = false;
 
         chatterino::rj::getSafe(value, "name", _name);
         chatterino::rj::getSafe(value, "replace", _replace);

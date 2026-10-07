@@ -12,6 +12,8 @@ class GenericListModel;
 
 namespace chatterino::completion {
 
+struct EmoteItem;
+
 class Source
 {
 public:
@@ -24,6 +26,9 @@ public:
 
     virtual void addToStringList(QStringList &list, size_t maxCount = 0,
                                  bool isFirstWord = false) const = 0;
+    virtual qsizetype tabCompletionCount() const = 0;
+    virtual const EmoteItem *emoteAtTabCompletionIndex(
+        qsizetype index) const = 0;
 };
 
 };

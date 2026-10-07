@@ -158,7 +158,7 @@ void SmartEmoteStrategy::apply(const std::vector<EmoteItem> &items,
 
         auto [first, last] = std::ranges::remove_if(
             filteredItems, [](const EmoteItem &emoteItem) {
-                return !emoteItem.emote->zeroWidth;
+                return !emoteItem.isZeroWidth();
             });
         filteredItems.erase(first, last);
     }

@@ -78,4 +78,33 @@ void UnifiedSource::addToStringList(QStringList &list, size_t maxCount,
     }
 }
 
+qsizetype UnifiedSource::tabCompletionCount() const
+{
+    qsizetype total = 0;
+    for (const auto &source : this->sources_)
+    {
+        total += source->tabCompletionCount();
+    }
+    return total;
+}
+
+const EmoteItem *UnifiedSource::emoteAtTabCompletionIndex(qsizetype index) const
+{
+    if (index < 0)
+    {
+        return nullptr;
+    }
+
+    for (const auto &source : this->sources_)
+    {
+        const auto count = source->tabCompletionCount();
+        if (index < count)
+        {
+            return source->emoteAtTabCompletionIndex(index);
+        }
+        index -= count;
+    }
+
+    return nullptr;
+}
 }

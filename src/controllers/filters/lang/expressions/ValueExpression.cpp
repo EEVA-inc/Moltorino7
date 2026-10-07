@@ -14,28 +14,15 @@ ValueExpression::ValueExpression(QVariant value, TokenType type)
 {
 }
 
-QVariant ValueExpression::execute(const ContextMap &context) const
+QVariant ValueExpression::execute(RunContext) const
 {
-    if (this->type_ == TokenType::IDENTIFIER)
-    {
-        return context.value(this->value_.toString());
-    }
     return this->value_;
 }
 
-PossibleType ValueExpression::synthesizeType(const TypingContext &context) const
+PossibleType ValueExpression::synthesizeType(const TypingContext &) const
 {
     switch (this->type_)
     {
-        case TokenType::IDENTIFIER: {
-            auto it = context.find(this->value_.toString());
-            if (it != context.end())
-            {
-                return TypeClass{it.value()};
-            }
-
-            return IllTyped{this, "Unbound identifier"};
-        }
         case TokenType::INT:
             return TypeClass{Type::Int};
         case TokenType::STRING:
@@ -64,8 +51,6 @@ QString ValueExpression::filterString() const
         case STRING:
             return QString("\"%1\"").arg(
                 this->value_.toString().replace("\"", "\\\""));
-        case IDENTIFIER:
-            return this->value_.toString();
         default:
             return "";
     }

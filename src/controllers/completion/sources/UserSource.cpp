@@ -57,6 +57,16 @@ void UserSource::addToStringList(QStringList &list, size_t maxCount,
                        });
 }
 
+qsizetype UserSource::tabCompletionCount() const
+{
+    return static_cast<qsizetype>(this->output_.size());
+}
+
+const EmoteItem *UserSource::emoteAtTabCompletionIndex(qsizetype) const
+{
+    return nullptr;
+}
+
 void UserSource::initializeFromChannel(const Channel *channel)
 {
     const auto *cc = dynamic_cast<const ChannelChatters *>(channel);
@@ -69,6 +79,10 @@ void UserSource::initializeFromChannel(const Channel *channel)
 
     if (getSettings()->alwaysIncludeBroadcasterInUserCompletions)
     {
+        if (channel->isYouTubeChannel())
+        {
+            return;
+        }
         auto it =
             std::ranges::find_if(this->items_, [channel](const UserItem &user) {
                 return user.first == channel->getName();

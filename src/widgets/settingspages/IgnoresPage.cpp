@@ -7,6 +7,8 @@
 #include "Application.hpp"
 #include "common/Literals.hpp"
 #include "controllers/accounts/AccountController.hpp"
+#include "controllers/ignores/HiddenUser.hpp"
+#include "controllers/ignores/HiddenUserController.hpp"
 #include "controllers/ignores/IgnoreModel.hpp"
 #include "controllers/ignores/IgnorePhrase.hpp"
 #include "providers/twitch/TwitchAccount.hpp"
@@ -15,14 +17,18 @@
 #include "util/LayoutCreator.hpp"
 #include "widgets/helper/EditableModelView.hpp"
 
+#include <QAbstractItemView>
 #include <QCheckBox>
 #include <QGroupBox>
 #include <QHeaderView>
+#include <QItemSelectionModel>
 #include <QLabel>
 #include <QListView>
 #include <QPushButton>
 #include <QTableView>
 #include <QVBoxLayout>
+
+#include <algorithm>
 
 namespace chatterino {
 
@@ -30,7 +36,10 @@ using namespace literals;
 
 static void addPhrasesTab(LayoutCreator<QVBoxLayout> box);
 static void addUsersTab(IgnoresPage &page, LayoutCreator<QVBoxLayout> box,
-                        QStringListModel &model);
+                        QStringListModel &blockedModel,
+                        QStringListModel &hiddenModel, QListView *&hiddenList,
+                        std::vector<HiddenUser> &hiddenUsers,
+                        pajlada::Signals::SignalHolder &connections);
 
 IgnoresPage::IgnoresPage()
 {
@@ -40,7 +49,13 @@ IgnoresPage::IgnoresPage()
 
     addPhrasesTab(tabs.appendTab(new QVBoxLayout, "Messages"));
     addUsersTab(*this, tabs.appendTab(new QVBoxLayout, "Users"),
-                this->userListModel_);
+                this->userListModel_, this->hiddenUserListModel_,
+                this->hiddenUserList_, this->hiddenUsers_,
+                this->managedConnections_);
+    this->managedConnections_.managedConnect(
+        getSettings()->hiddenUsers.delayedItemsChanged, [this] {
+            this->onShow();
+        });
     this->onShow();
 }
 
@@ -61,7 +76,7 @@ void addPhrasesTab(LayoutCreator<QVBoxLayout> layout)
         0, QHeaderView::Stretch);
     view->addRegexHelpLink();
 
-    QTimer::singleShot(1, [view] {
+    QTimer::singleShot(1, view, [view] {
         view->getTableView()->resizeColumnsToContents();
         view->getTableView()->setColumnWidth(0, 200);
     });
@@ -78,7 +93,9 @@ void addPhrasesTab(LayoutCreator<QVBoxLayout> layout)
 }
 
 void addUsersTab(IgnoresPage &page, LayoutCreator<QVBoxLayout> users,
-                 QStringListModel &userModel)
+                 QStringListModel &blockedModel, QStringListModel &hiddenModel,
+                 QListView *&hiddenList, std::vector<HiddenUser> &hiddenUsers,
+                 pajlada::Signals::SignalHolder &connections)
 {
     auto label = users.emplace<QLabel>(
         u"/block <user> in chat blocks a user.\n/unblock <user> in chat unblocks a user.\nYou can also click on a user to open the usercard."_s);
@@ -96,9 +113,11 @@ void addUsersTab(IgnoresPage &page, LayoutCreator<QVBoxLayout> users,
 
         auto &setting = getSettings()->showBlockedUsersMessages;
 
-        setting.connect([combo](const int value) {
-            combo->setCurrentIndex(value);
-        });
+        setting.connect(
+            [combo](const int value) {
+                combo->setCurrentIndex(value);
+            },
+            connections);
 
         QObject::connect(combo,
                          QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -112,8 +131,48 @@ void addUsersTab(IgnoresPage &page, LayoutCreator<QVBoxLayout> users,
         anyways->addStretch(1);
     }
 
-    users.emplace<QLabel>("List of blocked users:");
-    users.emplace<QListView>()->setModel(&userModel);
+
+    users.emplace<QLabel>("Blocked on Twitch");
+    users.emplace<QListView>()->setModel(&blockedModel);
+
+    auto hiddenDescription = users.emplace<QLabel>(
+        "Hidden users disappear from chat, including messages that tag or "
+        "reply to them. This only affects Moltorino.");
+    hiddenDescription->setWordWrap(true);
+    users.emplace<QLabel>("Hidden in Moltorino");
+    hiddenList = users.emplace<QListView>().getElement();
+    hiddenList->setModel(&hiddenModel);
+    hiddenList->setSelectionMode(QAbstractItemView::SingleSelection);
+
+    auto hiddenActions = users.emplace<QHBoxLayout>().withoutMargin();
+    auto *unhide =
+        hiddenActions.emplace<QPushButton>("Unhide selected").getElement();
+    unhide->setEnabled(false);
+    hiddenActions->addStretch(1);
+    QObject::connect(
+        hiddenList->selectionModel(), &QItemSelectionModel::selectionChanged,
+        unhide, [hiddenList, unhide] {
+            unhide->setEnabled(hiddenList->currentIndex().isValid());
+        });
+    QObject::connect(
+        unhide, &QPushButton::clicked, &page, [hiddenList, &hiddenUsers] {
+            if (hiddenList == nullptr)
+            {
+                return;
+            }
+            const auto row = hiddenList->currentIndex().row();
+            if (row < 0 || row >= static_cast<int>(hiddenUsers.size()))
+            {
+                return;
+            }
+            const auto target = hiddenUsers.at(static_cast<std::size_t>(row));
+            if (auto *controller = getApp()->getHiddenUsers())
+            {
+                controller->setHidden(target.platform(), target.userID(),
+                                      target.login(), target.displayName(),
+                                      false);
+            }
+        });
 }
 
 void IgnoresPage::onShow()
@@ -125,18 +184,32 @@ void IgnoresPage::onShow()
     if (user->isAnon())
     {
         this->userListModel_.setStringList({});
-        return;
     }
-
-    QStringList users;
-    users.reserve(user->blocks().size());
-
-    for (const auto &blockedUser : user->blocks())
+    else
     {
-        users << blockedUser.name;
+        QStringList users;
+        users.reserve(user->blocks().size());
+        for (const auto &blockedUser : user->blocks())
+        {
+            users << blockedUser.name;
+        }
+        users.sort(Qt::CaseInsensitive);
+        this->userListModel_.setStringList(users);
     }
-    users.sort(Qt::CaseInsensitive);
-    this->userListModel_.setStringList(users);
+
+    this->hiddenUsers_ = *getSettings()->hiddenUsers.readOnly();
+    std::ranges::sort(this->hiddenUsers_, [](const HiddenUser &left,
+                                             const HiddenUser &right) {
+        return left.displayLabel().compare(right.displayLabel(),
+                                           Qt::CaseInsensitive) < 0;
+    });
+    QStringList hiddenLabels;
+    hiddenLabels.reserve(static_cast<qsizetype>(this->hiddenUsers_.size()));
+    for (const auto &hidden : this->hiddenUsers_)
+    {
+        hiddenLabels.push_back(hidden.displayLabel());
+    }
+    this->hiddenUserListModel_.setStringList(hiddenLabels);
 }
 
 }

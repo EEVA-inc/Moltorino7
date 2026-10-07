@@ -6,6 +6,99 @@
 
 namespace chatterino {
 
+QString highlightMatchStyleName(HighlightMatchStyle style)
+{
+    switch (style)
+    {
+        case HighlightMatchStyle::None:
+            return QStringLiteral("None");
+        case HighlightMatchStyle::Outline:
+            return QStringLiteral("Outline");
+        case HighlightMatchStyle::Fill:
+            return QStringLiteral("Fill");
+        case HighlightMatchStyle::OutlineAndFill:
+            return QStringLiteral("Outline and fill");
+        case HighlightMatchStyle::Underline:
+            return QStringLiteral("Underline");
+    }
+    return QStringLiteral("Outline");
+}
+
+QString highlightMatchAppearanceName(HighlightMatchStyle style, bool hasPaint)
+{
+    if (style == HighlightMatchStyle::None)
+    {
+        return hasPaint ? QStringLiteral("7TV paint") : QStringLiteral("None");
+    }
+
+    auto name = highlightMatchStyleName(style);
+    if (hasPaint)
+    {
+        name += QStringLiteral(", 7TV");
+    }
+    return name;
+}
+
+QString highlightMatchAppearanceTooltip(const QColor &color,
+                                        HighlightMatchStyle style,
+                                        const QString &paintID)
+{
+    auto tooltip =
+        QStringLiteral("Exact marker: %1").arg(highlightMatchStyleName(style));
+    if (style != HighlightMatchStyle::None)
+    {
+        tooltip += QStringLiteral("\nMarker color: %1")
+                       .arg(color.name(QColor::HexArgb));
+    }
+    if (!paintID.isEmpty())
+    {
+        tooltip += QStringLiteral("\n7TV text paint: %1").arg(paintID);
+    }
+    return tooltip;
+}
+
+HighlightMatchStyle highlightMatchStyleFromName(const QString &name)
+{
+    if (name.compare(QStringLiteral("None"), Qt::CaseInsensitive) == 0)
+    {
+        return HighlightMatchStyle::None;
+    }
+    if (name.compare(QStringLiteral("Fill"), Qt::CaseInsensitive) == 0)
+    {
+        return HighlightMatchStyle::Fill;
+    }
+    if (name.compare(QStringLiteral("Outline and fill"),
+                     Qt::CaseInsensitive) == 0)
+    {
+        return HighlightMatchStyle::OutlineAndFill;
+    }
+    if (name.compare(QStringLiteral("Underline"), Qt::CaseInsensitive) == 0)
+    {
+        return HighlightMatchStyle::Underline;
+    }
+    return HighlightMatchStyle::Outline;
+}
+
+QColor defaultHighlightMatchColor(QColor messageHighlightColor)
+{
+    if (!messageHighlightColor.isValid())
+    {
+        messageHighlightColor = QColor(127, 63, 73);
+    }
+    messageHighlightColor.setAlpha(150);
+    return messageHighlightColor;
+}
+
+QColor defaultNewHighlightMatchColor()
+{
+    return QColor(255, 255, 255, 235);
+}
+
+QColor defaultAutoModMatchColor()
+{
+    return QColor(255, 177, 64, 128);
+}
+
 HighlightResult::HighlightResult(bool _alert, bool _playSound,
                                  std::optional<QUrl> _customSoundUrl,
                                  std::shared_ptr<QColor> _color,
@@ -40,12 +133,13 @@ bool HighlightResult::operator==(const HighlightResult &other) const
         return false;
     }
 
-    if (this->color && other.color)
+    if (static_cast<bool>(this->color) != static_cast<bool>(other.color))
     {
-        if (*this->color != *other.color)
-        {
-            return false;
-        }
+        return false;
+    }
+    if (this->color && *this->color != *other.color)
+    {
+        return false;
     }
 
     if (this->showInMentions != other.showInMentions)
@@ -85,7 +179,8 @@ std::ostream &operator<<(std::ostream &os, const HighlightResult &result)
        << ", "
        << "Color: " << (result.color ? result.color->name().toStdString() : "")
        << ", "
-       << "Show in mentions: " << (result.showInMentions ? "Yes" : "No");
+       << "Show in mentions: " << (result.showInMentions ? "Yes" : "No")
+       << ", Exact matches: " << result.matches.size();
     return os;
 }
 

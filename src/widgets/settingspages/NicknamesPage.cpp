@@ -47,7 +47,7 @@ NicknamesPage::NicknamesPage()
             Nickname{"Username", "Nickname", false, false});
     });
 
-    QTimer::singleShot(1, [view] {
+    QTimer::singleShot(1, view, [view] {
         view->getTableView()->resizeColumnsToContents();
         view->getTableView()->setColumnWidth(0, 200);
     });

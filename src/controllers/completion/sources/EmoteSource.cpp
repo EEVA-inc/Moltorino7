@@ -16,37 +16,58 @@
 #include "providers/kick/KickChatServer.hpp"
 #include "providers/seventv/SeventvEmotes.hpp"
 #include "providers/seventv/SeventvPersonalEmotes.hpp"
+#include "providers/tiktok/TikTokEmotes.hpp"
 #include "providers/twitch/TwitchAccount.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
 #include "providers/twitch/TwitchIrcServer.hpp"
+#include "providers/youtube/YouTubeChannel.hpp"
 #include "widgets/splits/InputCompletionItem.hpp"
+
+#include <utility>
 
 namespace chatterino::completion {
 
 namespace {
 
 void addEmotes(std::vector<EmoteItem> &out, const EmoteMap &map,
-               const QString &providerName)
+               const QString &providerName, bool includeModifiers = true)
 {
     for (auto &&emote : map)
     {
+        if (!includeModifiers &&
+            emote.second->modifierPlacement != EmoteModifierPlacement::None)
+        {
+            continue;
+        }
+
+        auto sourceName = providerName;
+        if (emote.second->modifierSource == EmoteModifierSource::BetterTTV)
+        {
+            sourceName = QStringLiteral("BetterTTV modifier");
+        }
+        else if (emote.second->modifierSource ==
+                 EmoteModifierSource::FrankerFaceZ)
+        {
+            sourceName = QStringLiteral("FrankerFaceZ modifier");
+        }
         out.push_back({.emote = emote.second,
                        .searchName = emote.first.string,
                        .tabCompletionName = emote.first.string,
                        .displayName = emote.second->name.string,
-                       .providerName = providerName,
+                       .providerName = std::move(sourceName),
                        .isEmoji = false});
     }
 }
 
-void addEmojis(std::vector<EmoteItem> &out, const std::vector<EmojiPtr> &map)
+void addEmojis(std::vector<EmoteItem> &out, const Emojis &provider)
 {
-    for (const auto &emoji : map)
+    for (const auto &emoji : provider.getEmojis())
     {
         for (auto &&shortCode : emoji->shortCodes)
         {
             out.push_back(
-                {.emote = emoji->emote,
+                {.emoji = emoji.get(),
+                 .emojiProvider = &provider,
                  .searchName = shortCode,
                  .tabCompletionName = QStringLiteral(":%1:").arg(shortCode),
                  .displayName = shortCode,
@@ -56,6 +77,30 @@ void addEmojis(std::vector<EmoteItem> &out, const std::vector<EmojiPtr> &map)
     };
 }
 
+}
+
+bool EmoteItem::hasRenderableEmote() const
+{
+    return this->emote != nullptr ||
+           (this->emoji != nullptr && this->emojiProvider != nullptr);
+}
+
+bool EmoteItem::isZeroWidth() const
+{
+    return this->emote != nullptr && this->emote->zeroWidth;
+}
+
+EmotePtr EmoteItem::getEmote() const
+{
+    if (this->emote)
+    {
+        return this->emote;
+    }
+    if (this->emoji && this->emojiProvider)
+    {
+        return this->emojiProvider->getEmote(this->emoji);
+    }
+    return nullptr;
 }
 
 EmoteSource::EmoteSource(const Channel *channel,
@@ -81,7 +126,7 @@ void EmoteSource::addToListModel(GenericListModel &model, size_t maxCount) const
     addVecToListModel(this->output_, model, maxCount,
                       [this](const EmoteItem &e) {
                           return std::make_unique<InputCompletionItem>(
-                              e.emote, e.displayName + " - " + e.providerName,
+                              e.getEmote(), e.displayName + " - " + e.providerName,
                               this->callback_);
                       });
 }
@@ -92,6 +137,21 @@ void EmoteSource::addToStringList(QStringList &list, size_t maxCount,
     addVecToStringList(this->output_, list, maxCount, [](const EmoteItem &e) {
         return e.tabCompletionName + " ";
     });
+}
+
+qsizetype EmoteSource::tabCompletionCount() const
+{
+    return static_cast<qsizetype>(this->output_.size());
+}
+
+const EmoteItem *EmoteSource::emoteAtTabCompletionIndex(qsizetype index) const
+{
+    if (index < 0 || index >= this->tabCompletionCount())
+    {
+        return nullptr;
+    }
+
+    return &this->output_[static_cast<size_t>(index)];
 }
 
 void EmoteSource::initializeFromChannel(const Channel *channel)
@@ -151,15 +211,27 @@ void EmoteSource::initializeFromChannel(const Channel *channel)
                   "Kick Emote");
     }
 
+    const auto *youtubeChannel = dynamic_cast<const YouTubeChannel *>(channel);
+    if (youtubeChannel)
+    {
+        addEmotes(emotes, *youtubeChannel->youtubeEmotes(), "YouTube Emoji");
+    }
+
+    if (channel->isTikTokChannel())
+    {
+        addEmotes(emotes, *tikTokBuiltinEmotes(), "TikTok Emoji");
+    }
+
     if (channel->isTwitchOrKickChannel())
     {
+        const bool includeModifiers = channel->isTwitchChannel();
         if (auto bttvG = app->getBttvEmotes()->emotes())
         {
-            addEmotes(emotes, *bttvG, "Global BetterTTV");
+            addEmotes(emotes, *bttvG, "Global BetterTTV", includeModifiers);
         }
         if (auto ffzG = app->getFfzEmotes()->emotes())
         {
-            addEmotes(emotes, *ffzG, "Global FrankerFaceZ");
+            addEmotes(emotes, *ffzG, "Global FrankerFaceZ", includeModifiers);
         }
         if (auto seventvG = app->getSeventvEmotes()->globalEmotes())
         {
@@ -167,7 +239,7 @@ void EmoteSource::initializeFromChannel(const Channel *channel)
         }
     }
 
-    addEmojis(emotes, app->getEmotes()->getEmojis()->getEmojis());
+    addEmojis(emotes, *app->getEmotes()->getEmojis());
 
     this->items_ = std::move(emotes);
 }

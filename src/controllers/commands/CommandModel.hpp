@@ -21,6 +21,8 @@ class CommandModel : public SignalVectorModel<Command>
         Trigger = 0,
         CommandFunc = 1,
         ShowInMessageContextMenu = 2,
+        UsercardLabel,
+        UsercardInMenu,
         COUNT,
     };
 

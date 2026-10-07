@@ -34,7 +34,7 @@ QString makeRegexReplacement(QStringView source,
     QVarLengthArray<QStringCapture> backReferences;
 
     SizeType replacementLength = replacement.size();
-    for (SizeType i = 0; i < replacementLength - 1; i++)
+    for (SizeType i = 0; i + 1 < replacementLength; i++)
     {
         if (replacement[i] != u'\\')
         {
@@ -179,17 +179,23 @@ bool isIgnoredMessage(IgnoredMessageParameters &&params)
 
 void processIgnorePhrases(const std::vector<IgnorePhrase> &phrases,
                           QString &content,
-                          std::vector<TwitchEmoteOccurrence> &twitchEmotes)
+                          std::vector<TwitchEmoteOccurrence> &twitchEmotes,
+                          std::vector<TwitchGifOccurrence> *twitchGifs)
 {
     using SizeType = QString::size_type;
 
     auto removeEmotesInRange = [&twitchEmotes](SizeType pos, SizeType len) {
+        const auto end = pos + len;
 
         auto it = std::partition(
             twitchEmotes.begin(), twitchEmotes.end(),
-            [pos, len](const auto &item) {
-
-                return !((item.start >= pos) && item.start < (pos + len));
+            [pos, end, len](const auto &item) {
+                if (len == 0)
+                {
+                    return !(item.start < static_cast<qint64>(pos) &&
+                             item.end >= static_cast<qint64>(pos));
+                }
+                return !(item.start < end && item.end >= pos);
             });
         std::vector<TwitchEmoteOccurrence> emotesInRange(it,
                                                          twitchEmotes.end());
@@ -197,14 +203,50 @@ void processIgnorePhrases(const std::vector<IgnorePhrase> &phrases,
         return emotesInRange;
     };
 
-    auto shiftIndicesAfter = [&twitchEmotes](int pos, int by) {
+    auto shiftIndicesAfter = [&twitchEmotes](SizeType pos, qint64 by) {
         for (auto &item : twitchEmotes)
         {
-            auto &index = item.start;
-            if (index >= pos)
+            if (item.start >= 0 && static_cast<SizeType>(item.start) >= pos)
             {
-                index += by;
-                item.end += by;
+                item.start = static_cast<int>(item.start + by);
+                item.end = static_cast<int>(item.end + by);
+            }
+        }
+    };
+
+    auto removeGifsInRange = [twitchGifs](SizeType pos, SizeType len) {
+        if (twitchGifs == nullptr)
+        {
+            return;
+        }
+
+        if (len == 0)
+        {
+            std::erase_if(*twitchGifs, [pos](const auto &item) {
+                return item.start < static_cast<qint64>(pos) &&
+                       item.end >= static_cast<qint64>(pos);
+            });
+            return;
+        }
+
+        const auto end = pos + len;
+        std::erase_if(*twitchGifs, [pos, end](const auto &item) {
+            return item.start < end && item.end >= pos;
+        });
+    };
+
+    auto shiftGifIndicesAfter = [twitchGifs](SizeType pos, qint64 by) {
+        if (twitchGifs == nullptr || by == 0)
+        {
+            return;
+        }
+
+        for (auto &item : *twitchGifs)
+        {
+            if (item.start >= 0 && static_cast<SizeType>(item.start) >= pos)
+            {
+                item.start = static_cast<int>(item.start + by);
+                item.end = static_cast<int>(item.end + by);
             }
         }
     };
@@ -229,15 +271,17 @@ void processIgnorePhrases(const std::vector<IgnorePhrase> &phrases,
             {
                 if (word == emote.first.string)
                 {
-                    if (emote.second == nullptr)
+                    if (emote.first.string.isEmpty() ||
+                        emote.second == nullptr)
                     {
                         qCDebug(chatterinoTwitch)
                             << "emote null" << emote.first.string;
+                        continue;
                     }
                     twitchEmotes.push_back(TwitchEmoteOccurrence{
                         static_cast<int>(startIndex + pos),
                         static_cast<int>(startIndex + pos +
-                                         emote.first.string.length()),
+                                         emote.first.string.length() - 1),
                         emote.second,
                         emote.first,
                     });
@@ -250,6 +294,7 @@ void processIgnorePhrases(const std::vector<IgnorePhrase> &phrases,
     auto replaceMessageAt = [&](const IgnorePhrase &phrase, SizeType from,
                                 SizeType length, const QString &replacement) {
         auto removedEmotes = removeEmotesInRange(from, length);
+        removeGifsInRange(from, length);
         content.replace(from, length, replacement);
         auto wordStart = from;
         while (wordStart > 0)
@@ -270,8 +315,11 @@ void processIgnorePhrases(const std::vector<IgnorePhrase> &phrases,
             ++wordEnd;
         }
 
-        shiftIndicesAfter(static_cast<int>(from + length),
-                          static_cast<int>(replacement.length() - length));
+        const auto sourceEnd = from + length;
+        const auto delta = static_cast<qint64>(replacement.length()) -
+                           static_cast<qint64>(length);
+        shiftIndicesAfter(sourceEnd, delta);
+        shiftGifIndicesAfter(sourceEnd, delta);
 
         auto midExtendedRef =
             QStringView{content}.mid(wordStart, wordEnd - wordStart);
@@ -285,7 +333,7 @@ void processIgnorePhrases(const std::vector<IgnorePhrase> &phrases,
                 continue;
             }
             QRegularExpression emoteregex(
-                "\\b" + emote.name.string + "\\b",
+                "\\b" + QRegularExpression::escape(emote.name.string) + "\\b",
                 QRegularExpression::UseUnicodePropertiesOption);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
             auto match = emoteregex.matchView(midExtendedRef);
@@ -294,8 +342,10 @@ void processIgnorePhrases(const std::vector<IgnorePhrase> &phrases,
 #endif
             if (match.hasMatch())
             {
-                emote.start = static_cast<int>(from + match.capturedStart());
-                emote.end = static_cast<int>(from + match.capturedEnd());
+                emote.start =
+                    static_cast<int>(wordStart + match.capturedStart());
+                emote.end =
+                    static_cast<int>(wordStart + match.capturedEnd() - 1);
                 twitchEmotes.push_back(std::move(emote));
             }
         }
@@ -336,11 +386,16 @@ void processIgnorePhrases(const std::vector<IgnorePhrase> &phrases,
 
                 replaceMessageAt(phrase, from, match.capturedLength(),
                                  replacement);
-                from += phrase.getReplace().length();
+                from += replacement.length();
                 iterations++;
                 if (iterations >= 128)
                 {
                     content = u"Too many replacements - check your ignores!"_s;
+                    twitchEmotes.clear();
+                    if (twitchGifs != nullptr)
+                    {
+                        twitchGifs->clear();
+                    }
                     return;
                 }
             }

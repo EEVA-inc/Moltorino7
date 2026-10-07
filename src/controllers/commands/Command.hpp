@@ -15,6 +15,8 @@ struct Command {
     QString name;
     QString func;
     bool showInMsgContextMenu{};
+    QString usercardLabel;
+    bool usercardInMenu = false;
 
     Command() = default;
     explicit Command(const QString &text);
@@ -40,6 +42,9 @@ struct Serialize<chatterino::Command> {
         chatterino::rj::set(ret, "showInMsgContextMenu",
                             value.showInMsgContextMenu, a);
 
+        chatterino::rj::set(ret, "usercardLabel", value.usercardLabel, a);
+        chatterino::rj::set(ret, "usercardInMenu", value.usercardInMenu, a);
+
         return ret;
     }
 };
@@ -56,6 +61,10 @@ struct Deserialize<chatterino::Command> {
             PAJLADA_REPORT_ERROR(error);
             return command;
         }
+
+        chatterino::rj::getSafe(value, "usercardLabel", command.usercardLabel);
+        chatterino::rj::getSafe(value, "usercardInMenu",
+                                command.usercardInMenu);
 
         if (!chatterino::rj::getSafe(value, "name", command.name))
         {

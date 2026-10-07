@@ -18,11 +18,17 @@ CommandModel::CommandModel(QObject *parent)
 Command CommandModel::getItemFromRow(std::vector<QStandardItem *> &row,
                                      const Command &original)
 {
-    return Command(row[Column::Trigger]->data(Qt::EditRole).toString(),
-                   row[Column::CommandFunc]->data(Qt::EditRole).toString(),
-                   row[Column::ShowInMessageContextMenu]
-                       ->data(Qt::CheckStateRole)
-                       .toBool());
+    auto command =
+        Command(row[Column::Trigger]->data(Qt::EditRole).toString(),
+                row[Column::CommandFunc]->data(Qt::EditRole).toString(),
+                row[Column::ShowInMessageContextMenu]
+                    ->data(Qt::CheckStateRole)
+                    .toBool());
+    command.usercardLabel =
+        row[Column::UsercardLabel]->data(Qt::EditRole).toString().trimmed();
+    command.usercardInMenu =
+        row[Column::UsercardInMenu]->data(Qt::CheckStateRole).toBool();
+    return command;
 }
 
 void CommandModel::getRowFromItem(const Command &item,
@@ -32,6 +38,8 @@ void CommandModel::getRowFromItem(const Command &item,
     setStringItem(row[Column::CommandFunc], item.func);
     setBoolItem(row[Column::ShowInMessageContextMenu],
                 item.showInMsgContextMenu);
+    setStringItem(row[Column::UsercardLabel], item.usercardLabel);
+    setBoolItem(row[Column::UsercardInMenu], item.usercardInMenu);
 }
 
 }

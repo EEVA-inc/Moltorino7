@@ -12,6 +12,7 @@ namespace chatterino {
 
 class IgnorePhrase;
 struct TwitchEmoteOccurrence;
+struct TwitchGifOccurrence;
 
 enum class ShowIgnoredUsersMessages { Never, IfModerator, IfBroadcaster };
 
@@ -28,6 +29,7 @@ bool isIgnoredMessage(IgnoredMessageParameters &&params);
 
 void processIgnorePhrases(const std::vector<IgnorePhrase> &phrases,
                           QString &content,
-                          std::vector<TwitchEmoteOccurrence> &twitchEmotes);
+                          std::vector<TwitchEmoteOccurrence> &twitchEmotes,
+                          std::vector<TwitchGifOccurrence> *twitchGifs = nullptr);
 
 }
