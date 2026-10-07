@@ -25,8 +25,11 @@ public:
     ~DraggablePopup() override;
 
 protected:
+    enum class ResizeMode { Setting, Always };
+
     void enableResize(QSizeSetting &setting, QSize defaultSize = {},
-                      bool rememberSize = true);
+                      bool rememberSize = true,
+                      ResizeMode resizeMode = ResizeMode::Setting);
     bool hasCustomSize() const;
     QSize preferredSize(QSize fallback) const;
     void applyPopupSize(QSize suggestedSize);
@@ -48,6 +51,7 @@ protected:
     bool ensurePinned();
 
 private:
+    bool resizeEnabled() const;
     void savePopupSize();
     void positionSizeGrip();
     QSizeSetting *sizeSetting_ = nullptr;
@@ -81,6 +85,7 @@ private:
     QSize defaultSize_;
     QSize suggestedSize_;
     bool rememberSize_ = true;
+    ResizeMode resizeMode_ = ResizeMode::Setting;
     pajlada::Signals::SignalHolder resizeConnections_;
 };
 

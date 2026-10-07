@@ -2434,7 +2434,8 @@ UserInfoPopup::UserInfoPopup(bool closeAutomatically, Split *split)
     activityStack->setCurrentWidget(messagesPage);
     layout->addWidget(activityStack);
 
-    this->enableResize(getSettings()->usercardPopupSize, {}, false);
+    this->enableResize(getSettings()->usercardPopupSize, {}, false,
+                       ResizeMode::Always);
 
     this->installEvents();
     this->updateUsercardStatusIcons();

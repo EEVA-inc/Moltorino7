@@ -130,11 +130,12 @@ DraggablePopup::~DraggablePopup()
 }
 
 void DraggablePopup::enableResize(QSizeSetting &setting, QSize defaultSize,
-                                  bool rememberSize)
+                                  bool rememberSize, ResizeMode resizeMode)
 {
     this->sizeSetting_ = &setting;
     this->defaultSize_ = defaultSize;
     this->rememberSize_ = rememberSize;
+    this->resizeMode_ = resizeMode;
     if (rememberSize)
     {
         this->customSize_ = setting.getValue();
@@ -142,18 +143,21 @@ void DraggablePopup::enableResize(QSizeSetting &setting, QSize defaultSize,
     this->sizeGrip_ = new InvisibleSizeGrip(this);
     this->sizeGrip_->setObjectName("PopupSizeGrip");
     this->sizeGrip_->installEventFilter(this);
-    getSettings()->allowPopupResize.connect(
-        [this](bool enabled) {
-            this->customSize_ = enabled && this->rememberSize_
-                                    ? this->sizeSetting_->getValue()
-                                    : QSize{};
-            if (this->suggestedSize_.isValid())
-            {
-                this->applyPopupSize(this->suggestedSize_ * this->scale());
-            }
-            this->positionSizeGrip();
-        },
-        this->resizeConnections_, false);
+    if (resizeMode == ResizeMode::Setting)
+    {
+        getSettings()->allowPopupResize.connect(
+            [this](bool enabled) {
+                this->customSize_ = enabled && this->rememberSize_
+                                        ? this->sizeSetting_->getValue()
+                                        : QSize{};
+                if (this->suggestedSize_.isValid())
+                {
+                    this->applyPopupSize(this->suggestedSize_ * this->scale());
+                }
+                this->positionSizeGrip();
+            },
+            this->resizeConnections_, false);
+    }
 
     if (defaultSize.isValid() || this->hasCustomSize())
     {
@@ -161,9 +165,15 @@ void DraggablePopup::enableResize(QSizeSetting &setting, QSize defaultSize,
     }
 }
 
+bool DraggablePopup::resizeEnabled() const
+{
+    return this->resizeMode_ == ResizeMode::Always ||
+           getSettings()->allowPopupResize;
+}
+
 bool DraggablePopup::hasCustomSize() const
 {
-    return getSettings()->allowPopupResize && this->customSize_.width() > 0 &&
+    return this->resizeEnabled() && this->customSize_.width() > 0 &&
            this->customSize_.height() > 0;
 }
 
@@ -200,7 +210,7 @@ void DraggablePopup::applyPopupSize(QSize suggestedSize)
         minimum = minimum.boundedTo(available);
         wanted = wanted.boundedTo(available);
     }
-    if (getSettings()->allowPopupResize)
+    if (this->resizeEnabled())
     {
         this->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
         this->setMinimumSize(minimum.expandedTo(QSize(1, 1)));
@@ -220,7 +230,7 @@ void DraggablePopup::positionSizeGrip()
         this->sizeGrip_->setGeometry(this->width() - edge,
                                      this->height() - edge, edge, edge);
         this->sizeGrip_->raise();
-        this->sizeGrip_->setVisible(getSettings()->allowPopupResize &&
+        this->sizeGrip_->setVisible(this->resizeEnabled() &&
                                     !this->isMaximized() &&
                                     !this->isFullScreen());
     }
@@ -230,10 +240,9 @@ void DraggablePopup::resizeEvent(QResizeEvent *event)
 {
     BaseWindow::resizeEvent(event);
     this->positionSizeGrip();
-    if (this->sizeSetting_ && getSettings()->allowPopupResize &&
-        this->isVisible() && !this->applyingSize_ && !this->isMaximized() &&
-        !this->isMinimized() && !this->isFullScreen() &&
-        (this->resizing_ || event->spontaneous()))
+    if (this->sizeSetting_ && this->resizeEnabled() && this->isVisible() &&
+        !this->applyingSize_ && !this->isMaximized() && !this->isMinimized() &&
+        !this->isFullScreen() && (this->resizing_ || event->spontaneous()))
     {
         this->customSize_ = this->size() / this->scale();
         if (this->rememberSize_)

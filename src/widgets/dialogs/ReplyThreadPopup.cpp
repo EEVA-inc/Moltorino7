@@ -199,7 +199,8 @@ ReplyThreadPopup::ReplyThreadPopup(bool closeAutomatically, Split *split)
     layout->addWidget(this->ui_.threadView, 1);
     layout->addWidget(this->ui_.replyInput);
 
-    this->enableResize(getSettings()->threadPopupSize);
+    this->enableResize(getSettings()->threadPopupSize, {}, true,
+                       ResizeMode::Always);
 
     this->applyPopupSize(
         QSize(qRound(440 * this->scale()), this->minimumChatHeight()));
