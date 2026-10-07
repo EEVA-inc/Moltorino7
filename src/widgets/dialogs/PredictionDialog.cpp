@@ -1,14 +1,17 @@
 #include "Application.hpp"
 #include "widgets/dialogs/PredictionDialog.hpp"
 
+#include "controllers/accounts/AccountController.hpp"
 #include "providers/moltorino/MoltorinoAuth.hpp"
 #include "providers/twitch/api/TwitchGql.hpp"
 #include "singletons/Fonts.hpp"
 #include "singletons/Settings.hpp"
 #include "singletons/Theme.hpp"
 #include "util/Helpers.hpp"
+#include "util/ChannelPointAmount.hpp"
 #include "widgets/buttons/SvgButton.hpp"
 #include "widgets/helper/Line.hpp"
+#include "widgets/dialogs/PopupControlMetrics.hpp"
 #include "widgets/splits/Split.hpp"
 
 #include <QComboBox>
@@ -19,7 +22,6 @@
 #include <QFrame>
 #include <QGuiApplication>
 #include <QHBoxLayout>
-#include <QIntValidator>
 #include <QLabel>
 #include <QLineEdit>
 #include <QLocale>
@@ -391,7 +393,7 @@ public:
     {
         this->closePopup();
 
-        auto *popup = new QListWidget(nullptr);
+        auto *popup = new QListWidget(this->window());
         popup->setObjectName("PredictionTitleTemplatePopup");
         popup->setWindowFlags(Qt::Tool | Qt::FramelessWindowHint |
                               Qt::NoDropShadowWindowHint);
@@ -546,12 +548,12 @@ std::vector<QPointer<PredictionDialog>> PredictionDialog::activeDialogs_;
 
 PredictionDialog::PredictionDialog(TwitchChannel *channel, QWidget *parent)
     : DraggablePopup(true, parent)
-    , channel_(channel)
+    , channel_(channel->sharedFromThis())
 {
     this->setAttribute(Qt::WA_DeleteOnClose);
     this->setObjectName("PredictionDialog");
     this->setWindowTitle("Prediction");
-    this->setScaleIndependentSize(DEFAULT_DIALOG_SIZE);
+    this->enableResize(getSettings()->predictionPopupSize, DEFAULT_DIALOG_SIZE);
 
     this->ensureCreateDraft();
     this->currentPrediction_ = *this->channel_->accessPrediction();
@@ -629,7 +631,7 @@ PredictionDialog::PredictionDialog(TwitchChannel *channel, QWidget *parent)
     this->scrollArea_->setObjectName("PredictionScrollArea");
     this->scrollArea_->setFrameShape(QFrame::NoFrame);
     this->scrollArea_->setWidgetResizable(true);
-    this->scrollArea_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    this->scrollArea_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     this->scrollArea_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     this->scrollArea_->viewport()->installEventFilter(this);
     this->mainLayout_->addWidget(this->scrollArea_);
@@ -652,6 +654,39 @@ PredictionDialog::PredictionDialog(TwitchChannel *channel, QWidget *parent)
         }
     });
 
+    this->authToken_ = MoltorinoAuth::resolveCurrentUserToken().token;
+    this->managedConnections_.emplace_back(
+        getApp()->getAccounts()->twitch.currentUserChanged.connect([this] {
+            this->refreshAccount(true);
+        }));
+    getSettings()->customPinAuthToken.connect(
+        [this](const QString &, auto) {
+            this->refreshAccount();
+        },
+        this->managedConnections_, false);
+    getSettings()->moltorinoAuthAccounts.connect(
+        [this](const QString &, auto) {
+            this->refreshAccount();
+        },
+        this->managedConnections_, false);
+    this->updateUI();
+}
+
+void PredictionDialog::refreshAccount(bool accountChanged)
+{
+    const auto token = MoltorinoAuth::resolveCurrentUserToken().token;
+    if (!accountChanged && token == this->authToken_)
+    {
+        return;
+    }
+    this->authToken_ = token;
+    ++this->authGeneration_;
+    if (this->currentPrediction_)
+    {
+        this->currentPrediction_->selfPoints = 0;
+        this->currentPrediction_->selfOutcomeId.clear();
+    }
+
     this->updateUI();
 }
 
@@ -666,7 +701,7 @@ void PredictionDialog::showDialog(
         auto it = activeDialogs_.begin();
         while (it != activeDialogs_.end())
         {
-            if (it->isNull())
+            if (it->isNull() || !(*it)->isVisible())
             {
                 it = activeDialogs_.erase(it);
                 continue;
@@ -674,7 +709,7 @@ void PredictionDialog::showDialog(
 
             if (s.predictionDialogsPerChannel)
             {
-                if ((*it)->channel_ == channel)
+                if ((*it)->channel_.get() == channel)
                 {
                     if (prediction.has_value())
                     {
@@ -960,13 +995,6 @@ void PredictionDialog::resizeEvent(QResizeEvent *event)
 
 bool PredictionDialog::eventFilter(QObject *watched, QEvent *event)
 {
-    // Block wheel events on the outer scroll area when scrolling is disabled.
-    if (watched == this->scrollArea_->viewport() &&
-        event->type() == QEvent::Wheel)
-    {
-        return true;
-    }
-
     if (event->type() == QEvent::MouseButtonPress ||
         event->type() == QEvent::MouseButtonRelease ||
         event->type() == QEvent::MouseButtonDblClick)
@@ -1127,16 +1155,16 @@ void PredictionDialog::applySizeConstraints(bool preserveCurrentPosition)
     const int screenMargin = std::max(12, int(16 * this->scale()));
     const int maxWidth = std::max(1, available.width() - screenMargin * 2);
     const int maxHeight = std::max(1, available.height() - screenMargin * 2);
-    // All views with an active prediction use content-driven height.
-    // Create mode (no prediction) uses the fixed scale-independent size.
+
     const bool createMode = !hasOpenPrediction(this->currentPrediction_) &&
                             this->channel_->hasModRights();
     const bool useContentDrivenHeight =
         this->currentPrediction_.has_value() && !createMode;
-    const int targetWidth =
-        std::min(int(this->scaleIndependentWidth() * this->scale()), maxWidth);
+    const int targetWidth = std::min(
+        this->preferredSize(DEFAULT_DIALOG_SIZE * this->scale()).width(),
+        maxWidth);
     int targetHeight =
-        std::min(int(this->scaleIndependentHeight() * this->scale()), maxHeight);
+        std::min(int(DEFAULT_DIALOG_SIZE.height() * this->scale()), maxHeight);
 
     if (useContentDrivenHeight)
     {
@@ -1252,7 +1280,7 @@ void PredictionDialog::applySizeConstraints(bool preserveCurrentPosition)
     }
 
     const QPoint currentPosition = this->pos();
-    this->setFixedSize(targetWidth, targetHeight);
+    this->applyPopupSize(QSize(targetWidth, targetHeight));
     if (auto *layout = this->layout())
     {
         layout->invalidate();
@@ -1275,7 +1303,8 @@ void PredictionDialog::applySizeConstraints(bool preserveCurrentPosition)
         }
     }
 
-    if (this->isVisible())
+    if (this->isVisible() && !this->isMaximized() && !this->isFullScreen() &&
+        !this->isMinimized())
     {
         if (preserveCurrentPosition)
         {
@@ -1303,9 +1332,7 @@ void PredictionDialog::refreshHeader()
     {
         this->headerTitleLabel_->setText("Prediction");
         this->headerSubtitleLabel_->setText(
-            QString("<span style=\"font-weight:400;\">#%1</span>"
-                    " <span style=\"font-weight:400;\">•</span> "
-                    "<span style=\"font-weight:700; color:%2;\">%3</span>")
+            QString("#%1 • <b><span style=\"color:%2;\">%3</span></b>")
                 .arg(this->channel_->getName().toHtmlEscaped(),
                      statusColor(this->currentPrediction_->status).name(),
                      formatStatus(this->currentPrediction_->status).toLower().toHtmlEscaped()));
@@ -1384,9 +1411,12 @@ void PredictionDialog::updateUI()
 
     if (this->bottomWidget_)
     {
-        this->bottomWidget_->deleteLater();
+        auto *oldBottomWidget = this->bottomWidget_;
+        this->bottomWidget_ = nullptr;
+        this->mainLayout_->removeWidget(oldBottomWidget);
+        oldBottomWidget->hide();
+        oldBottomWidget->deleteLater();
     }
-    this->bottomWidget_ = nullptr;
 
     if (auto *oldWidget = this->scrollArea_->takeWidget())
     {
@@ -1460,9 +1490,7 @@ void PredictionDialog::updateUI()
         layout->addStretch(1);
     }
 
-    // All views: disable outer scrollbar. Manage view caps its outcomes
-    // in a fixed-height inner scroll area; betting/create are content-driven.
-    this->scrollArea_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    this->scrollArea_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     this->scrollArea_->setWidget(this->activeWidget_);
     QTimer::singleShot(0, this, [this, layoutGeneration] {
         if (layoutGeneration != this->layoutUpdateGeneration_)
@@ -1529,8 +1557,6 @@ void PredictionDialog::buildCreateUI()
     const auto titleFont =
         getApp()->getFonts()->getFont(FontStyle::UiMediumBold,
                                       effectiveScale * 1.08F);
-    const QFontMetrics uiMetrics(uiFont);
-    const QFontMetrics buttonMetrics(buttonFont);
     const int rowSpacing = std::max(1, int(3 * effectiveScale));
     const int sectionSpacing = std::max(1, int(4 * effectiveScale));
     const int sectionPad = std::max(1, int(4 * effectiveScale));
@@ -1539,15 +1565,10 @@ void PredictionDialog::buildCreateUI()
     const int visibleOutcomeRows = std::min(
         rawScale <= 0.65F ? 2 : rawScale <= 0.85F ? 3 : CREATE_VISIBLE_OUTCOME_ROWS,
         MAX_OUTCOMES);
-    const int outcomeRowHeight = std::max(
-        10, std::max(int(20 * effectiveScale),
-                     uiMetrics.height() + std::max(1, int(2 * effectiveScale))));
-    const int compactControlHeight = std::max(
-        10, std::max(int(20 * effectiveScale),
-                     buttonMetrics.height() + std::max(1, int(2 * effectiveScale))));
-    const int titleInputHeight = std::max(
-        10, std::max(int(20 * effectiveScale),
-                     uiMetrics.height() + std::max(1, int(2 * effectiveScale))));
+    const int outcomeRowHeight = popupControlHeight(uiFont, effectiveScale);
+    const int compactControlHeight =
+        popupControlHeight(buttonFont, effectiveScale);
+    const int titleInputHeight = popupControlHeight(uiFont, effectiveScale);
     const int accentHeight = std::max(8, outcomeRowHeight - std::max(2, int(rawScale)));
     const int outcomesListHeight = visibleOutcomeRows * outcomeRowHeight +
                                    std::max(0, visibleOutcomeRows - 1) * rowSpacing +
@@ -2020,17 +2041,22 @@ void PredictionDialog::startPrediction()
     TwitchGql::createPredictionEvent(
         this->channel_->roomId(), title, choices,
         this->draftDurationSeconds_, auth.token,
-        [self, title] {
+        [self] {
             if (!self)
             {
                 return;
             }
 
-            /*
-            self->channel_->addSystemMessage(
-                QString("Created prediction: '%1'").arg(title));
-            */
-            self->close();
+            self->createInFlight_ = false;
+            self->channel_->refreshPrediction(true);
+            if (getSettings()->predictionAutoCloseDialog)
+            {
+                self->close();
+            }
+            else
+            {
+                self->updateUI();
+            }
         },
         [self](const QString &error) {
             if (!self)
@@ -2059,17 +2085,12 @@ void PredictionDialog::buildManageUI()
     const auto titleFont =
         getApp()->getFonts()->getFont(FontStyle::UiMediumBold,
                                       effectiveScale * 1.18F);
-    const QFontMetrics uiMetrics(uiFont);
-    const QFontMetrics buttonMetrics(buttonFont);
     const int rowSpacing = std::max(1, int(3 * effectiveScale));
     const int sectionPad = std::max(1, int(4 * effectiveScale));
     const int accentWidth = std::max(1, int(2 * effectiveScale));
-    const int compactControlHeight = std::max(
-        10, std::max(int(20 * effectiveScale),
-                     buttonMetrics.height() + std::max(1, int(2 * effectiveScale))));
-    const int outcomeRowHeight = std::max(
-        10, std::max(int(20 * effectiveScale),
-                     uiMetrics.height() + std::max(1, int(2 * effectiveScale))));
+    const int compactControlHeight =
+        popupControlHeight(buttonFont, effectiveScale);
+    const int outcomeRowHeight = popupControlHeight(uiFont, effectiveScale);
     const int accentHeight = std::max(8, outcomeRowHeight - std::max(2, int(rawScale)));
     const int visibleOutcomeRows =
         rawScale <= 0.65F ? 2 : rawScale <= 0.85F ? 4 : MANAGE_VISIBLE_OUTCOME_ROWS;
@@ -2267,16 +2288,29 @@ void PredictionDialog::buildManageUI()
                              QPointer<QPushButton> button = cancelButton;
                              TwitchGql::cancelPrediction(
                                  predictionId, auth.token,
-                                 [self] {
+                                 [self, predictionId] {
                                      if (!self)
                                      {
                                          return;
                                      }
-                                     /*
-                                     self->channel_->addSystemMessage(
-                                         "Prediction deleted — points refunded.");
-                                     */
-                                     self->close();
+                                     auto current =
+                                         *self->channel_->accessPrediction();
+                                     const bool sameEvent =
+                                         !current ||
+                                         current->id == predictionId;
+                                     if (current && current->id == predictionId)
+                                     {
+                                         current->status = "CANCELED";
+                                         self->channel_->setActivePrediction(
+                                             std::move(current));
+                                     }
+                                     self->channel_->refreshPrediction(true);
+                                     if (sameEvent &&
+                                         getSettings()
+                                             ->predictionAutoCloseDialog)
+                                     {
+                                         self->close();
+                                     }
                                  },
                                  [self, button](const QString &error) {
                                      if (!self)
@@ -2390,7 +2424,6 @@ void PredictionDialog::buildManageUI()
         QObject::connect(resolveButton, &QPushButton::clicked, this,
                          [this, predictionId, resolveCombo, resolveButton] {
                              const auto winnerId = resolveCombo->currentData().toString();
-                             const auto winnerTitle = resolveCombo->currentText();
                              if (winnerId.isEmpty())
                              {
                                  return;
@@ -2417,18 +2450,31 @@ void PredictionDialog::buildManageUI()
                              QPointer<QPushButton> button = resolveButton;
                              TwitchGql::resolvePrediction(
                                  predictionId, winnerId, auth.token,
-                                 [self, winnerTitle] {
+                                 [self, predictionId, winnerId] {
                                      if (!self)
                                      {
                                          return;
                                      }
 
-                                     /*
-                                     self->channel_->addSystemMessage(
-                                         QString("Prediction resolved: \"%1\" wins!")
-                                             .arg(winnerTitle));
-                                     */
-                                     self->close();
+                                     auto current =
+                                         *self->channel_->accessPrediction();
+                                     const bool sameEvent =
+                                         !current ||
+                                         current->id == predictionId;
+                                     if (current && current->id == predictionId)
+                                     {
+                                         current->status = "RESOLVED";
+                                         current->winningOutcomeId = winnerId;
+                                         self->channel_->setActivePrediction(
+                                             std::move(current));
+                                     }
+                                     self->channel_->refreshPrediction(true);
+                                     if (sameEvent &&
+                                         getSettings()
+                                             ->predictionAutoCloseDialog)
+                                     {
+                                         self->close();
+                                     }
                                  },
                                  [self, button](const QString &error) {
                                      if (!self)
@@ -2479,14 +2525,12 @@ void PredictionDialog::buildBettingUI()
     const auto statFont =
         getApp()->getFonts()->getFont(FontStyle::UiMedium,
                                       effectiveScale * 0.92F);
-    const QFontMetrics buttonMetrics(buttonFont);
     const int rowSpacing = std::max(1, int(3 * effectiveScale));
     const int sectionSpacing = std::max(1, int(4 * effectiveScale));
     const int sectionPad = std::max(1, int(4 * effectiveScale));
     const int contentSectionGap = std::max(1, int(2 * rawScale));
-    const int compactControlHeight = std::max(
-        10, std::max(int(20 * effectiveScale),
-                     buttonMetrics.height() + std::max(1, int(2 * effectiveScale))));
+    const int compactControlHeight =
+        popupControlHeight(buttonFont, effectiveScale);
     const auto locale = QLocale();
 
 
@@ -2713,7 +2757,7 @@ void PredictionDialog::buildBettingUI()
                 QFontMetrics(optionNameFont).horizontalAdvance(outcome.title));
             nameLabel->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
             nameLabel->setStyleSheet(
-                QString("color: %1; font-weight: 700; background: transparent; border: none;")
+                QString("color: %1; background: transparent; border: none;")
                     .arg(color.name()));
             nameLabel->setToolTip(outcome.title);
             innerLayout->addWidget(nameLabel, 0, isLeft ? Qt::AlignRight : Qt::AlignLeft);
@@ -2723,7 +2767,7 @@ void PredictionDialog::buildBettingUI()
             pctLabel->setFont(largePctFont);
             pctLabel->setAlignment(isLeft ? (Qt::AlignRight | Qt::AlignVCenter) : (Qt::AlignLeft | Qt::AlignVCenter));
             pctLabel->setStyleSheet(
-                QString("color: %1; font-weight: 700; background: transparent; border: none;")
+                QString("color: %1; background: transparent; border: none;")
                     .arg(color.name()));
             innerLayout->addWidget(pctLabel, 0, isLeft ? Qt::AlignRight : Qt::AlignLeft);
 
@@ -3015,7 +3059,7 @@ void PredictionDialog::buildBettingUI()
                                          QSizePolicy::Fixed);
             selectedTitle->setToolTip(selectedOutcome->title);
             selectedTitle->setStyleSheet(
-                QString("color:%1; font-weight: 700; background: transparent; border: none;")
+                QString("color:%1; background: transparent; border: none;")
                     .arg(selectedColor.name()));
             detailLayout->addWidget(selectedTitle);
 
@@ -3096,7 +3140,7 @@ void PredictionDialog::buildBettingUI()
             selectedPct->setFont(focusedPctFont);
             selectedPct->setAlignment(Qt::AlignCenter);
             selectedPct->setStyleSheet(
-                QString("color:%1; font-weight: 700; background: transparent; border: none;")
+                QString("color:%1; background: transparent; border: none;")
                     .arg(selectedColor.name()));
             detailLayout->addWidget(selectedPct);
 
@@ -3236,8 +3280,9 @@ void PredictionDialog::buildBettingUI()
             amountInput->setFixedHeight(
                 compactControlHeight);
             amountInput->setPlaceholderText("Amount");
-            amountInput->setValidator(new QIntValidator(
-                1, maxBet, amountInput));
+            amountInput->setValidator(
+                new ChannelPointAmountValidator(maxBet, amountInput));
+            amountInput->setToolTip("Use k for thousands, such as 10k.");
             if (this->bettingWagerAmount_ > 0)
             {
                 amountInput->setText(QString::number(
@@ -3245,11 +3290,9 @@ void PredictionDialog::buildBettingUI()
             }
             QObject::connect(
                 amountInput, &QLineEdit::textChanged, this,
-                [this](const QString &text) {
-                    bool ok;
-                    int val = text.toInt(&ok);
+                [this, maxBet](const QString &text) {
                     this->bettingWagerAmount_ =
-                        ok ? val : 0;
+                        parseChannelPointAmount(text, maxBet).value_or(0);
                 });
             inputRow->addWidget(amountInput, 1);
 
@@ -3364,7 +3407,6 @@ void PredictionDialog::buildBettingUI()
                             "color: white;"
                             "border: 1px solid transparent;"
                             "border-radius: %2px;"
-                            "font-weight: 600;"
                             "padding: %3px %4px;"
                             "min-height: %5px;"
                             "}"
@@ -3386,7 +3428,15 @@ void PredictionDialog::buildBettingUI()
                     QObject::connect(
                         voteBtn, &QPushButton::clicked, this,
                         [this, eventId, outcomeId, voteBtn,
-                         authToken = auth.token] {
+                         authToken = auth.token,
+                         authGeneration = this->authGeneration_] {
+                            if (MoltorinoAuth::resolveCurrentUserToken()
+                                        .token != authToken ||
+                                this->authGeneration_ != authGeneration)
+                            {
+                                this->updateUI();
+                                return;
+                            }
                             const int points = this->bettingWagerAmount_;
                             if (points <= 0)
                             {
@@ -3400,30 +3450,34 @@ void PredictionDialog::buildBettingUI()
 
                             QPointer<PredictionDialog> self = this;
                             QPointer<QPushButton> btn = voteBtn;
+                            const auto weakChannel =
+                                this->channel_->weakFromThis();
                             TwitchGql::makePrediction(
-                                eventId, outcomeId, points, authToken,
-                                    [self, points, outcomeId] {
-                                        if (!self)
+                                    eventId, outcomeId, points, authToken,
+                                    [self, weakChannel, points, outcomeId,
+                                     eventId, authToken, authGeneration] {
+                                        if (MoltorinoAuth::
+                                                    resolveCurrentUserToken()
+                                                        .token != authToken ||
+                                            (self && self->authGeneration_ !=
+                                                         authGeneration))
+                                        {
+                                            return;
+                                        }
+                                        if (auto channel = weakChannel.lock())
+                                        {
+                                            channel->refreshChannelPointsIfStale(
+                                                true);
+                                        }
+                                        if (!self || !self->currentPrediction_ ||
+                                            self->currentPrediction_->id != eventId)
                                         {
                                             return;
                                         }
 
-                                        QString outcomeTitle = "prediction";
-                                        if (self->currentPrediction_)
-                                        {
-                                            self->currentPrediction_->selfPoints = points;
-                                            self->currentPrediction_->selfOutcomeId = outcomeId;
-                                            for (const auto &o :
-                                                 self->currentPrediction_->outcomes)
-                                            {
-                                                if (o.id == outcomeId)
-                                                {
-                                                    outcomeTitle =
-                                                        QString("\"%1\"").arg(o.title);
-                                                    break;
-                                                }
-                                            }
-                                        }
+                                        self->currentPrediction_->selfPoints = points;
+                                        self->currentPrediction_->selfOutcomeId = outcomeId;
+
                                         // Update channel memory locally and broadcast.
                                         // Copy the prediction out before calling
                                         // setActivePrediction(), otherwise we'd
@@ -3443,7 +3497,8 @@ void PredictionDialog::buildBettingUI()
                                                 }
                                             }
 
-                                            if (mutatedPrediction.has_value())
+                                            if (mutatedPrediction.has_value() &&
+                                                mutatedPrediction->id == eventId)
                                             {
                                                 mutatedPrediction->selfPoints = points;
                                                 mutatedPrediction->selfOutcomeId =
@@ -3452,13 +3507,6 @@ void PredictionDialog::buildBettingUI()
                                                     std::move(*mutatedPrediction));
                                             }
                                         }
-
-                                        /*
-                                        self->channel_->addSystemMessage(
-                                            QString("Placed %1 points on %2 in prediction.")
-                                                .arg(QLocale().toString(points),
-                                                     outcomeTitle));
-                                        */
 
                                         if (getSettings()->predictionAutoCloseDialog)
                                         {
@@ -3469,21 +3517,24 @@ void PredictionDialog::buildBettingUI()
                                             self->updateUI();
                                         }
                                     },
-                                [self, btn](const QString &error) {
-                                    if (!self)
-                                    {
-                                        return;
-                                    }
-                                    self->channel_->addSystemMessage(
-                                        "Failed to place bet: " +
-                                        normalizeMoltorinoAuthError(
-                                            "placing prediction bets", error));
-                                    if (btn)
-                                    {
-                                        btn->setEnabled(true);
-                                        btn->setText("Vote");
-                                    }
-                                });
+                                    [self, btn,
+                                     authGeneration](const QString &error) {
+                                        if (!self || self->authGeneration_ !=
+                                                         authGeneration)
+                                        {
+                                            return;
+                                        }
+                                        self->channel_->addSystemMessage(
+                                            "Failed to place bet: " +
+                                            normalizeMoltorinoAuthError(
+                                                "placing prediction bets",
+                                                error));
+                                        if (btn)
+                                        {
+                                            btn->setEnabled(true);
+                                            btn->setText("Vote");
+                                        }
+                                    });
                         });
 
                     voteRow->addWidget(voteBtn, 1);
@@ -3498,7 +3549,6 @@ void PredictionDialog::buildBettingUI()
                 const int votePaddingX = std::max(4, int(5 * effectiveScale));
                 const int voteMinHeight = std::max(14, int(20 * effectiveScale));
                 const auto selectedOutcomeId = selectedOutcome->id;
-                const auto selectedOutcomeTitle = selectedOutcome->title;
                 auto *voteBtn = new QPushButton("Vote", this->bottomWidget_);
                 voteBtn->setFont(buttonFont);
                 voteBtn->setFixedHeight(compactControlHeight);
@@ -3511,7 +3561,6 @@ void PredictionDialog::buildBettingUI()
                         "color: white;"
                         "border: 1px solid transparent;"
                         "border-radius: %2px;"
-                        "font-weight: 600;"
                         "padding: %3px %4px;"
                         "min-height: %5px;"
                         "}"
@@ -3532,8 +3581,15 @@ void PredictionDialog::buildBettingUI()
 
                 QObject::connect(
                     voteBtn, &QPushButton::clicked, this,
-                    [this, eventId, voteBtn, authToken = auth.token, selectedOutcomeId,
-                     selectedOutcomeTitle] {
+                    [this, eventId, voteBtn, authToken = auth.token,
+                     authGeneration = this->authGeneration_, selectedOutcomeId] {
+                        if (MoltorinoAuth::resolveCurrentUserToken().token !=
+                                authToken ||
+                            this->authGeneration_ != authGeneration)
+                        {
+                            this->updateUI();
+                            return;
+                        }
                         const int points = this->bettingWagerAmount_;
                         if (points <= 0)
                         {
@@ -3547,10 +3603,25 @@ void PredictionDialog::buildBettingUI()
 
                         QPointer<PredictionDialog> self = this;
                         QPointer<QPushButton> btn = voteBtn;
+                        const auto weakChannel =
+                            this->channel_->weakFromThis();
                         TwitchGql::makePrediction(
                             eventId, selectedOutcomeId, points, authToken,
-                            [self, points, selectedOutcomeTitle, selectedOutcomeId] {
-                                if (!self)
+                            [self, weakChannel, points, selectedOutcomeId, eventId, authToken,
+                             authGeneration] {
+                                if (MoltorinoAuth::resolveCurrentUserToken()
+                                            .token != authToken ||
+                                    (self &&
+                                     self->authGeneration_ != authGeneration))
+                                {
+                                    return;
+                                }
+                                if (auto channel = weakChannel.lock())
+                                {
+                                    channel->refreshChannelPointsIfStale(true);
+                                }
+                                if (!self || !self->currentPrediction_ ||
+                                    self->currentPrediction_->id != eventId)
                                 {
                                     return;
                                 }
@@ -3577,7 +3648,8 @@ void PredictionDialog::buildBettingUI()
                                         }
                                     }
 
-                                    if (mutatedPrediction.has_value())
+                                    if (mutatedPrediction.has_value() &&
+                                        mutatedPrediction->id == eventId)
                                     {
                                         mutatedPrediction->selfPoints = points;
                                         mutatedPrediction->selfOutcomeId =
@@ -3587,12 +3659,6 @@ void PredictionDialog::buildBettingUI()
                                     }
                                 }
 
-                                /*
-                                self->channel_->addSystemMessage(
-                                    QString("Placed %1 points on \"%2\" in prediction.")
-                                        .arg(QLocale().toString(points),
-                                             selectedOutcomeTitle));
-                                */
                                 if (getSettings()->predictionAutoCloseDialog)
                                 {
                                     self->close();
@@ -3602,8 +3668,9 @@ void PredictionDialog::buildBettingUI()
                                     self->updateUI();
                                 }
                             },
-                            [self, btn](const QString &error) {
-                                if (!self)
+                            [self, btn, authGeneration](const QString &error) {
+                                if (!self ||
+                                    self->authGeneration_ != authGeneration)
                                 {
                                     return;
                                 }
@@ -3628,9 +3695,6 @@ void PredictionDialog::buildBettingUI()
         this->mainLayout_->addWidget(this->bottomWidget_);
         this->bottomWidget_->show();
     }
-    else
-    {
-    }
 }
 
 void PredictionDialog::refreshStyle()
@@ -3641,13 +3705,14 @@ void PredictionDialog::refreshStyle()
     const int smallRadius = std::max(1, int(2 * rawScale));
     const int inputPaddingY = 0;
     const int inputPaddingX = std::max(4, int(5 * effectiveScale));
-    const int inputMinHeight = std::max(14, int(20 * effectiveScale));
+    const int inputMinHeight = popupControlMinimumHeight(effectiveScale);
     const int controlPaddingY = std::max(1, int(2 * effectiveScale));
     const int controlPaddingX = std::max(4, int(6 * effectiveScale));
     const int controlMinHeight = std::max(16, int(24 * effectiveScale));
     const int compactControlPaddingY = 0;
     const int compactControlPaddingX = std::max(4, int(5 * effectiveScale));
-    const int compactControlMinHeight = std::max(14, int(20 * effectiveScale));
+    const int compactControlMinHeight =
+        popupControlMinimumHeight(effectiveScale);
     const int scrollbarWidth = std::max(3, int(4 * effectiveScale));
     const int scrollbarRadius = std::max(1, int(2 * effectiveScale));
     const int scrollbarMinHeight = std::max(12, int(16 * effectiveScale));
@@ -3724,19 +3789,15 @@ void PredictionDialog::refreshStyle()
             }
             QLabel#PredictionHeaderTitle {
                 color: %5;
-                font-weight: 700;
             }
             QLabel#PredictionCurrentTitle {
                 color: %5;
-                font-weight: 700;
             }
             QLabel#PredictionSectionTitle {
                 color: %6;
-                font-weight: 600;
             }
             QLabel#PredictionOutcomeName {
                 color: %5;
-                font-weight: 600;
             }
             QLabel#PredictionHeaderSubtitle,
             QLabel#PredictionCountLabel,
@@ -3838,7 +3899,6 @@ void PredictionDialog::refreshStyle()
             QPushButton#PredictionCreateStartButton {
                 border: 1px solid transparent;
                 border-radius: %8px;
-                font-weight: 600;
                 padding: %15px %16px;
                 min-height: %17px;
             }
@@ -3856,7 +3916,6 @@ void PredictionDialog::refreshStyle()
             QPushButton#PredictionManageDangerButton {
                 border: 1px solid transparent;
                 border-radius: %8px;
-                font-weight: 600;
                 padding: %15px %16px;
                 min-height: %17px;
             }
@@ -3874,7 +3933,6 @@ void PredictionDialog::refreshStyle()
             QPushButton#PredictionDangerButton {
                 border: 1px solid transparent;
                 border-radius: %8px;
-                font-weight: 600;
                 padding: %12px %13px;
                 min-height: %14px;
             }
@@ -3893,7 +3951,6 @@ void PredictionDialog::refreshStyle()
                 color: %5;
                 border: 1px solid %3;
                 border-radius: %8px;
-                font-weight: 600;
                 padding: %9px %10px;
                 min-height: %11px;
                 text-align: left;
@@ -3916,11 +3973,9 @@ void PredictionDialog::refreshStyle()
             }
             QLabel#PredictionBetDetailLabel {
                 color: %6;
-                font-weight: 600;
             }
             QLabel#PredictionBetDetailValue {
                 color: %5;
-                font-weight: 700;
             }
             QLabel#PredictionBetStatValue {
                 color: %6;
@@ -3941,7 +3996,6 @@ void PredictionDialog::refreshStyle()
                 color: %5;
                 border: 1px solid %3;
                 border-radius: %8px;
-                font-weight: 600;
                 padding: %15px %16px;
                 min-height: %17px;
             }
@@ -3967,7 +4021,6 @@ void PredictionDialog::refreshStyle()
                 color: %5;
                 border: 1px solid %3;
                 border-radius: %8px;
-                font-weight: 600;
                 padding: %15px %16px;
                 min-height: %17px;
             }

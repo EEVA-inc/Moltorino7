@@ -9,6 +9,7 @@
 #include "common/QLogging.hpp"
 #include "controllers/accounts/AccountController.hpp"
 #include "controllers/commands/builtin/kick/ModerationActions.hpp"
+#include "controllers/commands/builtin/youtube/ModerationActions.hpp"
 #include "controllers/commands/CommandContext.hpp"
 #include "controllers/commands/common/ChannelAction.hpp"
 #include "providers/twitch/api/Helix.hpp"
@@ -90,6 +91,10 @@ namespace chatterino::commands {
 
 QString unbanUser(const CommandContext &ctx)
 {
+    if (ctx.youtubeChannel)
+    {
+        return doYouTubeUnban(ctx);
+    }
     if (ctx.kickChannel)
     {
         return doKickUnban(ctx);

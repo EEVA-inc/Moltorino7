@@ -9,6 +9,9 @@
 #include <IrcMessage>
 #include <pajlada/signals/signal.hpp>
 #include <pajlada/signals/signalholder.hpp>
+#include <QHash>
+#include <QTimer>
+#include <QVarLengthArray>
 
 #include <chrono>
 #include <functional>
@@ -43,6 +46,9 @@ public:
     virtual void sendMessage(const QString &channelName,
                              const QString &message) = 0;
     virtual void sendRawMessage(const QString &rawMessage) = 0;
+    virtual bool sendInvisibleMessage(
+        const std::shared_ptr<TwitchChannel> &channel, const QString &message,
+        const QString &oauthToken) = 0;
 
     virtual ChannelPtr getOrAddChannel(const QString &dirtyChannelName) = 0;
     virtual ChannelPtr getOrAddAnonymousChannel(
@@ -50,6 +56,11 @@ public:
     virtual ChannelPtr getChannelOrEmpty(const QString &dirtyChannelName) = 0;
     virtual ChannelPtr getAnonymousChannelOrEmpty(
         const QString &dirtyChannelName) = 0;
+    virtual void reconnectChannel(const std::shared_ptr<TwitchChannel> &channel)
+    {
+        (void)channel;
+        this->connect();
+    }
     virtual void reconnectAnonymousChannels() = 0;
 
     virtual void addFakeMessage(const QString &data) = 0;
@@ -134,6 +145,9 @@ public:
     void sendMessage(const QString &channelName,
                      const QString &message) override;
     void sendRawMessage(const QString &rawMessage) override;
+    bool sendInvisibleMessage(const std::shared_ptr<TwitchChannel> &channel,
+                              const QString &message,
+                              const QString &oauthToken) override;
 
     ChannelPtr getOrAddChannel(const QString &dirtyChannelName) override;
     ChannelPtr getOrAddAnonymousChannel(
@@ -142,6 +156,8 @@ public:
     ChannelPtr getChannelOrEmpty(const QString &dirtyChannelName) override;
     ChannelPtr getAnonymousChannelOrEmpty(
         const QString &dirtyChannelName) override;
+    void reconnectChannel(
+        const std::shared_ptr<TwitchChannel> &channel) override;
     void reconnectAnonymousChannels() override;
 
     void open(ConnectionType type);
@@ -192,6 +208,13 @@ protected:
     std::shared_ptr<Channel> getCustomChannel(const QString &channelname);
 
 private:
+    QVarLengthArray<ChannelPtr, 2> readChannels(bool anonymous,
+                                                const QString &name = {});
+    void handleReadMessage(Communi::IrcMessage *message, bool anonymous);
+    void handleReadBlock(Communi::IrcMessage *message);
+    void clearAnonymousFallbacks();
+    void partUnusedAnonymousChannel(const QString &name);
+
     void onMessageSendRequested(const std::shared_ptr<TwitchChannel> &channel,
                                 const QString &message, bool &sent);
     void onReplySendRequested(const std::shared_ptr<TwitchChannel> &channel,
@@ -199,6 +222,20 @@ private:
                               bool &sent);
 
     bool prepareToSend(const std::shared_ptr<TwitchChannel> &channel);
+
+    void sentJoin(const QString &channelName, bool anonymous);
+    void confirmJoin(const QString &channelName, bool anonymous,
+                     bool restoreChannelState);
+    void retryUnconfirmedJoins(bool anonymous);
+    void scheduleJoinRetry(bool anonymous);
+    void clearJoinAttempts(bool anonymous);
+    void cancelJoinAttempt(const QString &channelName, bool anonymous);
+
+    struct PendingJoin {
+        int attempts = 0;
+        std::chrono::steady_clock::time_point sentAt;
+        bool queued = false;
+    };
 
     QMap<QString, std::weak_ptr<Channel>> channels;
     QMap<QString, std::weak_ptr<Channel>> anonymousChannels;
@@ -211,6 +248,10 @@ private:
 
     QObjectPtr<RatelimitBucket> joinBucket_;
     QObjectPtr<RatelimitBucket> anonymousJoinBucket_;
+    QHash<QString, PendingJoin> joinAttempts_;
+    QHash<QString, PendingJoin> anonymousJoinAttempts_;
+    QTimer joinRetryTimer_;
+    QTimer anonymousJoinRetryTimer_;
 
     QTimer reconnectTimer_;
     int falloffCounter_ = 1;

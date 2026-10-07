@@ -8,6 +8,8 @@
 #include "util/PostToThread.hpp"
 #include "util/Twitch.hpp"
 
+#include <QDateTime>
+
 #include <functional>
 #include <optional>
 #include <utility>
@@ -519,7 +521,18 @@ bool tryRunModVipActionWithLeadModGql(const CommandContext &ctx,
 
     runGqlRoleMutation(
         action, ctx.twitchChannel->roomId(), target, auth.token,
-        [] {},
+        [channel{ctx.channel}, twitchChannel{ctx.twitchChannel}, action, target] {
+            if (action != ModVipAction::AddModerator &&
+                action != ModVipAction::RemoveModerator)
+            {
+                return;
+            }
+            runInGuiThread([channel, twitchChannel, action, target] {
+                twitchChannel->setKnownModeratorStatus(
+                    target, action == ModVipAction::AddModerator,
+                    QDateTime::currentDateTimeUtc());
+            });
+        },
         [channel{ctx.channel}, action, target,
          prefix = info.failurePrefix](const QString &error) {
             runInGuiThread([channel, action, target, prefix, error] {

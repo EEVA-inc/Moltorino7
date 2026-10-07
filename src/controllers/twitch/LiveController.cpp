@@ -166,6 +166,8 @@ void TwitchLiveController::request(std::optional<QStringList> optChannelIDs)
                             if (auto channel = it->second.ptr.lock(); channel)
                             {
                                 channel->updateStreamTitle(helixChannel.title);
+                                channel->updateStreamGame(helixChannel.gameName,
+                                                          helixChannel.gameId);
                                 channel->updateDisplayName(helixChannel.name);
                             }
                             else

@@ -14,6 +14,8 @@
 
 #include <pajlada/signals/scoped-connection.hpp>
 
+#include <cstdint>
+#include <memory>
 #include <vector>
 
 class QButtonGroup;
@@ -57,7 +59,8 @@ private:
 
     void refreshHeader();
     void refreshStyle();
-    void reloadRewards(bool force);
+    void reloadRewards();
+    void refreshAccount();
     void rebuildContent();
     void refreshCurrentLayout();
     void refreshRewardsLayout();
@@ -78,6 +81,8 @@ private:
     void openEmotePicker(const GqlChannelPointReward &reward, bool modified);
     void loadEmotePickerData();
     void unlockSelectedEmote(const GqlChannelPointEmote &emote);
+    void selectGigantifiedEmote(const GqlChannelPointEmote &emote);
+    void sendSelectedGigantifiedEmote();
     void applyRedeemResult(const GqlChannelPointRedeemResult &result,
                            const QString &message);
     QString redeemChannelId() const;
@@ -89,7 +94,7 @@ private:
     bool canRedeem(const GqlChannelPointReward &reward);
     void applySizeConstraints();
 
-    TwitchChannel *channel_{};
+    std::shared_ptr<TwitchChannel> channel_;
     QPointer<SplitInput> input_;
 
     QVBoxLayout *mainLayout_{};
@@ -113,7 +118,12 @@ private:
     GqlChannelPointReward selectedReward_;
     bool selectedRewardValid_ = false;
     bool selectingModifiedEmote_ = false;
+    bool selectingGigantifiedEmote_ = false;
+    GqlChannelPointEmote selectedGigantifiedEmote_;
+    bool selectedGigantifiedEmoteValid_ = false;
+    QString gigantifyMessage_;
     bool emotesLoadedForModifiedPicker_ = false;
+    bool emotesLoadedForGigantifyPicker_ = false;
     int emoteVisibleLimit_ = 48;
     int emoteScrollValue_ = 0;
     int emoteImageRefreshAttempts_ = 0;
@@ -131,11 +141,14 @@ private:
     bool rebuildQueued_ = false;
     bool layoutRefreshQueued_ = false;
     bool initialFetchDone_ = false;
+    QString authToken_;
+    uint64_t authGeneration_ = 0;
     QString statusText_;
     bool statusIsError_ = false;
     QTimer layoutRefreshTimer_;
 
     pajlada::Signals::ScopedConnection channelPointsConnection_;
+    std::vector<pajlada::Signals::ScopedConnection> managedSettingConnections_;
 
     static std::vector<QPointer<ChannelPointsDialog>> activeDialogs_;
 };

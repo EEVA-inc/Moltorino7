@@ -15,9 +15,26 @@ namespace chatterino {
 struct ModerationActionLogCounts {
     int bans = 0;
     int timeouts = 0;
+    int deletes = 0;
+    int unbans = 0;
+    int untimeouts = 0;
+    int other = 0;
 
     [[nodiscard]] int countedTotal() const;
     [[nodiscard]] int rawTotal() const;
+};
+
+struct ModerationActionLogEvent {
+    QString id;
+    GqlModerationActionKind kind = GqlModerationActionKind::Other;
+    QDateTime createdAt;
+    QString moderatorId;
+    QString moderatorLogin;
+    QString moderatorDisplayName;
+    QString targetId;
+    QString targetLogin;
+    QString targetDisplayName;
+    QString text;
 };
 
 struct ModerationActionLogModeratorSummary {
@@ -36,15 +53,18 @@ struct ModerationActionLogScanRequest {
     QDateTime cutoffUtc;
     int maxPages = 400;
     int pageDelayMs = 120;
+    int maxRetainedEvents = 20000;
 };
 
 struct ModerationActionLogScanSnapshot {
     QVector<ModerationActionLogModeratorSummary> moderators;
+    QVector<ModerationActionLogEvent> events;
     ModerationActionLogCounts totals;
     int pagesRead = 0;
     int rawActionsSeen = 0;
     bool reachedCutoff = false;
     bool truncated = false;
+    bool eventsTruncated = false;
     bool complete = false;
     bool cancelled = false;
     QString lastCursor;

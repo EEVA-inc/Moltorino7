@@ -3,6 +3,7 @@
 #include "Application.hpp"
 #include "singletons/Settings.hpp"
 #include "singletons/Theme.hpp"
+#include "singletons/ThemeCustomization.hpp"
 #include "widgets/buttons/SvgButton.hpp"
 #include "widgets/dialogs/PollDialog.hpp"
 #include "widgets/splits/Split.hpp"
@@ -343,6 +344,7 @@ void PollBanner::setPoll(const std::optional<TwitchChannel::PollEvent> &poll,
         this->currentFractions_.clear();
         this->targetFractions_.clear();
         this->previousFractions_.clear();
+        this->autoDismissScheduledKey_.clear();
         this->expiryRefreshQueued_ = false;
         this->hide();
         return;
@@ -433,13 +435,29 @@ void PollBanner::setPoll(const std::optional<TwitchChannel::PollEvent> &poll,
         return;
     }
 
-    const int autoDismiss = getSettings()->predictionAutoDismissSeconds;
-    if (autoDismiss > 0 && !pollIsActive(*poll))
+    const auto pollKey = this->dismissalKey(*poll);
+    const bool terminal = !pollIsActive(*poll);
+    if (!terminal && this->autoDismissScheduledKey_ == pollKey)
     {
-        QTimer::singleShot(autoDismiss * 1000, this, [this] {
-            if (this->poll_ && !pollIsActive(*this->poll_))
+        this->autoDismissScheduledKey_.clear();
+    }
+
+    const int autoDismiss = getSettings()->predictionAutoDismissSeconds;
+    if (autoDismiss > 0 && terminal &&
+        this->autoDismissScheduledKey_ != pollKey)
+    {
+        this->autoDismissScheduledKey_ = pollKey;
+        QTimer::singleShot(autoDismiss * 1000, this, [this, pollKey] {
+            if (this->autoDismissScheduledKey_ != pollKey)
             {
-                this->dismissedPollKey_ = this->dismissalKey(*this->poll_);
+                return;
+            }
+            this->autoDismissScheduledKey_.clear();
+            if (this->poll_ && this->dismissalKey(*this->poll_) == pollKey &&
+                !pollIsActive(*this->poll_) &&
+                this->dismissedPollKey_ != pollKey)
+            {
+                this->dismissedPollKey_ = pollKey;
                 this->hide();
                 this->dismissed.invoke();
             }
@@ -543,8 +561,13 @@ void PollBanner::paintEvent(QPaintEvent *)
                         : this->theme->splits.header.border;
 
     painter.fillRect(this->rect(), background);
-    painter.setPen(border);
-    painter.drawRect(0, 0, this->width() - 1, this->height() - 1);
+    const auto &appearance = this->theme->customization;
+    if (appearance.foundation != ThemeFoundation::MoltorinoPolished ||
+        !appearance.roundChat || appearance.cornerRadius() <= 0)
+    {
+        painter.setPen(border);
+        painter.drawRect(0, 0, this->width() - 1, this->height() - 1);
+    }
 
     if (!this->poll_ || !this->distributionBar_->isVisible())
     {
@@ -700,27 +723,30 @@ qint64 PollBanner::remainingPollSeconds() const
         return 0;
     }
 
+    qint64 remainingMs = 0;
     if (this->poll_->endsAt.has_value() && this->poll_->endsAt->isValid())
     {
-        return std::max<qint64>(
-            0, QDateTime::currentDateTimeUtc().secsTo(
-                   this->poll_->endsAt->toUTC()));
+        remainingMs = QDateTime::currentDateTimeUtc().msecsTo(
+            this->poll_->endsAt->toUTC());
     }
-
-    if (this->poll_->createdAt.isValid() && this->poll_->durationSeconds > 0)
+    else if (this->poll_->createdAt.isValid() &&
+             this->poll_->durationSeconds > 0)
     {
-        return std::max<qint64>(
-            0, this->poll_->durationSeconds -
-                   this->poll_->createdAt.toUTC().secsTo(
-                       QDateTime::currentDateTimeUtc()));
+        const auto endsAt = this->poll_->createdAt.toUTC().addSecs(
+            this->poll_->durationSeconds);
+        remainingMs = QDateTime::currentDateTimeUtc().msecsTo(endsAt);
     }
-
-    const auto elapsedMs = this->pollSnapshotAt_.isValid()
-                               ? this->pollSnapshotAt_.msecsTo(
-                                     QDateTime::currentDateTimeUtc())
-                               : 0;
-    return std::max<qint64>(
-        0, (this->poll_->remainingDurationMilliseconds - elapsedMs) / 1000);
+    else
+    {
+        const auto elapsedMs =
+            this->pollSnapshotAt_.isValid()
+                ? this->pollSnapshotAt_.msecsTo(QDateTime::currentDateTimeUtc())
+                : 0;
+        remainingMs = this->poll_->remainingDurationMilliseconds - elapsedMs;
+    }
+    return remainingMs > 0
+               ? remainingMs / 1000 + (remainingMs % 1000 != 0 ? 1 : 0)
+               : 0;
 }
 
 void PollBanner::updateLayout()

@@ -6,6 +6,7 @@
 
 #include "common/Aliases.hpp"
 #include "common/UniqueAccess.hpp"
+#include "messages/Emote.hpp"
 #include "providers/twitch/TwitchUser.hpp"
 
 #include <boost/unordered/unordered_flat_map_fwd.hpp>
@@ -42,7 +43,7 @@ struct TwitchEmoteSet {
 
     std::shared_ptr<TwitchUser> owner;
 
-    std::vector<EmotePtr> emotes;
+    EmoteMap emotes;
 
     bool isBits = false;
 
@@ -88,6 +89,7 @@ public:
 private:
     UniqueAccess<std::unordered_map<EmoteId, std::weak_ptr<Emote>>>
         twitchEmotesCache_;
+    size_t twitchEmoteCacheInsertions_ = 0;
 };
 
 }

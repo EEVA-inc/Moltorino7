@@ -62,7 +62,8 @@ const QStringList TWITCH_DEFAULT_COMMANDS{
     "/unraid",
     "/delete",
     "/announce",
-    "/requests",
+    "/rewardrequests",
+    "/unbanrequests",
     "/warn",
 };
 

@@ -5,6 +5,13 @@
 #include "providers/twitch/eventsub/Controller.hpp"
 
 #include "Application.hpp"
+#include "util/PostToThread.hpp"
+#include "providers/twitch/TwitchIrcServer.hpp"
+#include "providers/twitch/TwitchChannel.hpp"
+#include "providers/twitch/TwitchAccount.hpp"
+#include "controllers/accounts/AccountController.hpp"
+#include "common/network/NetworkResult.hpp"
+#include "common/network/NetworkRequest.hpp"
 #include "common/Args.hpp"
 #include "common/QLogging.hpp"
 #include "common/Version.hpp"
@@ -19,6 +26,9 @@
 #include <boost/certify/https_verification.hpp>
 #include <twitch-eventsub-ws/session.hpp>
 
+#include <QDateTime>
+#include <QUrlQuery>
+#include <algorithm>
 #include <memory>
 #include <utility>
 
@@ -86,11 +96,6 @@ Controller::Controller()
     std::tie(this->eventSubHost, this->eventSubPort, this->eventSubPath) =
         getEventSubHost();
     this->thread = std::make_unique<std::thread>([this] {
-        // make sure we set in any case, even exceptions
-        auto guard = qScopeGuard([&] {
-            this->stoppedFlag.set();
-        });
-
         this->ioContext.run();
     });
     renameThread(*this->thread, "C2EventSub");
@@ -100,43 +105,7 @@ Controller::Controller()
 
 Controller::~Controller()
 {
-    assert(this->quitting && "Application should call setQuitting() before "
-                             "destroying the controller");
-
-    qCInfo(LOG) << "Controller dtor start";
-
-    for (const auto &weakConnection : this->connections)
-    {
-        auto connection = weakConnection.lock();
-        if (!connection)
-        {
-            continue;
-        }
-
-        connection->close();
-    }
-
-    {
-        std::lock_guard lock(this->subscriptionsMutex);
-        this->subscriptions.clear();
-    }
-
-    this->work.reset();
-
-    if (!this->thread->joinable())
-    {
-        qCInfo(LOG) << "Controller dtor end (not joinable)";
-        return;
-    }
-
-    if (this->stoppedFlag.waitFor(250ms))
-    {
-        this->thread->join();
-        qCInfo(LOG) << "Controller dtor end (joined)";
-        return;
-    }
-
-    qCWarning(LOG) << "Controller dtor end (stopped flag didn't stop)";
+    this->setQuitting();
 }
 
 void Controller::removeRef(const SubscriptionRequest &request)
@@ -149,61 +118,30 @@ void Controller::removeRef(const SubscriptionRequest &request)
 
     std::lock_guard lock(this->subscriptionsMutex);
 
-    assert(this->subscriptions.contains(request));
-
-    auto &subscription = this->subscriptions[request];
-    subscription.refCount--;
-    assert(subscription.refCount >= 0);
-    if (subscription.refCount == 0)
+    auto it = this->subscriptions.find(request);
+    if (it == this->subscriptions.end() || it->second.refCount <= 0)
     {
-        qCDebug(LOG) << "Removed last ref for" << request;
+        return;
     }
-    else
+    if (--it->second.refCount == 0)
     {
-        qCDebug(LOG) << "Removed ref for" << request << "("
-                     << subscription.refCount << "remaining)";
-    }
-
-    if (subscription.refCount <= 0)
-    {
-        // No longer interested in this topic, ensure we don't have a retry in flight
-        subscription.retryTimer.reset();
-        if (subscription.subscriptionID.isEmpty())
-        {
-            qCDebug(LOG)
-                << "Refcount fell to zero for" << request
-                << "but we had no subscription ID attached - a "
-                   "successful subscription was never made. From state "
-                << qmagicenum::enumName(subscription.state);
-            subscription.state = Subscription::State::Unsubscribed;
-            subscription.backoff.reset();
-            this->subscriptions.erase(request);
-            return;
-        }
-
-        qCDebug(LOG) << "Unsubscribing from" << request;
-        subscription.state = Subscription::State::Unsubscribing;
-
-        getHelix()->deleteEventSubSubscription(
-            subscription.subscriptionID,
-            [this, request] {
-                qCDebug(LOG) << "Successfully unsubscribed from" << request;
-                this->markRequestUnsubscribed(request);
-            },
-            [this, request](const auto &errorMessage) {
-                qCWarning(LOG)
-                    << "An error occurred while attempting to unsubscribe from"
-                    << request << errorMessage;
-                this->markRequestUnsubscribed(request);
-            });
-
-        subscription.subscriptionID.clear();
+        boost::asio::post(this->ioContext,
+                          [this, request, generation = it->second.generation] {
+                              this->unsubscribe(request, generation);
+                          });
     }
 }
 
 void Controller::setQuitting()
 {
+    *this->alive = false;
     this->quitting = true;
+
+    this->ioContext.stop();
+    if (this->thread->joinable())
+    {
+        this->thread->join();
+    }
 }
 
 SubscriptionHandle Controller::subscribe(const SubscriptionRequest &request)
@@ -215,6 +153,7 @@ SubscriptionHandle Controller::subscribe(const SubscriptionRequest &request)
            "Subscription requests must include a Twitch User ID");
 
     bool needToSubscribe = false;
+    uint64_t generation = 0;
 
     {
         // TODO: Investigate if this scope can be done in boost::asio::post instead
@@ -238,6 +177,7 @@ SubscriptionHandle Controller::subscribe(const SubscriptionRequest &request)
                     << "New subscription attempt to previously-failed request"
                     << request;
                 needToSubscribe = true;
+                subscription.moderatorRecoveryAttempted = false;
                 break;
 
             case Subscription::State::Subscribing:
@@ -251,6 +191,7 @@ SubscriptionHandle Controller::subscribe(const SubscriptionRequest &request)
         {
             qCDebug(LOG) << "Set state to subscribing" << request;
             subscription.state = Subscription::State::Subscribing;
+            subscription.generation = ++this->nextGeneration;
 
             // Ensure retries can work as expected since this is a fresh subscription
             subscription.backoff.reset();
@@ -259,6 +200,7 @@ SubscriptionHandle Controller::subscribe(const SubscriptionRequest &request)
                    "A new subscription should not have a retry timer created");
         }
 
+        generation = subscription.generation;
         subscription.refCount++;
         qCDebug(LOG) << "Added ref for" << request << subscription.refCount
                      << needToSubscribe
@@ -269,8 +211,8 @@ SubscriptionHandle Controller::subscribe(const SubscriptionRequest &request)
 
     if (needToSubscribe)
     {
-        boost::asio::post(this->ioContext, [this, request] {
-            this->subscribe(request, false);
+        boost::asio::post(this->ioContext, [this, request, generation] {
+            this->subscribe(request, generation);
         });
     }
 
@@ -293,36 +235,323 @@ void Controller::reconnectConnection(
         qCDebug(chatterinoTwitchEventSub) << "Using reconnect URL to reconnect";
         // this is epic
         QUrl url(QString::fromStdString(*reconnectURL));
+        if (url.path().isEmpty())
+        {
+            url.setPath("/");
+        }
         this->createConnection(url.host(QUrl::FullyEncoded).toStdString(),
                                std::to_string(url.port(443)),
-                               url.path(QUrl::FullyEncoded).toStdString(),
+                               url.toEncoded(QUrl::RemoveScheme |
+                                             QUrl::RemoveAuthority |
+                                             QUrl::RemoveFragment)
+                                   .toStdString(),
                                std::move(connection));
         return;
     }
 
-    // no reconnect URL - something happened
-    // but first, clear the subscriptions
-    qCDebug(chatterinoTwitchEventSub)
-        << "Resubscribing to topics after connection failure";
+    std::lock_guard lock(this->subscriptionsMutex);
+    for (const auto &request : subs)
     {
-        std::lock_guard g(this->subscriptionsMutex);
-        for (const auto &sub : subs)
+        auto it = this->subscriptions.find(request);
+        if (it == this->subscriptions.end())
         {
-            auto it = this->subscriptions.find(sub);
-            if (it != this->subscriptions.end())
+            continue;
+        }
+        auto &subscription = it->second;
+        subscription.retryTimer.reset();
+        if (subscription.refCount == 0)
+        {
+            this->subscriptions.erase(it);
+            continue;
+        }
+        subscription.connection.reset();
+        subscription.subscriptionID.clear();
+        subscription.inFlight = false;
+        subscription.backoff.reset();
+        subscription.state = Subscription::State::Subscribing;
+        subscription.generation = ++this->nextGeneration;
+        boost::asio::post(
+            this->ioContext,
+            [this, request, generation = subscription.generation] {
+                this->subscribe(request, generation);
+            });
+    }
+}
+
+void Controller::unsubscribe(const SubscriptionRequest &request,
+                             uint64_t generation)
+{
+    std::lock_guard lock(this->subscriptionsMutex);
+    auto it = this->subscriptions.find(request);
+    if (this->quitting || it == this->subscriptions.end() ||
+        it->second.generation != generation || it->second.refCount != 0)
+    {
+        return;
+    }
+    auto &subscription = it->second;
+    // No longer interested in this topic, ensure we don't have a retry in flight
+    subscription.retryTimer.reset();
+
+
+    if (subscription.inFlight ||
+        subscription.state == Subscription::State::Unsubscribing)
+    {
+        return;
+    }
+    if (subscription.subscriptionID.isEmpty())
+    {
+        if (auto session = subscription.connection.lock())
+        {
+            if (auto *listener =
+                    dynamic_cast<Connection *>(session->getListener()))
             {
-                qCDebug(chatterinoTwitchEventSub) << "Resetting" << it->first;
-                it->second.connection = {};
-                it->second.backoff.reset();
-                it->second.state = Subscription::State::Subscribing;
+                listener->markRequestUnsubscribed(request);
             }
         }
+        this->subscriptions.erase(it);
+        return;
     }
+    subscription.state = Subscription::State::Unsubscribing;
+    auto complete = [this, alive = this->alive, request, generation] {
+        if (!*alive)
+        {
+            return;
+        }
+        boost::asio::post(this->ioContext, [this, request, generation] {
+            this->markRequestUnsubscribed(request, generation);
+        });
+    };
+    getHelix()->deleteEventSubSubscription(
+        subscription.subscriptionID, complete,
+        [this, alive = this->alive, request, generation](const auto &error) {
+            qCWarning(LOG) << "EventSub unsubscribe failed:" << error;
+            if (!*alive)
+            {
+                return;
+            }
+            boost::asio::post(this->ioContext, [this, request, generation] {
+                std::shared_ptr<lib::Session> session;
+                {
+                    std::lock_guard lock(this->subscriptionsMutex);
+                    auto it = this->subscriptions.find(request);
+                    if (this->quitting || it == this->subscriptions.end() ||
+                        it->second.generation != generation)
+                    {
+                        return;
+                    }
+                    session = it->second.connection.lock();
+                }
+                if (!session)
+                {
+                    this->markRequestUnsubscribed(request, generation);
+                    return;
+                }
 
-    for (const auto &sub : subs)
+                if (std::erase_if(this->connections, [&](const auto &weak) {
+                        return weak.lock() == session;
+                    }) != 0)
+                {
+                    session->close();
+                }
+            });
+        });
+}
+
+void Controller::subscriptionRevoked(const QString &subscriptionID,
+                                      const QString &status)
+{
+    if (this->quitting || subscriptionID.isEmpty())
     {
-        this->subscribe(sub, false);
+        return;
     }
+    std::lock_guard lock(this->subscriptionsMutex);
+    const auto broadcasterID = [](const SubscriptionRequest &request) {
+        for (const auto &[key, value] : request.conditions)
+        {
+            if (key == "broadcaster_user_id")
+                return value;
+        }
+        return QString{};
+    };
+    for (auto &[request, subscription] : this->subscriptions)
+    {
+        if (subscription.subscriptionID != subscriptionID)
+        {
+            continue;
+        }
+        const auto channelID = broadcasterID(request);
+        const bool alreadyWarned =
+            std::ranges::any_of(this->subscriptions, [&](const auto &entry) {
+                return entry.first.ownerTwitchUserID ==
+                           request.ownerTwitchUserID &&
+                       broadcasterID(entry.first) == channelID &&
+                       entry.second.revocationStatus == status &&
+                       (status != "moderator_removed" ||
+                        (entry.second.state == Subscription::State::Failed &&
+                         !entry.second.moderatorRecoveryAttempted));
+            });
+        subscription.revocationStatus = status;
+        if (auto connection = subscription.connection.lock())
+        {
+            if (auto *listener =
+                    dynamic_cast<Connection *>(connection->getListener()))
+            {
+                listener->markRequestUnsubscribed(request);
+            }
+        }
+        subscription.subscriptionID.clear();
+        subscription.connection.reset();
+        subscription.retryTimer.reset();
+        subscription.inFlight = false;
+        subscription.generation = ++this->nextGeneration;
+        subscription.state = Subscription::State::Failed;
+        if (subscription.refCount == 0)
+        {
+            boost::asio::post(
+                this->ioContext,
+                [this, request, generation = subscription.generation] {
+                    this->unsubscribe(request, generation);
+                });
+            return;
+        }
+        if (alreadyWarned && status != "authorization_revoked")
+            return;
+        postToThread([this, alive = this->alive, request,
+                      generation = subscription.generation,
+                      userID = request.ownerTwitchUserID, channelID, status] {
+            if (!*alive)
+                return;
+            if (auto *app = tryGetApp(); app && !isAppAboutToQuit())
+            {
+                if (status == "moderator_removed")
+                {
+                    this->checkModeratorAccess(request, generation);
+                }
+                else if (status == "authorization_revoked")
+                {
+                    app->getAccounts()->twitch.validateCurrentAccount(userID);
+                }
+                else
+                {
+                    const auto account =
+                        app->getAccounts()->twitch.getCurrent();
+                    if (account->isAnon() || account->getUserId() != userID)
+                        return;
+                    auto channel =
+                        app->getTwitch()->getChannelOrEmptyByID(channelID);
+                    const auto message =
+                        QStringLiteral(
+                            "Twitch stopped sending some live updates "
+                            "(%1). Some features may stop working.")
+                            .arg(status);
+                    if (!channel->isEmpty())
+                        channel->addSystemMessage(message);
+                    else if (channelID.isEmpty())
+                        app->getTwitch()->addGlobalSystemMessage(message);
+                }
+            }
+        });
+        return;
+    }
+}
+
+void Controller::checkModeratorAccess(const SubscriptionRequest &request,
+                                      uint64_t generation)
+{
+    auto *app = tryGetApp();
+    if (!app || this->quitting || isAppAboutToQuit())
+        return;
+    auto account = app->getAccounts()->twitch.getCurrent();
+    if (account->isAnon() || account->getUserId() != request.ownerTwitchUserID)
+        return;
+    QString channelID;
+    for (const auto &[key, value] : request.conditions)
+        if (key == "broadcaster_user_id")
+            channelID = value;
+    auto channel = std::dynamic_pointer_cast<TwitchChannel>(
+        app->getTwitch()->getChannelOrEmptyByID(channelID));
+    if (!channel || channelID.isEmpty())
+        return;
+    const auto token = account->getOAuthToken();
+    const auto checkedAt = QDateTime::currentDateTimeUtc();
+    const auto roleRevision = channel->moderatorStatusRevision();
+    auto isCurrent = [this, alive = this->alive, account, token, request,
+                      generation, weak = channel->weakFromThis()] {
+        if (!*alive || !tryGetApp() || isAppAboutToQuit() ||
+            getApp()->getAccounts()->twitch.getCurrent() != account ||
+            account->getOAuthToken() != token)
+            return std::shared_ptr<TwitchChannel>{};
+        auto channel = weak.lock();
+        if (!channel)
+            return channel;
+        std::lock_guard lock(this->subscriptionsMutex);
+        const auto it = this->subscriptions.find(request);
+        return it != this->subscriptions.end() &&
+                       it->second.generation == generation &&
+                       it->second.refCount != 0 &&
+                       it->second.state == Subscription::State::Failed
+                   ? channel
+                   : std::shared_ptr<TwitchChannel>{};
+    };
+    auto apply = [this, account, channelID, checkedAt, roleRevision,
+                  isCurrent](bool moderator) {
+        auto channel = isCurrent();
+        if (!channel || (channel->moderatorStatusRevision() != roleRevision &&
+                         channel->isMod() != moderator))
+            return;
+        if (moderator)
+        {
+            std::lock_guard lock(this->subscriptionsMutex);
+            for (auto &[candidate, subscription] : this->subscriptions)
+            {
+                if (candidate.ownerTwitchUserID != account->getUserId() ||
+                    subscription.state != Subscription::State::Failed ||
+                    subscription.refCount == 0 ||
+                    subscription.revocationStatus != "moderator_removed" ||
+                    subscription.moderatorRecoveryAttempted ||
+                    !std::ranges::any_of(
+                        candidate.conditions, [&](const auto &condition) {
+                            return condition.first == "broadcaster_user_id" &&
+                                   condition.second == channelID;
+                        }))
+                    continue;
+                subscription.moderatorRecoveryAttempted = true;
+                subscription.state = Subscription::State::Subscribing;
+                subscription.backoff.reset();
+                subscription.generation = ++this->nextGeneration;
+                boost::asio::post(
+                    this->ioContext,
+                    [this, candidate, generation = subscription.generation] {
+                        this->subscribe(candidate, generation);
+                    });
+            }
+        }
+        channel->setKnownModeratorStatus(account->getUserName(), moderator,
+                                         checkedAt);
+    };
+    QUrl url(QStringLiteral("https://api.twitch.tv/helix/chat/chatters"));
+    QUrlQuery query;
+    query.addQueryItem("broadcaster_id", channelID);
+    query.addQueryItem("moderator_id", account->getUserId());
+    query.addQueryItem("first", "1");
+    url.setQuery(query);
+    NetworkRequest(url, NetworkRequestType::Get)
+        .timeout(5000)
+        .maximumResponseSize(64 * 1024)
+        .followRedirects(false)
+        .header("Client-ID", account->getOAuthClient())
+        .header("Authorization", "Bearer " + token)
+        .onSuccess([apply](const auto &result) {
+            if (result.status() == 200 && result.parseJson()["data"].isArray())
+                apply(true);
+        })
+        .onError([apply, isCurrent](const auto &result) {
+            if (result.status() == 403)
+                apply(false);
+            else if (result.status() == 401 && isCurrent())
+                getApp()->getAccounts()->twitch.validateCurrentAccount();
+        })
+        .execute();
 }
 
 void Controller::debug()
@@ -378,14 +607,26 @@ void Controller::debug()
     });
 }
 
-void Controller::subscribe(const SubscriptionRequest &request, bool isRetry)
+void Controller::subscribe(const SubscriptionRequest &request,
+                           uint64_t generation, bool isRetry)
 {
+    if (this->quitting)
+    {
+        return;
+    }
     // 1. Flush dead connections (maybe this should not be done here)
     // TODO: implement
 
     {
         std::lock_guard lock(this->subscriptionsMutex);
-        auto &subscription = this->subscriptions[request];
+        auto it = this->subscriptions.find(request);
+        if (it == this->subscriptions.end() ||
+            it->second.generation != generation || it->second.refCount == 0 ||
+            it->second.inFlight)
+        {
+            return;
+        }
+        auto &subscription = it->second;
         if (isRetry)
         {
             qCDebug(LOG) << "Retry subscribe request for" << request;
@@ -416,69 +657,120 @@ void Controller::subscribe(const SubscriptionRequest &request, bool isRetry)
         assert(listener != nullptr && "Something goofy has gone wrong, Session "
                                       "listener must be our Connection type");
 
+        {
+            std::lock_guard lock(this->subscriptionsMutex);
+            auto it = this->subscriptions.find(request);
+            if (it == this->subscriptions.end() ||
+                it->second.generation != generation || it->second.refCount == 0)
+            {
+                return;
+            }
+            it->second.connection = connection;
+            it->second.inFlight = true;
+            listener->markRequestSubscribed(request);
+        }
         qCDebug(LOG) << "Make helix request for" << request;
         getHelix()->createEventSubSubscription(
             request, listener->getSessionID(),
-            [this, request,
-             weakConnection{std::weak_ptr<lib::Session>(connection)}](
-                const auto &res) {
-                qCDebug(LOG) << "Subscription success" << request;
-                this->markRequestSubscribed(request, weakConnection,
-                                            res.subscriptionID);
+            [this, alive = this->alive, request, generation](const auto &res) {
+                if (!*alive)
+                {
+                    return;
+                }
+                boost::asio::post(this->ioContext, [this, request, generation,
+                                                    id = res.subscriptionID] {
+                    this->markRequestSubscribed(request, generation, id);
+                });
             },
-            [this, request](const auto &error, const auto &errorString) {
-                using Error = HelixCreateEventSubSubscriptionError;
-
-                bool retry = false;
-                switch (error)
+            [this, alive = this->alive, request, generation](
+                const auto &error, const auto &errorString) {
+                if (!*alive)
                 {
-                    case Error::BadRequest:
-                        qCDebug(LOG) << "Bad request" << errorString << request;
-                        break;
-
-                    case Error::Unauthorized:
-                        qCDebug(LOG)
-                            << "Unauthorized" << errorString << request;
-                        break;
-
-                    case Error::Forbidden:
-                        qCDebug(LOG) << "Forbidden" << errorString << request;
-                        break;
-
-                    case Error::Conflict:
-                        // This session ID is already subscribed to this request, some logic of ours is wrong
-                        qCWarning(LOG) << "Conflict" << errorString << request;
-                        break;
-
-                    case Error::Ratelimited:
-                        qCDebug(LOG) << "Ratelimited" << errorString << request;
-                        break;
-
-                    case Error::NoSession:
-                        qCDebug(LOG) << "Session expired, retrying"
-                                     << errorString << request;
-                        retry = true;
-                        break;
-
-                    case Error::Forwarded:
-                    default:
-                        qCWarning(LOG) << "Unhandled error, retrying "
-                                          "subscription"
-                                       << errorString << request;
-                        retry = true;
-                        break;
+                    return;
                 }
+                boost::asio::post(this->ioContext, [this, request, generation,
+                                                    error, errorString] {
+                    bool wanted = false;
+                    {
+                        std::lock_guard lock(this->subscriptionsMutex);
+                        auto it = this->subscriptions.find(request);
+                        if (it == this->subscriptions.end() ||
+                            it->second.generation != generation)
+                        {
+                            return;
+                        }
+                        it->second.inFlight = false;
+                        wanted = it->second.refCount != 0;
+                    }
+                    using Error = HelixCreateEventSubSubscriptionError;
 
-                if (retry)
-                {
-                    boost::asio::post(this->ioContext, [this, request] {
-                        this->retrySubscription(request);
-                    });
-                }
-                else
-                {
-                    this->markRequestFailed(request);
-                }
+                    if (wanted && (error == Error::Unauthorized ||
+                                   error == Error::Forbidden))
+                    {
+                        postToThread([userID = request.ownerTwitchUserID] {
+                            if (auto *app = tryGetApp();
+                                app && !isAppAboutToQuit())
+                            {
+                                app->getAccounts()
+                                    ->twitch.validateCurrentAccount(userID);
+                            }
+                        });
+                    }
+
+                    bool retry = false;
+                    switch (error)
+                    {
+                        case Error::BadRequest:
+                            qCDebug(LOG)
+                                << "Bad request" << errorString << request;
+                            break;
+
+                        case Error::Unauthorized:
+                            qCDebug(LOG)
+                                << "Unauthorized" << errorString << request;
+                            break;
+
+                        case Error::Forbidden:
+                            qCDebug(LOG)
+                                << "Forbidden" << errorString << request;
+                            break;
+
+                        case Error::Conflict:
+                            // This session ID is already subscribed to this request, some logic of ours is wrong
+                            qCWarning(LOG)
+                                << "Conflict" << errorString << request;
+                            break;
+
+                        case Error::Ratelimited:
+                            qCDebug(LOG)
+                                << "Ratelimited" << errorString << request;
+                            retry = true;
+                            break;
+
+                        case Error::NoSession:
+                            qCDebug(LOG) << "Session expired, retrying"
+                                         << errorString << request;
+                            retry = true;
+                            break;
+
+                        case Error::Forwarded:
+                        default:
+                            qCWarning(LOG) << "Unhandled error, retrying "
+                                              "subscription"
+                                           << errorString << request;
+                            retry = true;
+                            break;
+                    }
+
+                    if (retry)
+                    {
+                        this->retrySubscription(request, generation);
+                    }
+                    else
+                    {
+                        this->markRequestFailed(request, generation);
+                    }
+                });
             });
 
         return;
@@ -496,7 +788,7 @@ void Controller::subscribe(const SubscriptionRequest &request, bool isRetry)
                        << "open but no ready connections";
     }
 
-    this->retrySubscription(request);
+    this->retrySubscription(request, generation);
 }
 
 std::optional<std::shared_ptr<lib::Session>> Controller::getViableConnection(
@@ -585,12 +877,27 @@ void Controller::registerConnection(std::weak_ptr<lib::Session> &&connection)
 {
     this->threadGuard->guard();
 
+    if (auto session = connection.lock())
+    {
+        if (auto *listener = dynamic_cast<Connection *>(session->getListener()))
+        {
+            std::lock_guard lock(this->subscriptionsMutex);
+            for (auto &[request, subscription] : this->subscriptions)
+            {
+                if (listener->isSubscribedTo(request))
+                {
+                    subscription.connection = session;
+                }
+            }
+        }
+    }
     this->connections.emplace_back(std::move(connection));
 }
 
-void Controller::retrySubscription(const SubscriptionRequest &request)
+void Controller::retrySubscription(const SubscriptionRequest &request,
+                                   uint64_t generation)
 {
-    if (isAppAboutToQuit())
+    if (this->quitting || isAppAboutToQuit())
     {
         qCDebug(LOG) << "retrySubscription, but app is quitting" << request;
         return;
@@ -598,7 +905,12 @@ void Controller::retrySubscription(const SubscriptionRequest &request)
 
     std::lock_guard lock(this->subscriptionsMutex);
 
-    auto &subscription = this->subscriptions[request];
+    auto it = this->subscriptions.find(request);
+    if (it == this->subscriptions.end() || it->second.generation != generation)
+    {
+        return;
+    }
+    auto &subscription = it->second;
 
     if (subscription.refCount == 0)
     {
@@ -609,7 +921,15 @@ void Controller::retrySubscription(const SubscriptionRequest &request)
         qCDebug(LOG) << "Set state to unsubscribed" << request;
         subscription.state = Subscription::State::Unsubscribed;
 
-        this->subscriptions.erase(request);
+        if (auto session = subscription.connection.lock())
+        {
+            if (auto *listener =
+                    dynamic_cast<Connection *>(session->getListener()))
+            {
+                listener->markRequestUnsubscribed(request);
+            }
+        }
+        this->subscriptions.erase(it);
 
         return;
     }
@@ -627,7 +947,7 @@ void Controller::retrySubscription(const SubscriptionRequest &request)
     auto retryTimer =
         std::make_unique<boost::asio::system_timer>(this->ioContext);
     retryTimer->expires_after(subscription.backoff.next() + jitter);
-    retryTimer->async_wait([this, request](const auto &ec) {
+    retryTimer->async_wait([this, request, generation](const auto &ec) {
         if (isAppAboutToQuit())
         {
             qCDebug(LOG)
@@ -640,7 +960,7 @@ void Controller::retrySubscription(const SubscriptionRequest &request)
         {
             qCDebug(LOG) << "Firing retry" << request;
             // The timer passed naturally
-            this->subscribe(request, true);
+            this->subscribe(request, generation, true);
         }
         else
         {
@@ -661,105 +981,106 @@ void Controller::retrySubscription(const SubscriptionRequest &request)
 }
 
 void Controller::markRequestSubscribed(const SubscriptionRequest &request,
-                                       std::weak_ptr<lib::Session> connection,
+                                       uint64_t generation,
                                        const QString &subscriptionID)
 {
     if (this->quitting)
     {
         return;
     }
-
-    std::lock_guard lock(this->subscriptionsMutex);
-
-    auto strong = connection.lock();
-    if (!strong)
+    bool unwanted = false;
     {
-        // we disconnected
-        return;
+        std::lock_guard lock(this->subscriptionsMutex);
+        auto it = this->subscriptions.find(request);
+        if (it == this->subscriptions.end() ||
+            it->second.generation != generation)
+        {
+
+            getHelix()->deleteEventSubSubscription(
+                subscriptionID, [] {}, [](const auto &) {});
+            return;
+        }
+        auto &subscription = it->second;
+        subscription.inFlight = false;
+        subscription.subscriptionID = subscriptionID;
+        subscription.revocationStatus.clear();
+        qCDebug(LOG) << "Set state to subscribed" << request;
+        subscription.state = Subscription::State::Subscribed;
+        subscription.backoff.reset();
+        unwanted = subscription.refCount == 0;
     }
-    auto *listener = dynamic_cast<Connection *>(strong->getListener());
-    if (!listener)
+    if (unwanted)
     {
-        // we disconnected
-        return;
+        this->unsubscribe(request, generation);
     }
-    listener->markRequestSubscribed(request);
-
-    auto &subscription = this->subscriptions[request];
-
-    assert((subscription.state == Subscription::State::Subscribing ||
-            subscription.state == Subscription::State::Retrying) &&
-           "A subscription can only be marked subscribed from the Subscribing "
-           "or Retrying state");
-
-    subscription.connection = std::move(connection);
-    subscription.subscriptionID = subscriptionID;
-    qCDebug(LOG) << "Set state to subscribed" << request;
-    subscription.state = Subscription::State::Subscribed;
-    subscription.backoff.reset();
 }
 
-void Controller::markRequestFailed(const SubscriptionRequest &request)
+void Controller::markRequestFailed(const SubscriptionRequest &request,
+                                   uint64_t generation)
 {
-    if (this->quitting)
+    std::lock_guard lock(this->subscriptionsMutex);
+    auto it = this->subscriptions.find(request);
+    if (this->quitting || it == this->subscriptions.end() ||
+        it->second.generation != generation)
     {
         return;
     }
-
-    qCWarning(LOG) << "Request" << request << "marked as failed";
-
-    std::lock_guard lock(this->subscriptionsMutex);
-
-    auto &subscription = this->subscriptions[request];
-
-    qCDebug(LOG) << "Set state to failed" << request;
-    subscription.state = Subscription::State::Failed;
-}
-
-void Controller::markRequestUnsubscribed(const SubscriptionRequest &request)
-{
-    if (this->quitting)
+    auto &subscription = it->second;
+    if (auto session = subscription.connection.lock())
     {
-        return;
-    }
-
-    std::lock_guard lock(this->subscriptionsMutex);
-
-    auto &subscription = this->subscriptions[request];
-
-    qCDebug(LOG) << "Request" << request << "marked as unsubscribed from state"
-                 << qmagicenum::enumName(subscription.state);
-
-    assert(subscription.state == Subscription::State::Unsubscribing ||
-           subscription.state == Subscription::State::Retrying);
-    assert(subscription.retryTimer == nullptr);
-
-    qCDebug(LOG) << "Set state to unsubscribed" << request;
-    subscription.state = Subscription::State::Unsubscribed;
-    subscription.backoff.reset();
-    auto conn = subscription.connection.lock();
-    if (conn)
-    {
-        auto *listener = dynamic_cast<Connection *>(conn->getListener());
-        if (listener)
+        if (auto *listener = dynamic_cast<Connection *>(session->getListener()))
         {
             listener->markRequestUnsubscribed(request);
         }
     }
-    subscription.connection = {};
-
+    subscription.connection.reset();
+    subscription.inFlight = false;
+    qCWarning(LOG) << "Request" << request << "marked as failed";
+    qCDebug(LOG) << "Set state to failed" << request;
+    subscription.state = Subscription::State::Failed;
     if (subscription.refCount == 0)
     {
-        // we could remove the subscription here
-        this->subscriptions.erase(request);
+        this->subscriptions.erase(it);
+    }
+}
+
+void Controller::markRequestUnsubscribed(const SubscriptionRequest &request,
+                                         uint64_t generation)
+{
+    std::lock_guard lock(this->subscriptionsMutex);
+    auto it = this->subscriptions.find(request);
+    if (this->quitting || it == this->subscriptions.end() ||
+        it->second.generation != generation)
+    {
         return;
     }
+    auto &subscription = it->second;
 
+    qCDebug(LOG) << "Request" << request << "marked as unsubscribed from state"
+                 << qmagicenum::enumName(subscription.state);
+
+    if (auto session = subscription.connection.lock())
+    {
+        if (auto *listener = dynamic_cast<Connection *>(session->getListener()))
+        {
+            listener->markRequestUnsubscribed(request);
+        }
+    }
+    subscription.connection.reset();
+    subscription.subscriptionID.clear();
+    subscription.backoff.reset();
+    if (subscription.refCount == 0)
+    {
+        this->subscriptions.erase(it);
+        return;
+    }
     // someone subscribed in the meantime
     subscription.state = Subscription::State::Subscribing;
-    boost::asio::post(this->ioContext, [this, request] {
-        this->subscribe(request, false);
-    });
+    subscription.generation = ++this->nextGeneration;
+    boost::asio::post(this->ioContext,
+                      [this, request, generation = subscription.generation] {
+                          this->subscribe(request, generation);
+                      });
 }
 
 void Controller::clearConnections()

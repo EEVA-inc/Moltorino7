@@ -25,6 +25,9 @@ public:
     void onNotification(const lib::messages::Metadata &metadata,
                         const boost::json::value &jv) override;
 
+    void onRevocation(const lib::messages::Metadata &metadata,
+                      const boost::json::value &jv) override;
+
     void onClose(std::unique_ptr<lib::Listener> self,
                  const std::optional<std::string> &reconnectURL) override;
 

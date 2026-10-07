@@ -10,8 +10,9 @@
 #include "util/QStringHash.hpp"
 #include "util/RapidJsonSerializeQString.hpp"
 
-#include <boost/signals2.hpp>
+#include <pajlada/signals/signal.hpp>
 #include <QString>
+#include <QTimer>
 
 #include <memory>
 #include <mutex>
@@ -46,6 +47,7 @@ public:
 
     void reloadUsers();
     void load();
+    void validateCurrentAccount(const QString &eventSubUserID = {});
 
     bool isLoggedIn() const;
 
@@ -56,7 +58,7 @@ public:
                              std::shared_ptr<TwitchAccount>>
         currentUserAboutToChange;
 
-    boost::signals2::signal<void()> currentUserChanged;
+    pajlada::Signals::NoArgSignal currentUserChanged;
     pajlada::Signals::NoArgSignal userListUpdated;
     pajlada::Signals::NoArgSignal currentUserNameChanged;
 
@@ -72,6 +74,14 @@ private:
     };
     AddUserResponse addUser(const UserData &data);
     bool removeUser(TwitchAccount *account);
+
+    void showAccountWarning(const QString &text,
+                            const QString &missingScopes = {});
+    QTimer validationTimer_;
+    int validationGeneration_ = 0;
+    bool validationInFlight_ = false;
+    bool eventSubAuthFailed_ = false;
+    QString lastValidationWarning_;
 
     std::shared_ptr<TwitchAccount> currentUser_;
 

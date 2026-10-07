@@ -4,6 +4,7 @@
 #include "common/network/NetworkRequest.hpp"
 #include "common/network/NetworkResult.hpp"
 #include "singletons/Paths.hpp"
+#include "providers/twitch/TwitchNameHistoryCache.hpp"
 
 #include <QHash>
 #include <QJsonArray>
@@ -12,7 +13,6 @@
 #include <QJsonValue>
 #include <QFile>
 #include <QSaveFile>
-#include <QSet>
 #include <QUrl>
 
 #include <algorithm>
@@ -20,6 +20,115 @@
 #include <utility>
 
 namespace chatterino {
+namespace detail {
+
+TwitchNameHistoryMemoryCache::TwitchNameHistoryMemoryCache(
+    qsizetype maxHistories)
+    : maxHistories_(std::max<qsizetype>(1, maxHistories))
+{
+}
+
+void TwitchNameHistoryMemoryCache::rebuildIndexes()
+{
+    this->userIds_.clear();
+    this->currentLogins_.clear();
+    this->historicalLogins_.clear();
+
+    for (const auto &history : this->order_)
+    {
+        const auto userId = history->userId.trimmed();
+        if (!userId.isEmpty())
+        {
+            this->userIds_.insert(userId, history);
+        }
+
+        const auto currentLogin =
+            normalizeTwitchNameHistoryLogin(history->currentLogin);
+        if (!currentLogin.isEmpty())
+        {
+            this->currentLogins_.insert(currentLogin, history);
+        }
+
+        for (const auto &entry : history->entries)
+        {
+            const auto historicalLogin =
+                normalizeTwitchNameHistoryLogin(entry.login);
+            if (!historicalLogin.isEmpty())
+            {
+                this->historicalLogins_.insert(historicalLogin, history);
+            }
+        }
+    }
+}
+
+void TwitchNameHistoryMemoryCache::insert(const TwitchNameHistory &history)
+{
+    TwitchNameHistoryPtr replaced;
+    const auto userId = history.userId.trimmed();
+    const auto currentLogin =
+        normalizeTwitchNameHistoryLogin(history.currentLogin);
+    if (!userId.isEmpty())
+    {
+        replaced = this->findByUserId(userId);
+    }
+    else if (!currentLogin.isEmpty())
+    {
+        const auto existing = std::find_if(
+            this->order_.rbegin(), this->order_.rend(),
+            [&currentLogin](const auto &candidate) {
+                return candidate->userId.trimmed().isEmpty() &&
+                       normalizeTwitchNameHistoryLogin(
+                           candidate->currentLogin) == currentLogin;
+            });
+        if (existing != this->order_.rend())
+        {
+            replaced = *existing;
+        }
+    }
+    if (replaced)
+    {
+        std::erase(this->order_, replaced);
+    }
+
+    auto shared = std::make_shared<TwitchNameHistory>(history);
+    this->order_.push_back(shared);
+    while (static_cast<qsizetype>(this->order_.size()) > this->maxHistories_)
+    {
+        this->order_.pop_front();
+    }
+    this->rebuildIndexes();
+}
+
+TwitchNameHistoryPtr TwitchNameHistoryMemoryCache::findByUserId(
+    const QString &userId) const
+{
+    return this->userIds_.value(userId.trimmed());
+}
+
+TwitchNameHistoryPtr TwitchNameHistoryMemoryCache::findByLogin(
+    const QString &login) const
+{
+    const auto normalized = normalizeTwitchNameHistoryLogin(login);
+    if (const auto current = this->currentLogins_.value(normalized))
+    {
+        return current;
+    }
+    return this->historicalLogins_.value(normalized);
+}
+
+const std::deque<TwitchNameHistoryPtr> &
+    TwitchNameHistoryMemoryCache::histories() const
+{
+    return this->order_;
+}
+
+qsizetype TwitchNameHistoryMemoryCache::size() const
+{
+    return static_cast<qsizetype>(this->order_.size());
+}
+
+}
+
 namespace {
 
 constexpr QStringView NAME_HISTORY_API =
@@ -27,23 +136,14 @@ constexpr QStringView NAME_HISTORY_API =
 constexpr int NAME_HISTORY_TIMEOUT_MS = 30000;
 constexpr int NAME_HISTORY_CACHE_VERSION = 1;
 constexpr int NAME_HISTORY_CACHE_TTL_DAYS = 21;
+constexpr qsizetype NAME_HISTORY_MAX_CACHED_USERS = 256;
+constexpr qint64 NAME_HISTORY_MAX_CACHE_FILE_BYTES = 4 * 1024 * 1024;
 constexpr QStringView NAME_HISTORY_CACHE_FILE = u"twitch-name-history.json";
 
-QString cacheKeyForUserId(const QString &userId)
+detail::TwitchNameHistoryMemoryCache &nameHistoryCache()
 {
-    return "id:" + userId.trimmed();
-}
-
-QString cacheKeyForLogin(const QString &login)
-{
-    return "login:" + normalizeTwitchNameHistoryLogin(login);
-}
-
-using TwitchNameHistoryPtr = std::shared_ptr<TwitchNameHistory>;
-
-QHash<QString, TwitchNameHistoryPtr> &nameHistoryCache()
-{
-    static QHash<QString, TwitchNameHistoryPtr> cache;
+    static detail::TwitchNameHistoryMemoryCache cache(
+        NAME_HISTORY_MAX_CACHED_USERS);
     return cache;
 }
 
@@ -200,24 +300,7 @@ TwitchNameHistory parseNameHistory(const QJsonArray &root,
 
 void insertNameHistory(const TwitchNameHistory &history)
 {
-    auto &cache = nameHistoryCache();
-    auto shared = std::make_shared<TwitchNameHistory>(history);
-
-    if (!history.userId.isEmpty())
-    {
-        cache.insert(cacheKeyForUserId(history.userId), shared);
-    }
-    if (!history.currentLogin.isEmpty())
-    {
-        cache.insert(cacheKeyForLogin(history.currentLogin), shared);
-    }
-    for (const auto &entry : history.entries)
-    {
-        if (!entry.login.isEmpty())
-        {
-            cache.insert(cacheKeyForLogin(entry.login), shared);
-        }
-    }
+    nameHistoryCache().insert(history);
 }
 
 QString nameHistoryCachePath()
@@ -300,9 +383,18 @@ void loadNameHistoryCache()
     {
         return;
     }
+    if (file.size() > NAME_HISTORY_MAX_CACHE_FILE_BYTES)
+    {
+        return;
+    }
 
     QJsonParseError parseError;
-    const auto document = QJsonDocument::fromJson(file.readAll(), &parseError);
+    const auto data = file.read(NAME_HISTORY_MAX_CACHE_FILE_BYTES + 1);
+    if (data.size() > NAME_HISTORY_MAX_CACHE_FILE_BYTES)
+    {
+        return;
+    }
+    const auto document = QJsonDocument::fromJson(data, &parseError);
     if (parseError.error != QJsonParseError::NoError || !document.isObject())
     {
         return;
@@ -329,10 +421,9 @@ void loadNameHistoryCache()
 
 void saveNameHistoryCache()
 {
-    QSet<QString> savedKeys;
     QJsonArray histories;
 
-    for (const auto &historyPtr : nameHistoryCache())
+    for (const auto &historyPtr : nameHistoryCache().histories())
     {
         if (historyPtr == nullptr)
         {
@@ -345,14 +436,6 @@ void saveNameHistoryCache()
             continue;
         }
 
-        const auto key = history.userId.isEmpty()
-                             ? QStringLiteral("login:") + history.currentLogin
-                             : QStringLiteral("id:") + history.userId;
-        if (key.endsWith(':') || savedKeys.contains(key))
-        {
-            continue;
-        }
-        savedKeys.insert(key);
         histories.push_back(historyToJson(history));
     }
 
@@ -365,7 +448,13 @@ void saveNameHistoryCache()
     {
         return;
     }
-    file.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
+    const auto data = QJsonDocument(root).toJson(QJsonDocument::Compact);
+    if (data.size() > NAME_HISTORY_MAX_CACHE_FILE_BYTES ||
+        file.write(data) != data.size())
+    {
+        file.cancelWriting();
+        return;
+    }
     file.commit();
 }
 
@@ -389,27 +478,25 @@ std::optional<TwitchNameHistory> getCachedTwitchNameHistory(
     loadNameHistoryCache();
 
     const auto trimmedUserId = userId.trimmed();
-    const auto loginKey = cacheKeyForLogin(expectedCurrentLogin);
-
-    auto &cache = nameHistoryCache();
+    const auto &cache = nameHistoryCache();
     if (!trimmedUserId.isEmpty())
     {
-        if (const auto it = cache.constFind(cacheKeyForUserId(trimmedUserId));
-            it != cache.cend() && *it != nullptr &&
-            nameHistoryIsFresh(**it) &&
-            historyMatchesExpectedLogin(**it, expectedCurrentLogin))
+        if (const auto history = cache.findByUserId(trimmedUserId);
+            history != nullptr && nameHistoryIsFresh(*history) &&
+            historyMatchesExpectedLogin(*history, expectedCurrentLogin))
         {
-            return **it;
+            return *history;
         }
+
+        return std::nullopt;
     }
     if (!expectedCurrentLogin.trimmed().isEmpty())
     {
-        if (const auto it = cache.constFind(loginKey);
-            it != cache.cend() && *it != nullptr &&
-            nameHistoryIsFresh(**it) &&
-            historyMatchesExpectedLogin(**it, expectedCurrentLogin))
+        if (const auto history = cache.findByLogin(expectedCurrentLogin);
+            history != nullptr && nameHistoryIsFresh(*history) &&
+            historyMatchesExpectedLogin(*history, expectedCurrentLogin))
         {
-            return **it;
+            return *history;
         }
     }
 
@@ -434,6 +521,8 @@ void fetchTwitchNameHistoryByUserId(
 
     NetworkRequest(url)
         .timeout(NAME_HISTORY_TIMEOUT_MS)
+        .maximumResponseSize(NAME_HISTORY_MAX_CACHE_FILE_BYTES)
+        .maximumRedirectsAllowed(3)
         .followRedirects(true)
         .header("Accept", "application/json")
         .header("User-Agent", "Moltorino")

@@ -74,6 +74,7 @@ private:
     std::vector<double> currentFractions_;
     QVariantAnimation *anim_{};
     QString dismissedPollKey_;
+    QString autoDismissScheduledKey_;
     bool expiryRefreshQueued_ = false;
     std::vector<pajlada::Signals::ScopedConnection> managedConnections_;
 };

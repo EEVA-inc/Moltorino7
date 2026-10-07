@@ -30,7 +30,7 @@ namespace {
 
 using namespace chatterino;
 
-constexpr auto MIN_POLL_DURATION = std::chrono::seconds(10);
+constexpr auto MIN_POLL_DURATION = std::chrono::seconds(30);
 constexpr auto MAX_POLL_DURATION = std::chrono::seconds(1800);
 
 Split *findOpenSplitForChannel(const ChannelPtr &channel)
@@ -58,7 +58,7 @@ Split *findOpenSplitForChannel(const ChannelPtr &channel)
     {
         if (auto *selectedSplit = currentPage->getSelectedSplit())
         {
-            if (selectedSplit->getChannel() == channel)
+            if (selectedSplit->getSelectedChannel() == channel)
             {
                 return selectedSplit;
             }
@@ -76,7 +76,7 @@ Split *findOpenSplitForChannel(const ChannelPtr &channel)
 
         for (auto *split : page->getSplits())
         {
-            if (split != nullptr && split->getChannel() == channel)
+            if (split != nullptr && split->getSelectedChannel() == channel)
             {
                 return split;
             }
@@ -150,9 +150,10 @@ void withActiveMoltorinoPoll(const CommandContext &ctx, const QString &action,
     const auto channel = ctx.channel;
     const auto weak = ctx.twitchChannel->weak_from_this();
     const auto channelLogin = ctx.twitchChannel->getName();
+    const auto channelId = ctx.twitchChannel->roomId();
 
     TwitchGql::getActivePoll(
-        channelLogin, token->token,
+        channelLogin, channelId, token->token,
         [channel, weak, action, token = *token,
          callback = std::move(callback)](
             std::optional<TwitchChannel::PollEvent> poll) mutable {
@@ -253,7 +254,7 @@ QString createPollHelix(const CommandContext &ctx)
 {
     const auto command = QStringLiteral("/poll");
     const auto usage = QStringLiteral(
-        R"(Usage: "/poll --title "<title>" --duration <duration>[time unit] --choice "<choice1>" --choice "<choice2>" [options...]" - Creates a poll for users to vote among the defined options. Title may not exceed 60 characters. There must be between two and five poll choices. Duration must be a positive integer; time unit (optional, default=s) must be one of s, m; maximum duration is 30 minutes. Options: --points <points> to allow spending the specified channel points for each additional vote.)");
+        R"(Usage: "/poll --title "<title>" --duration <duration>[time unit] --choice "<choice1>" --choice "<choice2>" [options...]" - Creates a poll for users to vote among the defined options. Title may not exceed 60 characters. There must be between two and five poll choices. Duration must be at least 30 seconds; time unit (optional, default=s) must be one of s, m; maximum duration is 30 minutes. Options: --points <points> to allow spending the specified channel points for each additional vote. Use k for thousands, such as 10k.)");
     const auto action = parseUserParticipationAction(
         ctx, command, usage, MIN_POLL_DURATION, MAX_POLL_DURATION);
 
@@ -365,8 +366,14 @@ QString endPollHelix(const CommandContext &ctx)
             getHelix()->endPoll(
                 roomId, poll.id, false,
                 [channel](const HelixPoll &data) {
+                    if (data.choices.empty())
+                    {
+                        channel->addSystemMessage(
+                            "Poll ended, but Twitch returned no choices.");
+                        return;
+                    }
                     HelixPollChoice winner = data.choices.front();
-                    int totalVotes = 0;
+                    qint64 totalVotes = 0;
                     int winnerCount = 0;
                     for (const auto &choice : data.choices)
                     {
@@ -399,7 +406,7 @@ QString endPollHelix(const CommandContext &ctx)
                     }
 
                     const double percent =
-                        100.0 * winner.votes / std::max(totalVotes, 1);
+                        100.0 * winner.votes / std::max<qint64>(totalVotes, 1);
 
                     channel->addSystemMessage(
                         QString(
@@ -503,13 +510,14 @@ QString endPoll(const CommandContext &ctx)
                     finishPollAfterCommand(channel, weak, originalPoll,
                                            "Poll ended");
                 },
-                [channel, weak, channelLogin, tokenText,
+                [channel, weak, channelLogin,
+                 channelId = twitchChannel->roomId(), tokenText,
                  originalPoll](const QString &error) {
                     if (error.contains("service error",
                                        Qt::CaseInsensitive))
                     {
                         TwitchGql::getActivePoll(
-                            channelLogin, tokenText,
+                            channelLogin, channelId, tokenText,
                             [channel, weak,
                              originalPoll](std::optional<TwitchChannel::PollEvent>
                                                 refreshedPoll) mutable {

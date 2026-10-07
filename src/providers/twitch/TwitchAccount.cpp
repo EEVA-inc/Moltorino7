@@ -379,9 +379,15 @@ void TwitchAccount::loadSeventvUserID()
         return;
     }
 
+    CancellationToken token(false);
+    this->seventvUserToken_ = token;
     seventv->getUserByTwitchID(
         this->getUserId(),
-        [this, loadPersonalEmotes](const auto &json) {
+        [this, token, loadPersonalEmotes](const auto &json, const auto &) {
+            if (token.isCancelled())
+            {
+                return;
+            }
             const auto user = json["user"].toObject();
             const auto id = user["id"].toString();
             if (id.isEmpty())
@@ -498,7 +504,7 @@ void TwitchAccount::reloadEmotes(void *caller)
                                 })
                       .first;
         }
-        set->second.emotes.emplace_back(std::move(emotePtr));
+        set->second.emotes.emplace(emotePtr->name, std::move(emotePtr));
     };
 
     auto userID = this->getUserId();
@@ -526,14 +532,6 @@ void TwitchAccount::reloadEmotes(void *caller)
                 qDebug(chatterinoTwitch).nospace()
                     << "Loaded " << emoteMap->size() << " Twitch emotes ("
                     << *nCalls << " requests)";
-
-                for (auto &[id, set] : *sets)
-                {
-                    std::ranges::sort(
-                        set.emotes, [](const auto &l, const auto &r) {
-                            return l->name.string < r->name.string;
-                        });
-                }
 
                 *this->emotes_.access() = std::move(emoteMap);
                 *this->emoteSets_.access() = std::move(sets);

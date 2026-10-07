@@ -17,6 +17,9 @@ public:
 
     bool operator==(const TwitchBadge &other) const;
 
+    static QString vanitySlotKeyForSet(const QString &setId);
+    QString vanitySlotKey() const;
+
     QString key_;
     QString value_;
 

@@ -115,6 +115,7 @@ private:
     UniqueAccess<std::shared_ptr<const EmoteMap>> emotes_;
 
     QString seventvUserID_;
+    ScopedCancellationToken seventvUserToken_;
 
     void tryLoadBlocks();
 };

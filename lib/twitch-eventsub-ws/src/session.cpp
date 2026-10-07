@@ -520,6 +520,11 @@ boost::system::error_code Session::handleMessage(
     {
         return {};  // nothing to do
     }
+    if (metadata.messageType == "revocation")
+    {
+        this->listener->onRevocation(metadata, *payloadV);
+        return {};
+    }
     if (metadata.messageType == "session_reconnect")
     {
         return this->onSessionReconnect(*payloadV);

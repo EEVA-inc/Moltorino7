@@ -21,10 +21,18 @@ void addKind(ModerationActionLogCounts &counts, GqlModerationActionKind kind)
             counts.timeouts++;
             break;
         case GqlModerationActionKind::Unban:
+            counts.unbans++;
+            break;
         case GqlModerationActionKind::Untimeout:
+            counts.untimeouts++;
+            break;
         case GqlModerationActionKind::Delete:
-        case GqlModerationActionKind::Message:
+            counts.deletes++;
+            break;
         case GqlModerationActionKind::Other:
+            counts.other++;
+            break;
+        case GqlModerationActionKind::Message:
             break;
     }
 }
@@ -35,12 +43,12 @@ bool isShownModerationAction(GqlModerationActionKind kind)
     {
         case GqlModerationActionKind::Ban:
         case GqlModerationActionKind::Timeout:
-            return true;
         case GqlModerationActionKind::Unban:
         case GqlModerationActionKind::Untimeout:
         case GqlModerationActionKind::Delete:
-        case GqlModerationActionKind::Message:
         case GqlModerationActionKind::Other:
+            return true;
+        case GqlModerationActionKind::Message:
             return false;
     }
     return false;
@@ -60,7 +68,8 @@ int ModerationActionLogCounts::countedTotal() const
 
 int ModerationActionLogCounts::rawTotal() const
 {
-    return this->countedTotal();
+    return this->countedTotal() + this->deletes + this->unbans +
+           this->untimeouts + this->other;
 }
 
 QString moderationActionKindText(GqlModerationActionKind kind)
@@ -96,10 +105,9 @@ ModerationActionLogScanner::ModerationActionLogScanner(
     : QObject(parent)
     , request_(std::move(request))
 {
-    if (this->request_.maxPages <= 0)
-    {
-        this->request_.maxPages = 1;
-    }
+    this->request_.maxPages = std::clamp(this->request_.maxPages, 1, 10000);
+    this->request_.maxRetainedEvents =
+        std::clamp(this->request_.maxRetainedEvents, 0, 20000);
     if (this->request_.pageDelayMs < 0)
     {
         this->request_.pageDelayMs = 0;
@@ -252,6 +260,26 @@ void ModerationActionLogScanner::processAction(
 
     addKind(this->snapshot_.totals, action.kind);
 
+    if (this->snapshot_.events.size() < this->request_.maxRetainedEvents)
+    {
+        this->snapshot_.events.push_back({
+            .id = action.id,
+            .kind = action.kind,
+            .createdAt = action.createdAt,
+            .moderatorId = action.moderatorId,
+            .moderatorLogin = action.moderatorLogin,
+            .moderatorDisplayName = action.moderatorDisplayName,
+            .targetId = action.targetId,
+            .targetLogin = action.targetLogin,
+            .targetDisplayName = action.targetDisplayName,
+            .text = action.text.left(2000),
+        });
+    }
+    else
+    {
+        this->snapshot_.eventsTruncated = true;
+    }
+
     const auto key = this->moderatorKey(action);
     auto &entry = this->moderators_[key];
     if (entry.summary.id.isEmpty())
@@ -263,9 +291,14 @@ void ModerationActionLogScanner::processAction(
     if (!login.isEmpty() && entry.summary.login.isEmpty())
     {
         entry.summary.login = login;
-        entry.summary.displayName = login;
     }
-    else if (entry.summary.displayName.isEmpty())
+
+    const auto displayName = action.moderatorDisplayName.trimmed();
+    if (!displayName.isEmpty() && entry.summary.displayName.isEmpty())
+    {
+        entry.summary.displayName = displayName;
+    }
+    if (entry.summary.displayName.isEmpty())
     {
         entry.summary.displayName =
             entry.summary.login.isEmpty() ? QStringLiteral("Unknown")

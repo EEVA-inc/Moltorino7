@@ -136,12 +136,20 @@ const std::optional<ImagePtr> &ModerationAction::getImage() const
     }
     else if (this->type_ == Type::Ban)
     {
-        this->image_ = Image::fromResourcePixmap(getResources().buttons.ban);
+        this->image_ =
+            Image::fromResourcePixmap(getResources().buttons.inlineBan);
     }
     else if (this->type_ == Type::Delete)
     {
         this->image_ =
             Image::fromResourcePixmap(getResources().buttons.trashCan);
+    }
+    else if (this->type_ == Type::Custom &&
+             (this->action_ == QStringLiteral("/unban") ||
+              this->action_.startsWith(QStringLiteral("/unban "))))
+    {
+        this->image_ =
+            Image::fromResourcePixmap(getResources().buttons.inlineUnban);
     }
     else if (this->type_ == Type::Pin)
     {

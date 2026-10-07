@@ -10,8 +10,6 @@
 
 class QTabWidget;
 class QPushButton;
-class QComboBox;
-class QLineEdit;
 
 namespace chatterino {
 
@@ -27,10 +25,6 @@ private:
 
     QTimer itemsChangedTimer_;
     QTabWidget *tabWidget_{};
-
-    std::vector<QLineEdit *> durationInputs_;
-    std::vector<QComboBox *> unitInputs_;
-    std::vector<QLineEdit *> reasonInputs_;
 };
 
 }

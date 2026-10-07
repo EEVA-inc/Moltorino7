@@ -164,6 +164,45 @@ void Helix::getChannelFollowers(
         .execute();
 }
 
+void Helix::getChannelFollowDate(QString broadcasterID, QString userID,
+                                 QString clientID, QString oauthToken,
+                                 const QObject *caller,
+                                 ResultCallback<QDateTime> successCallback,
+                                 HelixFailureCallback failureCallback)
+{
+    if (broadcasterID.isEmpty() || userID.isEmpty() || clientID.isEmpty() ||
+        oauthToken.isEmpty())
+    {
+        failureCallback();
+        return;
+    }
+    QUrlQuery query;
+    query.addQueryItem("broadcaster_id", broadcasterID);
+    query.addQueryItem("user_id", userID);
+    this->makeGet("channels/followers", query)
+        .header("Client-ID", clientID)
+        .header("Authorization", "Bearer " + oauthToken)
+        .caller(caller)
+        .onSuccess([userID, successCallback](const NetworkResult &result) {
+            for (const auto &value : result.parseJson().value("data").toArray())
+            {
+                const auto follower = value.toObject();
+                if (follower.value("user_id").toString() == userID)
+                {
+                    successCallback(QDateTime::fromString(
+                        follower.value("followed_at").toString(), Qt::ISODate));
+                    return;
+                }
+            }
+
+            successCallback({});
+        })
+        .onError([failureCallback](const NetworkResult &) {
+            failureCallback();
+        })
+        .execute();
+}
+
 void Helix::fetchStreams(
     QStringList userIds, QStringList userLogins,
     ResultCallback<std::vector<HelixStream>> successCallback,
@@ -489,15 +528,22 @@ void Helix::getChannel(QString broadcasterId,
     this->makeGet("channels", urlQuery)
         .onSuccess([successCallback, failureCallback](auto result) {
             auto root = result.parseJson();
-            auto data = root.value("data");
+            auto dataValue = root.value("data");
 
-            if (!data.isArray())
+            if (!dataValue.isArray())
             {
                 failureCallback();
                 return;
             }
 
-            HelixChannel channel(data.toArray()[0].toObject());
+            const auto data = dataValue.toArray();
+            if (data.isEmpty())
+            {
+                failureCallback();
+                return;
+            }
+
+            HelixChannel channel(data[0].toObject());
 
             successCallback(channel);
         })
@@ -652,37 +698,75 @@ void Helix::unblockUser(QString targetUserId, const QObject *caller,
         .execute();
 }
 
+bool HelixChannelUpdate::empty() const
+{
+    return !this->gameId && !this->language && !this->title && !this->tags &&
+           !this->contentClassificationLabels && !this->isBrandedContent;
+}
+
+QJsonObject HelixChannelUpdate::toJson() const
+{
+    QJsonObject obj;
+
+    if (this->gameId)
+    {
+        obj.insert("game_id", *this->gameId);
+    }
+    if (this->language)
+    {
+        obj.insert("broadcaster_language", *this->language);
+    }
+    if (this->title)
+    {
+        obj.insert("title", *this->title);
+    }
+    if (this->tags)
+    {
+        QJsonArray tags;
+        for (const auto &tag : *this->tags)
+        {
+            tags.push_back(tag);
+        }
+        obj.insert("tags", tags);
+    }
+    if (this->contentClassificationLabels)
+    {
+        QJsonArray labels;
+        for (const auto &label : *this->contentClassificationLabels)
+        {
+            labels.push_back(QJsonObject{
+                {"id", label.id},
+                {"is_enabled", label.isEnabled},
+            });
+        }
+        obj.insert("content_classification_labels", labels);
+    }
+    if (this->isBrandedContent)
+    {
+        obj.insert("is_branded_content", *this->isBrandedContent);
+    }
+
+    return obj;
+}
+
 void Helix::updateChannel(
-    QString broadcasterId, QString gameId, QString language, QString title,
+    QString broadcasterId, const HelixChannelUpdate &update,
     std::function<void(NetworkResult)> successCallback,
     FailureCallback<HelixUpdateChannelError, QString> failureCallback)
 {
     using Error = HelixUpdateChannelError;
 
-    QUrlQuery urlQuery;
-    auto obj = QJsonObject();
-    if (!gameId.isEmpty())
-    {
-        obj.insert("game_id", gameId);
-    }
-    if (!language.isEmpty())
-    {
-        obj.insert("broadcaster_language", language);
-    }
-    if (!title.isEmpty())
-    {
-        obj.insert("title", title);
-    }
-
-    if (title.isEmpty() && gameId.isEmpty() && language.isEmpty())
+    if (update.empty())
     {
         qCDebug(chatterinoCommon) << "Tried to update channel with no changes!";
+        failureCallback(Error::Forwarded, "No channel changes were provided.");
         return;
     }
 
+    QUrlQuery urlQuery;
     urlQuery.addQueryItem("broadcaster_id", broadcasterId);
     this->makePatch("channels", urlQuery)
-        .json(obj)
+        .json(update.toJson())
         .onSuccess([successCallback, failureCallback](auto result) {
             successCallback(result);
         })
@@ -724,6 +808,7 @@ void Helix::updateChannel(
                 }
                 break;
 
+                case 409:
                 case 429: {
                     failureCallback(Error::Ratelimited, message);
                 }
@@ -3091,19 +3176,30 @@ void Helix::sendChatMessage(
         json["reply_parent_message_id"] = args.replyParentMessageID;
     }
 
+    if (args.pin)
+    {
+        json["pin"_L1] = true;
+    }
+
     this->makePost("chat/messages", {})
         .json(json)
-        .onSuccess([successCallback](const NetworkResult &result) {
+        .onSuccess([successCallback,
+                    failureCallback](const NetworkResult &result) {
             if (result.status() != 200)
             {
                 qCWarning(chatterinoTwitch)
                     << "Success result for sending chat message was "
                     << result.formatError() << "but we expected it to be 200";
             }
-            auto json = result.parseJson();
-
-            successCallback(HelixSentMessage(
-                json.value("data").toArray().at(0).toObject()));
+            const auto data = result.parseJson().value("data").toArray();
+            if (data.isEmpty() || !data.first().isObject())
+            {
+                failureCallback(
+                    Error::Unknown,
+                    "Twitch returned an incomplete message response.");
+                return;
+            }
+            successCallback(HelixSentMessage(data.first().toObject()));
         })
         .onError([failureCallback](const NetworkResult &result) -> void {
             if (!result.status())
@@ -3770,6 +3866,134 @@ void Helix::deleteEventSubSubscription(const QString &subscriptionID,
         .execute();
 }
 
+namespace {
+
+HelixPinMessageError pinMessageErrorForStatus(int status)
+{
+    switch (status)
+    {
+        case 400:
+            return HelixPinMessageError::InvalidParameter;
+        case 401:
+            return HelixPinMessageError::MissingScope;
+        case 403:
+            return HelixPinMessageError::Forbidden;
+        case 404:
+            return HelixPinMessageError::NotFound;
+        case 409:
+            return HelixPinMessageError::Conflict;
+        case 429:
+            return HelixPinMessageError::RateLimited;
+        default:
+            return HelixPinMessageError::Forwarded;
+    }
+}
+
+void handlePinMessageError(
+    const NetworkResult &result,
+    const IHelix::FailureCallback<HelixPinMessageError, QString> &callback)
+{
+    if (!result.status())
+    {
+        callback(HelixPinMessageError::Unknown, result.formatError());
+        return;
+    }
+
+    auto message = result.parseJson().value("message").toString();
+    if (message.isEmpty())
+    {
+        message = result.formatError();
+    }
+    callback(pinMessageErrorForStatus(*result.status()), message);
+}
+
+QUrlQuery pinMessageQuery(const QString &broadcasterID,
+                          const QString &moderatorID, const QString &messageID,
+                          std::optional<std::chrono::seconds> duration)
+{
+    QUrlQuery query{
+        {u"broadcaster_id"_s, broadcasterID},
+        {u"moderator_id"_s, moderatorID},
+        {u"message_id"_s, messageID},
+    };
+    if (duration)
+    {
+        query.addQueryItem(u"duration_seconds"_s,
+                           QString::number(duration->count()));
+    }
+    return query;
+}
+
+}
+
+void Helix::pinChatMessage(
+    const QString &broadcasterID, const QString &moderatorID,
+    const QString &messageID, std::optional<std::chrono::seconds> duration,
+    ResultCallback<> successCallback,
+    FailureCallback<HelixPinMessageError, QString> failureCallback)
+{
+    this->makePut("chat/pins", pinMessageQuery(broadcasterID, moderatorID,
+                                               messageID, duration))
+        .onSuccess([successCallback](const NetworkResult &result) {
+            if (result.status() != 204)
+            {
+                qCWarning(chatterinoTwitch)
+                    << "Unexpected successful pin status:"
+                    << result.formatError();
+            }
+            successCallback();
+        })
+        .onError([failureCallback](const NetworkResult &result) {
+            handlePinMessageError(result, failureCallback);
+        })
+        .execute();
+}
+
+void Helix::updatePinnedChatMessage(
+    const QString &broadcasterID, const QString &moderatorID,
+    const QString &messageID, std::optional<std::chrono::seconds> duration,
+    ResultCallback<> successCallback,
+    FailureCallback<HelixPinMessageError, QString> failureCallback)
+{
+    this->makePatch("chat/pins", pinMessageQuery(broadcasterID, moderatorID,
+                                                 messageID, duration))
+        .onSuccess([successCallback](const NetworkResult &result) {
+            if (result.status() != 204)
+            {
+                qCWarning(chatterinoTwitch)
+                    << "Unexpected successful pin update status:"
+                    << result.formatError();
+            }
+            successCallback();
+        })
+        .onError([failureCallback](const NetworkResult &result) {
+            handlePinMessageError(result, failureCallback);
+        })
+        .execute();
+}
+
+void Helix::unpinChatMessage(
+    const QString &broadcasterID, const QString &moderatorID,
+    const QString &messageID, ResultCallback<> successCallback,
+    FailureCallback<HelixPinMessageError, QString> failureCallback)
+{
+    this->makeDelete("chat/pins", pinMessageQuery(broadcasterID, moderatorID,
+                                                  messageID, std::nullopt))
+        .onSuccess([successCallback](const NetworkResult &result) {
+            if (result.status() != 204)
+            {
+                qCWarning(chatterinoTwitch)
+                    << "Unexpected successful unpin status:"
+                    << result.formatError();
+            }
+            successCallback();
+        })
+        .onError([failureCallback](const NetworkResult &result) {
+            handlePinMessageError(result, failureCallback);
+        })
+        .execute();
+}
+
 NetworkRequest Helix::makeRequest(const QString &url, const QUrlQuery &urlQuery,
                                   NetworkRequestType type)
 {
@@ -3806,6 +4030,8 @@ NetworkRequest Helix::makeRequest(const QString &url, const QUrlQuery &urlQuery,
 
     return NetworkRequest(fullUrl, type)
         .timeout(5 * 1000)
+        .maximumResponseSize(4 * 1024 * 1024)
+        .followRedirects(false)
         .header("Accept", "application/json")
         .header("Client-ID", this->clientId)
         .header("Authorization", "Bearer " + this->oauthToken)
@@ -3854,8 +4080,9 @@ void Helix::paginate(
         return (*onSuccess)(res);
     };
 
-    *onSuccess = [this, onPage = std::move(onPage), onError, onSuccessCb,
-                  url{url}, baseQuery{baseQuery},
+    *onSuccess = [this, onPage = std::move(onPage), onError,
+                  weakOnSuccess = std::weak_ptr(onSuccess), url{url},
+                  baseQuery{baseQuery},
                   cancellationToken =
                       std::move(cancellationToken)](const NetworkResult &res) {
         if (cancellationToken.isCancelled())
@@ -3886,8 +4113,12 @@ void Helix::paginate(
         query.removeAllQueryItems(u"after"_s);
         query.addQueryItem(u"after"_s, cursor);
 
+        auto nextPage = weakOnSuccess.lock();
+        assert(nextPage);
         this->makeGet(url, query)
-            .onSuccess(onSuccessCb)
+            .onSuccess([nextPage](const auto &result) {
+                (*nextPage)(result);
+            })
             .onError(onError)
             .execute();
     };

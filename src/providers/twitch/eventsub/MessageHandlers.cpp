@@ -23,7 +23,8 @@ void handleModerateMessage(
     const lib::payload::channel_moderate::v2::Event &event,
     const lib::payload::channel_moderate::v2::Clear & )
 {
-    runInGuiThread([chan, actor{event.moderatorUserLogin.qt()}, time] {
+    runInGuiThread([chan = chan->sharedFromThis(),
+                    actor{event.moderatorUserLogin.qt()}, time] {
         chan->addOrReplaceClearChat(
             MessageBuilder::makeClearChatMessage(time, actor), time);
         if (getSettings()->hideModerated)
@@ -76,6 +77,10 @@ void handleModerateMessage(
             ->setLink({Link::UserInfo, event.sourceBroadcasterUserLogin->qt()})
             ->setTrailingSpace(false);
         builder->flags.set(MessageFlag::SharedMessage);
+        if (event.sourceBroadcasterUserID)
+        {
+            builder->sharedChatSourceId = event.sourceBroadcasterUserID->qt();
+        }
         builder->channelName = event.sourceBroadcasterUserLogin->qt();
     }
 
@@ -96,7 +101,7 @@ void handleModerateMessage(
     builder->timeoutUser = action.userLogin.qt();
 
     auto msg = builder.release();
-    runInGuiThread([chan, msg, time] {
+    runInGuiThread([chan = chan->sharedFromThis(), msg, time] {
         chan->addOrReplaceTimeout(msg, time);
     });
 }
@@ -125,6 +130,10 @@ void handleModerateMessage(
         builder.appendUser(*event.sourceBroadcasterUserName,
                            *event.sourceBroadcasterUserLogin, text, false);
         builder->flags.set(MessageFlag::SharedMessage);
+        if (event.sourceBroadcasterUserID)
+        {
+            builder->sharedChatSourceId = event.sourceBroadcasterUserID->qt();
+        }
         builder->channelName = event.sourceBroadcasterUserLogin->qt();
     }
 
@@ -142,7 +151,7 @@ void handleModerateMessage(
     builder->timeoutUser = action.userLogin.qt();
 
     auto msg = builder.release();
-    runInGuiThread([chan, msg, time] {
+    runInGuiThread([chan = chan->sharedFromThis(), msg, time] {
         chan->addOrReplaceTimeout(msg, time);
     });
 }
@@ -152,7 +161,7 @@ void handleModerateMessage(
     const lib::payload::channel_moderate::v2::Event & ,
     const lib::payload::channel_moderate::v2::Unraid & )
 {
-    runInGuiThread([chan] {
+    runInGuiThread([chan = chan->sharedFromThis()] {
         chan->clearActiveRaid();
     });
 }

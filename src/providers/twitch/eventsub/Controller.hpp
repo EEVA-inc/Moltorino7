@@ -9,7 +9,6 @@
 #include "twitch-eventsub-ws/logger.hpp"
 #include "twitch-eventsub-ws/session.hpp"
 #include "util/ExponentialBackoff.hpp"
-#include "util/OnceFlag.hpp"
 #include "util/ThreadGuard.hpp"
 
 #include <boost/asio/executor_work_guard.hpp>
@@ -46,6 +45,8 @@ public:
         const std::unordered_set<SubscriptionRequest> &subs) = 0;
 
     virtual void debug() = 0;
+    virtual void subscriptionRevoked(const QString &subscriptionID,
+                                     const QString &status) = 0;
 };
 
 class Controller : public IController
@@ -67,26 +68,35 @@ public:
         const std::unordered_set<SubscriptionRequest> &subs) override;
 
     void debug() override;
+    void subscriptionRevoked(const QString &subscriptionID,
+                             const QString &status) override;
 
 private:
-    void subscribe(const SubscriptionRequest &request, bool isRetry);
+    void subscribe(const SubscriptionRequest &request, uint64_t generation,
+                   bool isRetry = false);
+    void unsubscribe(const SubscriptionRequest &request, uint64_t generation);
 
     void createConnection();
     void createConnection(std::string host, std::string port, std::string path,
                           std::unique_ptr<lib::Listener> listener);
     void registerConnection(std::weak_ptr<lib::Session> &&connection);
 
-    void retrySubscription(const SubscriptionRequest &request);
+    void retrySubscription(const SubscriptionRequest &request,
+                           uint64_t generation);
 
     void markRequestSubscribed(const SubscriptionRequest &request,
-                               std::weak_ptr<lib::Session> connection,
+                               uint64_t generation,
                                const QString &subscriptionID);
 
-    void markRequestFailed(const SubscriptionRequest &request);
+    void markRequestFailed(const SubscriptionRequest &request,
+                           uint64_t generation);
 
-    void markRequestUnsubscribed(const SubscriptionRequest &request);
+    void markRequestUnsubscribed(const SubscriptionRequest &request,
+                                 uint64_t generation);
 
     void clearConnections();
+    void checkModeratorAccess(const SubscriptionRequest &request,
+                              uint64_t generation);
 
     std::shared_ptr<lib::Logger> logProxy;
 
@@ -125,9 +135,13 @@ private:
         } state = State::Unsubscribed;
 
         int32_t refCount = 0;
+        uint64_t generation = 0;
+        bool inFlight = false;
         std::weak_ptr<lib::Session> connection;
 
         QString subscriptionID;
+        QString revocationStatus;
+        bool moderatorRecoveryAttempted = false;
 
         std::unique_ptr<boost::asio::system_timer> retryTimer;
 
@@ -138,7 +152,9 @@ private:
     std::unordered_map<SubscriptionRequest, Subscription> subscriptions;
 
     std::atomic<bool> quitting = false;
-    OnceFlag stoppedFlag;
+    uint64_t nextGeneration = 0;
+    std::shared_ptr<std::atomic<bool>> alive =
+        std::make_shared<std::atomic<bool>>(true);
 };
 
 class DummyController : public IController
@@ -167,6 +183,10 @@ public:
         std::unique_ptr<lib::Listener> connection,
         const std::optional<std::string> &reconnectURL,
         const std::unordered_set<SubscriptionRequest> &subs) override;
+
+    void subscriptionRevoked(const QString &, const QString &) override
+    {
+    }
 
     void debug() override
     {

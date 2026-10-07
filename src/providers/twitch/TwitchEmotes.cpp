@@ -14,6 +14,8 @@
 
 #include <QStringBuilder>
 
+#include <algorithm>
+
 namespace {
 
 using namespace chatterino;
@@ -454,24 +456,42 @@ EmotePtr TwitchEmotes::getOrCreateEmote(const EmoteId &id,
     auto name = TwitchEmotes::cleanUpEmoteCode(name_.string);
 
     auto cache = this->twitchEmotesCache_.access();
-    auto shared = (*cache)[id].lock();
-
-    if (!shared)
+    if (auto it = cache->find(id); it != cache->end())
     {
-        auto baseSize = getEmoteExpectedBaseSize(id);
-        auto emote3xScaleFactor = getEmote3xScaleFactor(id);
-        (*cache)[id] = shared = std::make_shared<Emote>(Emote{
-            .name = EmoteName{name},
-            .images =
-                ImageSet{
-                    Image::fromUrl(getEmoteLink(id, "1.0"), 1, baseSize),
-                    Image::fromUrl(getEmoteLink(id, "2.0"), 0.5, baseSize * 2),
-                    Image::fromUrl(getEmoteLink(id, "3.0"), emote3xScaleFactor,
-                                   baseSize * (1.0 / emote3xScaleFactor)),
-                },
-            .tooltip = Tooltip{name.toHtmlEscaped() + "<br>Twitch Emote"},
-        });
+        if (auto shared = it->second.lock())
+        {
+            return shared;
+        }
+        cache->erase(it);
     }
+
+    constexpr size_t CACHE_SWEEP_INTERVAL = 256;
+    constexpr size_t CACHE_SWEEP_MIN_SIZE = 1024;
+    if (++this->twitchEmoteCacheInsertions_ >= CACHE_SWEEP_INTERVAL)
+    {
+        this->twitchEmoteCacheInsertions_ = 0;
+        if (cache->size() >= CACHE_SWEEP_MIN_SIZE)
+        {
+            std::erase_if(*cache, [](const auto &entry) {
+                return entry.second.expired();
+            });
+        }
+    }
+
+    auto baseSize = getEmoteExpectedBaseSize(id);
+    auto emote3xScaleFactor = getEmote3xScaleFactor(id);
+    auto shared = std::make_shared<Emote>(Emote{
+        .name = EmoteName{name},
+        .images =
+            ImageSet{
+                Image::fromUrl(getEmoteLink(id, "1.0"), 1, baseSize),
+                Image::fromUrl(getEmoteLink(id, "2.0"), 0.5, baseSize * 2),
+                Image::fromUrl(getEmoteLink(id, "3.0"), emote3xScaleFactor,
+                               baseSize * (1.0 / emote3xScaleFactor)),
+            },
+        .tooltip = Tooltip{name.toHtmlEscaped() + "<br>Twitch Emote"},
+    });
+    cache->emplace(id, shared);
 
     return shared;
 }

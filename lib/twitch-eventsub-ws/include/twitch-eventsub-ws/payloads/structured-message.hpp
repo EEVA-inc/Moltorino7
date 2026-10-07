@@ -2,6 +2,7 @@
 
 #include "twitch-eventsub-ws/string.hpp"
 
+#include <optional>
 #include <string_view>
 #include <variant>
 #include <vector>
@@ -47,6 +48,7 @@ struct MessageFragment {
 struct Message {
     String text;
     std::vector<MessageFragment> fragments;
+    std::optional<String> messageID;
 };
 
 #include "twitch-eventsub-ws/payloads/structured-message.inc"

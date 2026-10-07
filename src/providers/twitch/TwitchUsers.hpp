@@ -6,6 +6,8 @@
 
 #include "common/Aliases.hpp"
 
+#include <pajlada/signals/signal.hpp>
+
 #include <memory>
 
 namespace chatterino {
@@ -38,6 +40,8 @@ public:
     TwitchUsers &operator=(TwitchUsers &&) = delete;
 
     std::shared_ptr<TwitchUser> resolveID(const UserId &id) override;
+
+    pajlada::Signals::Signal<const QString &> userUpdated;
 
 private:
 

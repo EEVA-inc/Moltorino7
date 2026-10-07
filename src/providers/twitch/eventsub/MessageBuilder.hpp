@@ -4,9 +4,11 @@
 
 #pragma once
 
+#include "controllers/automod/AutoModReviewController.hpp"
 #include "messages/MessageBuilder.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
 #include "twitch-eventsub-ws/payloads/automod-message-hold-v2.hpp"
+#include "twitch-eventsub-ws/payloads/automod-message-update-v2.hpp"
 #include "twitch-eventsub-ws/payloads/channel-chat-user-message-hold-v1.hpp"
 #include "twitch-eventsub-ws/payloads/channel-chat-user-message-update-v1.hpp"
 #include "twitch-eventsub-ws/payloads/channel-moderate-v2.hpp"
@@ -16,6 +18,7 @@
 #include <QDateTime>
 
 #include <concepts>
+#include <cstdint>
 
 namespace chatterino::eventsub::detail {
 
@@ -172,6 +175,29 @@ MessagePtr makeAutomodHoldMessageHeader(
 MessagePtr makeAutomodHoldMessageBody(
     TwitchChannel *channel, const QDateTime &time,
     const lib::payload::automod_message_hold::v2::Event &event);
+
+MessagePtr makeAutomodMessageUpdateHeader(
+    TwitchChannel *channel, const QDateTime &time,
+    const lib::payload::automod_message_update::v2::Event &event);
+
+automod::HoldData makeAutoModReviewHoldData(
+    QString notificationID, const QDateTime &time,
+    const lib::payload::automod_message_hold::v2::Event &event);
+
+automod::UpdateData makeAutoModReviewUpdateData(
+    QString notificationID, const QDateTime &time,
+    const lib::payload::automod_message_update::v2::Event &event);
+
+enum class AutoModReviewPresentation : std::uint8_t {
+    ChatAdvanced,
+    ChatLegacy,
+    ReviewQueue,
+};
+
+MessagePtr makeAutoModReviewMessage(
+    TwitchChannel *channel, const automod::ReviewItem &item,
+    AutoModReviewPresentation presentation =
+        AutoModReviewPresentation::ChatAdvanced);
 
 MessagePtr makeSuspiciousUserMessageHeader(
     TwitchChannel *channel, const QDateTime &time,

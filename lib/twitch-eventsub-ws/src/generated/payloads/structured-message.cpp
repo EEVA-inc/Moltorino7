@@ -310,9 +310,22 @@ boost::json::result_for<Message, boost::json::value>::type tag_invoke(
         }
     }
 
+    std::optional<String> messageID;
+    if (const auto *value = root.if_contains("message_id");
+        value && !value->is_null())
+    {
+        auto parsed = boost::json::try_value_to<String>(*value);
+        if (parsed.has_error())
+        {
+            return parsed.error();
+        }
+        messageID = std::move(parsed.value());
+    }
+
     return Message{
         .text = std::move(text.value()),
         .fragments = std::move(vfragments),
+        .messageID = std::move(messageID),
     };
 }
 

@@ -13,6 +13,8 @@
 #include <pajlada/signals/scoped-connection.hpp>
 
 #include <optional>
+#include <memory>
+#include <cstdint>
 #include <vector>
 
 #include <QPointer>
@@ -56,6 +58,7 @@ private:
     void buildManageUI();
     void buildBettingUI();
     void updateUI();
+    void refreshAccount(bool accountChanged = false);
     void updateInPlace();
     void updateManageOutcomeSelection();
     void settleLayoutAfterResize();
@@ -69,7 +72,7 @@ private:
     bool populatePredictionTemplates(PredictionTemplatePicker *picker);
     void fetchPredictionTemplates(PredictionTemplatePicker *picker);
 
-    TwitchChannel *channel_;
+    std::shared_ptr<TwitchChannel> channel_;
     std::optional<TwitchChannel::PredictionEvent> currentPrediction_;
 
     QVBoxLayout *mainLayout_{};
@@ -103,6 +106,8 @@ private:
     QString predictionTemplatesError_;
     bool predictionTemplatesFetchInFlight_ = false;
     bool renderedBroadcasterView_ = false;
+    QString authToken_;
+    uint64_t authGeneration_ = 0;
 
     std::vector<pajlada::Signals::ScopedConnection> managedConnections_;
 

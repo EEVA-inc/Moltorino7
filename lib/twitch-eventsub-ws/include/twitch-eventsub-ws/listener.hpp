@@ -30,6 +30,9 @@ public:
     virtual void onNotification(const messages::Metadata &metadata,
                                 const boost::json::value &jv) = 0;
 
+    virtual void onRevocation(const messages::Metadata &,
+                              const boost::json::value &) {}
+
     virtual void onClose(
         std::unique_ptr<Listener> self,
         const std::optional<std::string> & /* reconnectUrl */) {};

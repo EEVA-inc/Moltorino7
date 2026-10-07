@@ -41,4 +41,27 @@ bool TwitchBadge::operator==(const TwitchBadge &other) const
     return this->key_ == other.key_ && this->value_ == other.value_;
 }
 
+QString TwitchBadge::vanitySlotKeyForSet(const QString &setId)
+{
+    const auto key = setId.trimmed().toLower();
+    if (globalAuthority.contains(key) || channelAuthority.contains(key))
+    {
+        return QStringLiteral("ta");
+    }
+    if (subBadges.contains(key))
+    {
+        return QStringLiteral("ts");
+    }
+    if (predictions.contains(key))
+    {
+        return QStringLiteral("tp");
+    }
+    return QStringLiteral("tv");
+}
+
+QString TwitchBadge::vanitySlotKey() const
+{
+    return vanitySlotKeyForSet(this->key_);
+}
+
 }

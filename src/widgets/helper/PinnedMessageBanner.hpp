@@ -70,8 +70,8 @@ private:
     bool userManuallyCollapsed_ = false;
     bool hasPin_ = false;
     bool initialLayoutStabilizationQueued_ = false;
-    QString dismissedPinId_;
-    QString currentPinMessageId_;
+    QString dismissedPinIdentity_;
+    QString currentPinIdentity_;
     QString pinnerName_;
 
     std::optional<QDateTime> endsAt_;

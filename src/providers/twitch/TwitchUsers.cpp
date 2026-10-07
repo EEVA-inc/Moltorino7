@@ -34,13 +34,14 @@ class TwitchUsersPrivate
     : public std::enable_shared_from_this<TwitchUsersPrivate>
 {
 public:
-    TwitchUsersPrivate();
+    explicit TwitchUsersPrivate(TwitchUsers *owner);
 
 private:
     boost::unordered_flat_map<UserId, std::shared_ptr<TwitchUser>> cache;
     QStringList unresolved;
     QTimer nextBatchTimer;
     bool isResolving = false;
+    TwitchUsers *owner_;
 
     std::shared_ptr<TwitchUser> makeUnresolved(const UserId &id);
     void makeNextRequest();
@@ -50,11 +51,15 @@ private:
 };
 
 TwitchUsers::TwitchUsers()
-    : private_(new TwitchUsersPrivate)
+    : private_(new TwitchUsersPrivate(this))
 {
 }
 
-TwitchUsers::~TwitchUsers() = default;
+TwitchUsers::~TwitchUsers()
+{
+    this->private_->owner_ = nullptr;
+    this->private_->nextBatchTimer.stop();
+}
 
 std::shared_ptr<TwitchUser> TwitchUsers::resolveID(const UserId &id)
 {
@@ -66,7 +71,8 @@ std::shared_ptr<TwitchUser> TwitchUsers::resolveID(const UserId &id)
     return this->private_->makeUnresolved(id);
 }
 
-TwitchUsersPrivate::TwitchUsersPrivate()
+TwitchUsersPrivate::TwitchUsersPrivate(TwitchUsers *owner)
+    : owner_(owner)
 {
     this->nextBatchTimer.setSingleShot(true);
 
@@ -103,7 +109,7 @@ std::shared_ptr<TwitchUser> TwitchUsersPrivate::makeUnresolved(const UserId &id)
 
 void TwitchUsersPrivate::makeNextRequest()
 {
-    if (this->unresolved.empty())
+    if (!this->owner_ || this->unresolved.empty())
     {
         return;
     }
@@ -145,6 +151,10 @@ void TwitchUsersPrivate::updateUsers(const std::vector<HelixUser> &users)
             continue;
         }
         cached->second->update(user);
+        if (this->owner_)
+        {
+            this->owner_->userUpdated.invoke(user.id);
+        }
     }
 }
 

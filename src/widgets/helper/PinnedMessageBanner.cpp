@@ -11,6 +11,12 @@
 #include "messages/layouts/MessageLayout.hpp"
 #include "messages/layouts/MessageLayoutElement.hpp"
 #include "common/Channel.hpp"
+#include "controllers/ignores/HiddenUserController.hpp"
+#include "controllers/ignores/IgnoreController.hpp"
+#include "controllers/ignores/IgnorePhrase.hpp"
+#include "messages/MessageElement.hpp"
+#include "providers/twitch/TwitchIrc.hpp"
+#include "singletons/ThemeCustomization.hpp"
 #include "singletons/Settings.hpp"
 #include "singletons/WindowManager.hpp"
 
@@ -35,6 +41,7 @@ namespace chatterino {
 
 namespace {
     constexpr int BASE_ICON_SIZE = 14;
+    constexpr size_t PINNED_MESSAGE_LIMIT = 1;
     constexpr int BASE_HEADER_FONT_SIZE = 11;
     constexpr int BASE_COLLAPSED_MSG_HEIGHT = 28;
     constexpr int MAX_EXPANDED_HEIGHT = 500;
@@ -48,8 +55,7 @@ namespace {
     constexpr int BASE_HEADER_TEXT_BOTTOM_INSET = 0;
 
     constexpr float BASE_TEXT_SCALE = 0.80f;
-    constexpr float BASE_BADGE_SCALE = 0.25f;
-    constexpr float BASE_EMOTE_SCALE = 0.55f;
+    constexpr float BASE_EMOTE_SCALE = BASE_TEXT_SCALE;
 
     float normalizedBannerScale(float value)
     {
@@ -78,6 +84,88 @@ namespace {
     bool sameOptionalFloat(const std::optional<float> &current, float value)
     {
         return current.has_value() && std::abs(*current - value) < 0.0001F;
+    }
+
+    MessagePtrMut makePinnedMessageFallback(const TwitchChannel::PinnedMessage &pin,
+                                            TwitchChannel *channel)
+    {
+        const auto login = pin.authorLogin;
+        const auto displayName =
+            !pin.authorName.isEmpty()
+                ? pin.authorName
+                : (login.isEmpty() ? QStringLiteral("Unknown") : login);
+        QString body;
+        if (pin.text.isEmpty())
+        {
+            body = QStringLiteral("This pinned message could not be loaded.");
+        }
+        else
+        {
+            body = pin.text;
+            std::vector<TwitchEmoteOccurrence> emotes;
+            processIgnorePhrases(*getSettings()->ignoredMessages.readOnly(), body,
+                                 emotes);
+        }
+        const auto color = QColor(pin.authorColor);
+        const auto userColor = color.isValid() ? MessageColor(color)
+                                               : MessageColor(MessageColor::Text);
+
+        MessageBuilder builder;
+        builder->id = pin.messageId;
+        builder->loginName = login;
+        builder->displayName = displayName;
+        builder->userID = pin.authorId;
+        builder->messageText = body;
+        builder->searchText = displayName + QStringLiteral(": ") + body;
+        builder->channelName = channel->getName();
+        builder->usernameColor = color;
+        builder->flags.set(MessageFlag::DoNotLog,
+                           MessageFlag::DoNotTriggerNotification);
+        auto *username = builder.emplace<TextElement>(
+            displayName + QStringLiteral(":"), MessageElementFlag::Username,
+            userColor, FontStyle::ChatMediumBold);
+        if (!login.isEmpty())
+        {
+            username->setLink({Link::UserInfo, login});
+        }
+        builder.appendOrEmplaceText(body, MessageColor::Text);
+        return builder.release();
+    }
+
+    MessagePtrMut makeHiddenPinnedMessagePlaceholder(TwitchChannel *channel)
+    {
+        static const auto text = QStringLiteral(
+            "This pinned message is hidden by your ignore settings.");
+
+        MessageBuilder builder;
+        builder->messageText = text;
+        builder->searchText = text;
+        builder->channelName = channel->getName();
+        builder->flags.set(MessageFlag::DoNotLog,
+                           MessageFlag::DoNotTriggerNotification);
+        builder.emplace<TextElement>(text, MessageElementFlag::Text,
+                                     MessageColor::System);
+        return builder.release();
+    }
+
+    QString pinIdentity(const TwitchChannel::PinnedMessage &pin)
+    {
+        if (!pin.pinId.isEmpty())
+        {
+            return pin.pinId;
+        }
+
+        auto identity = pin.messageId;
+        if (identity.isEmpty())
+        {
+            identity = pin.authorLogin + QStringLiteral(":") + pin.text.left(80);
+        }
+        if (pin.pinnedAt && pin.pinnedAt->isValid())
+        {
+            identity += QStringLiteral("|") +
+                        pin.pinnedAt->toUTC().toString(Qt::ISODateWithMs);
+        }
+        return identity;
     }
 
     void setPinnedBadgeFlag(MessageElementFlags &flags,
@@ -117,7 +205,9 @@ namespace {
                            MessageElementFlag::BadgeChatterino);
         setPinnedBadgeFlag(flags, wordFlags, MessageElementFlag::BadgeSevenTV);
         setPinnedBadgeFlag(flags, wordFlags, MessageElementFlag::BadgeFfz);
+        setPinnedBadgeFlag(flags, wordFlags, MessageElementFlag::BadgeFfzAp);
         setPinnedBadgeFlag(flags, wordFlags, MessageElementFlag::BadgeBttv);
+        setPinnedBadgeFlag(flags, wordFlags, MessageElementFlag::BadgeBluzyrino);
         setPinnedBadgeFlag(flags, wordFlags,
                            MessageElementFlag::BadgeHomiesSupporter);
         setPinnedBadgeFlag(flags, wordFlags,
@@ -271,12 +361,16 @@ PinnedMessageBanner::PinnedMessageBanner(Split *split, QWidget *parent)
 
     layout->addLayout(this->topLayout_);
 
-    this->channel_ = std::make_shared<Channel>("", Channel::Type::None);
-    this->messageView_ = new ChannelView(this, split);
+    this->channel_ = std::make_shared<Channel>("", Channel::Type::None,
+                                               PINNED_MESSAGE_LIMIT);
+    this->messageView_ = new ChannelView(
+        this, split, ChannelView::Context::None, PINNED_MESSAGE_LIMIT);
     this->messageView_->setOverrideScale(BASE_TEXT_SCALE);
+    this->messageView_->setOverrideBadgeScale(BASE_TEXT_SCALE);
     this->messageView_->setOverrideEmoteScale(BASE_EMOTE_SCALE);
     this->messageView_->setCenterBadges(true);
     this->messageView_->setOverrideSeparateMessages(false);
+    this->messageView_->setHighlightsEnabled(false);
     this->messageView_->setTransparentBackground(true);
     this->messageView_->installEventFilter(this);
     this->messageView_->setChannel(this->channel_);
@@ -410,18 +504,25 @@ void PinnedMessageBanner::setPinnedMessage(
     if (!pin || !channel)
     {
         this->hasPin_ = false;
-        this->dismissedPinId_.clear();
-        this->currentPinMessageId_.clear();
+        this->dismissedPinIdentity_.clear();
+        this->currentPinIdentity_.clear();
         this->endsAt_ = std::nullopt;
         this->pinnedAt_.reset();
         this->countdownTimer_->stop();
         this->twitchChannel_ = nullptr;
+        this->channel_->clearMessages();
+        this->messageView_->setSourceChannel({});
+        this->icon_->disconnect();
+        this->unpinButton_->disconnect();
         this->initialLayoutStabilizationQueued_ = false;
         this->setUpdatesEnabled(true);
         this->hide();
         return;
     }
 
+    const auto identity = pinIdentity(*pin);
+    const bool samePin = this->twitchChannel_ == channel &&
+                         this->currentPinIdentity_ == identity;
     this->twitchChannel_ = channel;
     if (this->split_ != nullptr)
     {
@@ -429,14 +530,14 @@ void PinnedMessageBanner::setPinnedMessage(
     }
     this->endsAt_ = pin->endsAt;
 
-    if (this->currentPinMessageId_ != pin->messageId ||
-        !this->pinnedAt_.has_value())
+    if (!samePin || !this->pinnedAt_.has_value())
     {
         this->pinnedAt_ = pin->pinnedAt;
     }
-    this->currentPinMessageId_ = pin->messageId;
+    this->currentPinIdentity_ = identity;
 
-    if (!this->dismissedPinId_.isEmpty() && this->dismissedPinId_ == pin->messageId)
+    if (!this->dismissedPinIdentity_.isEmpty() &&
+        this->dismissedPinIdentity_ == identity)
     {
         this->hasPin_ = false;
         this->initialLayoutStabilizationQueued_ = false;
@@ -444,8 +545,15 @@ void PinnedMessageBanner::setPinnedMessage(
         this->hide();
         return;
     }
-    this->dismissedPinId_.clear();
+
+    this->dismissedPinIdentity_.clear();
     this->hasPin_ = true;
+    if (!samePin)
+    {
+        this->userManuallyCollapsed_ = false;
+        this->isExpanded_ = getSettings()->alwaysExpandPinnedMessages;
+    }
+    this->messageView_->setCollapseMessages(!this->isExpanded_);
 
     this->countdownTimer_->stop();
 
@@ -458,7 +566,26 @@ void PinnedMessageBanner::setPinnedMessage(
         originalMessage = channel->findMessageByID(pin->messageId);
     }
 
-    if (originalMessage)
+    const auto ignoredText =
+        originalMessage != nullptr ? originalMessage->messageText : pin->text;
+    const auto ignoredUserID =
+        originalMessage != nullptr ? originalMessage->userID : pin->authorId;
+    const auto ignoredLogin = originalMessage != nullptr
+                                  ? originalMessage->loginName
+                                  : pin->authorLogin;
+    const bool isIgnored = isIgnoredMessage({
+        .message = ignoredText,
+        .twitchUserID = ignoredUserID,
+        .twitchUserLogin = ignoredLogin,
+        .isMod = channel->isMod(),
+        .isBroadcaster = channel->isBroadcaster(),
+    });
+
+    if (isIgnored)
+    {
+        message = makeHiddenPinnedMessagePlaceholder(channel);
+    }
+    else if (originalMessage)
     {
         message = originalMessage->clone();
     }
@@ -471,6 +598,8 @@ void PinnedMessageBanner::setPinnedMessage(
         if (!pin->authorId.isEmpty()) tags << "user-id=" + pin->authorId;
         if (!pin->authorColor.isEmpty()) tags << "color=" + pin->authorColor;
         if (!pin->authorBadges.isEmpty()) tags << "badges=" + pin->authorBadges;
+        if (!pin->emotes.isEmpty())
+            tags << "emotes=" + pin->emotes;
         if (!channel->roomId().isEmpty()) tags << "room-id=" + channel->roomId();
         if (!pin->authorLogin.isEmpty()) tags << "login=" + pin->authorLogin;
         if (!pin->authorName.isEmpty()) tags << "display-name=" + pin->authorName;
@@ -495,14 +624,26 @@ void PinnedMessageBanner::setPinnedMessage(
         }
     }
 
+    if (!message)
+    {
+        message = makePinnedMessageFallback(*pin, channel);
+    }
+
+    if (!isIgnored)
+    {
+        if (auto *hiddenUsers = getApp()->getHiddenUsers();
+            hiddenUsers && hiddenUsers->shouldHideMessage(*message))
+        {
+            message = makeHiddenPinnedMessagePlaceholder(channel);
+        }
+    }
+
     if (message)
     {
         message->flags.unset(MessageFlag::RecentMessage);
         message->flags.unset(MessageFlag::Disabled);
-        message->flags.unset(MessageFlag::Highlighted);
-        message->flags.unset(MessageFlag::RedeemedHighlight);
-        message->flags.unset(MessageFlag::FirstMessage);
-        message->flags.unset(MessageFlag::ElevatedMessage);
+
+        message->flags.set(MessageFlag::DisableCompactEmotes);
 
         auto it = std::remove_if(message->elements.begin(), message->elements.end(),
             [](const std::unique_ptr<MessageElement>& el) {
@@ -536,37 +677,49 @@ void PinnedMessageBanner::setPinnedMessage(
         this->icon_->setToolTip(QString());
     }
 
-    if (displayMode <= 2 && (this->endsAt_.has_value() || this->pinnedAt_.has_value()))
-    {
-        this->updateTimer();
-        this->countdownTimer_->start();
-    }
-    else
-    {
-        this->timerLabel_->hide();
-    }
+    this->updateTimer();
 
     this->updateScaling();
 
-    bool hasModRights = channel->hasModRights();
+    const bool hasModRights = channel->canManagePinnedMessages();
+    auto currentChannel = [this, weak = channel->weak_from_this(), identity] {
+        auto shared = std::dynamic_pointer_cast<TwitchChannel>(weak.lock());
+        if (!shared || !this->hasPin_ || this->twitchChannel_ != shared.get() ||
+            this->currentPinIdentity_ != identity)
+        {
+            return std::shared_ptr<TwitchChannel>{};
+        }
+        const auto currentPin = shared->accessPinnedMessage();
+        if (!currentPin->has_value() || pinIdentity(**currentPin) != identity)
+        {
+            return std::shared_ptr<TwitchChannel>{};
+        }
+        return shared;
+    };
 
     this->unpinButton_->disconnect();
     this->unpinButton_->setVisible(true);
-    this->connect(this->unpinButton_, &Button::leftClicked, [this, channel, pin, hasModRights]() {
-        int action = getSettings()->pinCloseButtonAction;
-        if (action == 1 && hasModRights)
-        {
-            channel->unpinMessage();
-        }
-        else
-        {
-            this->dismissedPinId_ = pin->messageId;
-            this->hasPin_ = false;
-            this->countdownTimer_->stop();
-            this->hide();
-            this->dismissed.invoke();
-        }
-    });
+    this->connect(this->unpinButton_, &Button::leftClicked,
+                  [this, currentChannel, identity]() {
+                      const auto channel = currentChannel();
+                      if (!channel)
+                      {
+                          return;
+                      }
+                      int action = getSettings()->pinCloseButtonAction;
+                      if (action == 1 && channel->canManagePinnedMessages())
+                      {
+                          channel->unpinMessage();
+                      }
+                      else
+                      {
+                          this->dismissedPinIdentity_ = identity;
+                          this->hasPin_ = false;
+                          this->countdownTimer_->stop();
+                          this->hide();
+                          this->dismissed.invoke();
+                      }
+                  });
     this->unpinButton_->setToolTip(
         (getSettings()->pinCloseButtonAction == 1 && hasModRights)
             ? "Unpin message" : "Dismiss");
@@ -575,36 +728,44 @@ void PinnedMessageBanner::setPinnedMessage(
     if (hasModRights)
     {
         this->icon_->setCursor(Qt::PointingHandCursor);
-        this->connect(this->icon_, &Button::leftClicked, [this, channel, pin]() {
-            auto *menu = new QMenu(this);
-            menu->setAttribute(Qt::WA_DeleteOnClose);
+        this->connect(
+            this->icon_, &Button::leftClicked,
+            [this, currentChannel, timed = pin->endsAt.has_value()]() {
+                const auto channel = currentChannel();
+                if (!channel || !channel->canManagePinnedMessages())
+                {
+                    return;
+                }
+                auto *menu = new QMenu(this);
+                menu->setAttribute(Qt::WA_DeleteOnClose);
 
-            menu->addAction("Unpin Message", [channel]() {
-                channel->unpinMessage();
-            });
-
-            if (pin->endsAt.has_value())
-            {
-                menu->addSeparator();
-                menu->addAction("Pin Indefinitely", [channel]() {
-                    channel->keepPinned();
+                menu->addAction("Unpin Message", this, [currentChannel]() {
+                    if (auto channel = currentChannel();
+                        channel && channel->canManagePinnedMessages())
+                    {
+                        channel->unpinMessage();
+                    }
                 });
-            }
 
-            menu->popup(QCursor::pos());
-        });
+                if (timed)
+                {
+                    menu->addSeparator();
+                    menu->addAction(
+                        "Pin Indefinitely", this, [currentChannel]() {
+                            if (auto channel = currentChannel();
+                                channel && channel->canManagePinnedMessages())
+                            {
+                                channel->keepPinned();
+                            }
+                        });
+                }
+
+                menu->popup(QCursor::pos());
+            });
     }
     else
     {
         this->icon_->setCursor(Qt::ArrowCursor);
-    }
-
-    this->userManuallyCollapsed_ = false;
-
-    if (getSettings()->alwaysExpandPinnedMessages && !this->userManuallyCollapsed_)
-    {
-        this->isExpanded_ = true;
-        this->messageView_->setCollapseMessages(false);
     }
 
     this->scheduleInitialLayoutStabilization();
@@ -614,6 +775,7 @@ void PinnedMessageBanner::showEvent(QShowEvent *event)
 {
     BaseWidget::showEvent(event);
     this->scaleChangedEvent(this->scale());
+    this->updateTimer();
     this->scheduleInitialLayoutStabilization();
 }
 
@@ -733,8 +895,13 @@ void PinnedMessageBanner::paintEvent(QPaintEvent * /*event*/)
     }
 
     painter.fillRect(this->rect(), background);
-    painter.setPen(border);
-    painter.drawRect(0, 0, this->width() - 1, this->height() - 1);
+    const auto &appearance = this->theme->customization;
+    if (appearance.foundation != ThemeFoundation::MoltorinoPolished ||
+        !appearance.roundChat || appearance.cornerRadius() <= 0)
+    {
+        painter.setPen(border);
+        painter.drawRect(0, 0, this->width() - 1, this->height() - 1);
+    }
 }
 
 void PinnedMessageBanner::resizeEvent(QResizeEvent *event)
@@ -749,6 +916,10 @@ void PinnedMessageBanner::resizeEvent(QResizeEvent *event)
         {
             int contentHeight = snapshot[0]->getHeight();
             int firstLineHeight = snapshot[0]->getFirstLineHeight();
+            if (contentHeight <= 0 || firstLineHeight <= 0)
+            {
+                return;
+            }
             bool isTruncated = contentHeight > firstLineHeight;
 
             if (!isTruncated) {
@@ -848,7 +1019,7 @@ void PinnedMessageBanner::updateScaling()
         this->messageView_->setOverrideScale(overrideScale);
     }
 
-    const float badgeScale = BASE_BADGE_SCALE * combined;
+    const float badgeScale = overrideScale;
     if (!sameOptionalFloat(this->messageView_->getOverrideBadgeScale(),
                            badgeScale))
     {
@@ -877,6 +1048,13 @@ void PinnedMessageBanner::updateScaling()
     {
         int contentHeight = snapshot[0]->getHeight();
         int firstLineHeight = snapshot[0]->getFirstLineHeight();
+        if (contentHeight <= 0 || firstLineHeight <= 0)
+        {
+            this->messageView_->setFixedHeight(
+                scaledInt(BASE_COLLAPSED_MSG_HEIGHT * combined));
+            this->moreLabel_->hide();
+            return;
+        }
         bool isTruncated = contentHeight > firstLineHeight;
 
         if (isTruncated && getSettings()->alwaysExpandPinnedMessages &&
@@ -927,7 +1105,6 @@ bool PinnedMessageBanner::eventFilter(QObject *obj, QEvent *event)
             if (mode == 3 && (this->endsAt_.has_value() || this->pinnedAt_.has_value()))
             {
                 this->updateTimer();
-                this->countdownTimer_->start();
             }
             else if ((mode == 1 || mode == 2) &&
                      (this->endsAt_.has_value() || this->pinnedAt_.has_value()))
@@ -979,8 +1156,9 @@ void PinnedMessageBanner::updateTimer()
 {
     int displayMode = getSettings()->pinTimerDisplay;
 
-    if (displayMode == 4)
+    if (!this->hasPin_ || displayMode == 4)
     {
+        this->pinnerLabel_->setText("Pinned by " + this->pinnerName_);
         this->timerLabel_->hide();
         this->countdownTimer_->stop();
         return;
@@ -1008,18 +1186,32 @@ void PinnedMessageBanner::updateTimer()
     QString countdownStr;
     if (this->endsAt_.has_value())
     {
-        qint64 remaining = now.secsTo(*this->endsAt_);
-        if (remaining <= 0)
+        const auto remainingMs = now.msecsTo(*this->endsAt_);
+        if (remainingMs <= 0)
         {
             countdownStr = "Expired";
             this->countdownTimer_->stop();
-            if (this->twitchChannel_)
-                this->twitchChannel_->refreshPinnedMessage();
         }
         else
         {
+            const auto remaining =
+                remainingMs / 1000 + (remainingMs % 1000 != 0 ? 1 : 0);
             countdownStr = formatRemaining(remaining);
         }
+    }
+
+    const bool shouldTick =
+        ((displayMode >= 0 && displayMode <= 2) ||
+         (displayMode == 3 && this->icon_->underMouse())) &&
+        (this->endsAt_.has_value() || this->pinnedAt_.has_value()) &&
+        (!this->endsAt_ || now < *this->endsAt_);
+    if (shouldTick && !this->countdownTimer_->isActive())
+    {
+        this->countdownTimer_->start();
+    }
+    else if (!shouldTick)
+    {
+        this->countdownTimer_->stop();
     }
 
     if ((displayMode == 0 || displayMode == 1) && !timeStr.isEmpty())

@@ -18,6 +18,7 @@
 #include "widgets/helper/EditableModelView.hpp"
 #include "widgets/helper/IconDelegate.hpp"
 #include "widgets/settingspages/SettingWidget.hpp"
+#include "widgets/settingspages/UsercardModerationSettings.hpp"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -26,6 +27,7 @@
 #include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPersistentModelIndex>
 #include <QPixmap>
 #include <QPushButton>
 #include <QTableView>
@@ -238,6 +240,14 @@ ModerationPage::ModerationPage()
         label->setWordWrap(true);
         label->setStyleSheet("color: #bbb");
 
+        SettingWidget::checkbox(
+            "Show buttons in channels I do not moderate",
+            getSettings()->showModerationButtonsWithoutPermission)
+            ->setTooltip(
+                "When off, inline moderation buttons only appear where your "
+                "current account can moderate.")
+            ->addToLayout(modMode->layout());
+
         EditableModelView *view =
             modMode
                 .emplace<EditableModelView>(
@@ -257,34 +267,37 @@ ModerationPage::ModerationPage()
             [this, view](const QModelIndex &clicked) {
                 if (clicked.column() == ModerationActionModel::Column::Icon)
                 {
+                    const QPointer<EditableModelView> guardedView(view);
+                    const QPersistentModelIndex target(clicked);
                     auto fileUrl = QFileDialog::getOpenFileUrl(
                         this, "Open Image", QUrl(),
                         "Image Files (*.png *.jpg *.jpeg)");
-                    view->getModel()->setData(clicked, fileUrl, Qt::UserRole);
-                    view->getModel()->setData(clicked, fileUrl.fileName(),
+                    if (!guardedView || !target.isValid())
+                    {
+                        return;
+                    }
+                    view->getModel()->setData(target, fileUrl, Qt::UserRole);
+                    view->getModel()->setData(target, fileUrl.fileName(),
                                               Qt::DisplayRole);
 
                     if (fileUrl.isEmpty())
                     {
-                        view->getModel()->setData(clicked, QVariant(),
+                        view->getModel()->setData(target, QVariant(),
                                                   Qt::DecorationRole);
                     }
                     else
                     {
-
-                        QPointer<EditableModelView> viewtemp = view;
-
                         loadPixmapFromUrl(
                             {fileUrl.toString()},
-                            [clicked, view = viewtemp](const QPixmap &pixmap) {
-                                postToThread([clicked, view, pixmap]() {
-                                    if (view.isNull())
+                            [target, view = guardedView](const QPixmap &pixmap) {
+                                postToThread([target, view, pixmap]() {
+                                    if (view.isNull() || !target.isValid())
                                     {
                                         return;
                                     }
 
                                     view->getModel()->setData(
-                                        clicked, pixmap, Qt::DecorationRole);
+                                        target, pixmap, Qt::DecorationRole);
                                 });
                             });
                     }
@@ -311,223 +324,9 @@ ModerationPage::ModerationPage()
 
 void ModerationPage::addModerationButtonSettings(QTabWidget *tabs)
 {
-    auto timeoutLayout =
-        LayoutCreator{tabs}.appendTab(new QVBoxLayout, "User Timeout Buttons");
-    auto texts = timeoutLayout.emplace<QVBoxLayout>().withoutMargin();
-    {
-        auto infoLabel = texts.emplace<QLabel>();
-        infoLabel->setText(
-            "Customize the timeout buttons in the user popup (accessible "
-            "through clicking a username).\nUse seconds (s), "
-            "minutes (m), hours (h), days (d) or weeks (w).");
-
-        infoLabel->setAlignment(Qt::AlignCenter);
-
-        auto maxLabel = texts.emplace<QLabel>();
-        maxLabel->setText("(maximum timeout duration = 2 w)");
-        maxLabel->setAlignment(Qt::AlignCenter);
-    }
-    texts->setContentsMargins(0, 0, 0, 15);
-    texts->setSizeConstraint(QLayout::SetMaximumSize);
-
-    const auto valueChanged = [=, this] {
-        bool ok = false;
-        const auto index = QObject::sender()->objectName().toInt(&ok);
-        if (!ok || index < 0 ||
-            index >= static_cast<int>(this->durationInputs_.size()))
-        {
-            return;
-        }
-
-        auto *const line = this->durationInputs_[index];
-        const auto duration = line->text().toInt();
-        const auto unit = this->unitInputs_[index]->currentText();
-        if (duration <= 0)
-        {
-            return;
-        }
-
-        if (unit == "d" && duration > 14)
-        {
-            line->setText("14");
-            return;
-        }
-        else if (unit == "w" && duration > 2)
-        {
-            line->setText("2");
-            return;
-        }
-
-        auto timeouts = getSettings()->timeoutButtons.getValue();
-        if (index >= static_cast<int>(timeouts.size()))
-        {
-            return;
-        }
-        timeouts[index] = TimeoutButton{unit, duration};
-        getSettings()->timeoutButtons.setValue(timeouts);
-    };
-
-    const auto reasonChanged = [=, this] {
-        bool ok = false;
-        const auto index = QObject::sender()->objectName().toInt(&ok);
-        if (!ok || index < 0 ||
-            index >= static_cast<int>(this->reasonInputs_.size()))
-        {
-            return;
-        }
-
-        auto reasons = getSettings()->timeoutButtonReasons.getValue();
-        const auto timeoutCount = getSettings()->timeoutButtons.getValue().size();
-        if (reasons.size() < timeoutCount)
-        {
-            reasons.resize(timeoutCount);
-        }
-
-        reasons[index] = this->reasonInputs_[index]->text();
-        while (!reasons.empty() && reasons.back().trimmed().isEmpty())
-        {
-            reasons.pop_back();
-        }
-        getSettings()->timeoutButtonReasons.setValue(reasons);
-    };
-
-    auto i = 0;
-    const auto reasons = getSettings()->timeoutButtonReasons.getValue();
-    for (const auto &tButton : getSettings()->timeoutButtons.getValue())
-    {
-        const auto buttonNumber = QString::number(i);
-        const auto index = i;
-        auto timeout = timeoutLayout.emplace<QHBoxLayout>().withoutMargin();
-
-        auto buttonLabel = timeout.emplace<QLabel>();
-        buttonLabel->setText(QString("Button %1: ").arg(++i));
-
-        auto *lineEditDurationInput = new QLineEdit();
-        lineEditDurationInput->setObjectName(buttonNumber);
-        lineEditDurationInput->setValidator(new QIntValidator(1, 99, this));
-        lineEditDurationInput->setText(QString::number(tButton.second));
-        lineEditDurationInput->setAlignment(Qt::AlignRight);
-        lineEditDurationInput->setMaximumWidth(30);
-        timeout.append(lineEditDurationInput);
-
-        auto *timeoutDurationUnit = new QComboBox();
-        timeoutDurationUnit->setObjectName(buttonNumber);
-        timeoutDurationUnit->addItems({"s", "m", "h", "d", "w"});
-        timeoutDurationUnit->setCurrentText(tButton.first);
-        timeout.append(timeoutDurationUnit);
-
-        auto reasonLabel = timeout.emplace<QLabel>();
-        reasonLabel->setText("Reason:");
-
-        auto *lineEditReasonInput = new QLineEdit();
-        lineEditReasonInput->setObjectName(buttonNumber);
-        lineEditReasonInput->setPlaceholderText("optional timeout reason");
-        if (index < static_cast<int>(reasons.size()))
-        {
-            lineEditReasonInput->setText(reasons[index]);
-        }
-        lineEditReasonInput->setMinimumWidth(220);
-        lineEditReasonInput->setMaximumWidth(360);
-        timeout.append(lineEditReasonInput);
-
-        QObject::connect(lineEditDurationInput, &QLineEdit::textChanged, this,
-                         valueChanged);
-
-        QObject::connect(timeoutDurationUnit, &QComboBox::currentTextChanged,
-                         this, valueChanged);
-
-        QObject::connect(lineEditReasonInput, &QLineEdit::textChanged, this,
-                         reasonChanged);
-
-        timeout->addStretch();
-
-        this->durationInputs_.push_back(lineEditDurationInput);
-        this->unitInputs_.push_back(timeoutDurationUnit);
-        this->reasonInputs_.push_back(lineEditReasonInput);
-
-        timeout->setContentsMargins(40, 0, 0, 0);
-        timeout->setSizeConstraint(QLayout::SetMaximumSize);
-    }
-
-    auto banReason = timeoutLayout.emplace<QHBoxLayout>().withoutMargin();
-    {
-        auto label = banReason.emplace<QLabel>();
-        label->setText("Ban reason:");
-
-        auto *input = new QLineEdit();
-        input->setPlaceholderText("optional ban reason");
-        input->setText(getSettings()->timeoutBanReason.getValue());
-        input->setMinimumWidth(220);
-        input->setMaximumWidth(360);
-        banReason.append(input);
-        banReason->addStretch();
-        banReason->setContentsMargins(40, 8, 0, 0);
-        banReason->setSizeConstraint(QLayout::SetMaximumSize);
-
-        QObject::connect(input, &QLineEdit::textChanged, this,
-                         [](const QString &text) {
-                             getSettings()->timeoutBanReason = text;
-                         });
-    }
-
-    auto promptOptions = timeoutLayout.emplace<QVBoxLayout>().withoutMargin();
-    {
-        auto promptLabel = promptOptions.emplace<QLabel>();
-        promptLabel->setText(
-            "Saved reasons are sent with normal timeout and ban clicks. Use "
-            "the reason prompt when you want to edit the reason first.");
-        promptLabel->setWordWrap(true);
-        promptLabel->setStyleSheet("color: #bbb");
-
-        auto *rightClickPrompt = this->createCheckBox(
-            "Open the reason prompt on right-click",
-            getSettings()->timeoutReasonPromptOnRightClick,
-            "Right-click a timeout or ban button in a usercard to edit the "
-            "reason before sending.");
-        promptOptions.append(rightClickPrompt);
-
-        auto modifierRow = promptOptions.emplace<QHBoxLayout>().withoutMargin();
-        auto *modifierPrompt = this->createCheckBox(
-            "Open the reason prompt while holding",
-            getSettings()->timeoutReasonPromptOnModifier,
-            "Hold this modifier while clicking a timeout or ban button to edit "
-            "the reason before sending.");
-        modifierRow.append(modifierPrompt);
-
-        auto *modifierKey = this->createComboBox(
-            {"Shift", "Ctrl", "Alt"},
-            getSettings()->timeoutReasonPromptModifier);
-        modifierKey->setMaximumWidth(120);
-        modifierRow.append(modifierKey);
-        modifierRow->addStretch();
-
-        auto updateModifierEnabled = [modifierPrompt, modifierKey] {
-            modifierKey->setEnabled(modifierPrompt->isChecked());
-        };
-        QObject::connect(modifierPrompt, &QCheckBox::toggled, this,
-                         [updateModifierEnabled](bool) {
-                             updateModifierEnabled();
-                         });
-        updateModifierEnabled();
-
-        auto *showSendButton = this->createCheckBox(
-            "Show a Send button in the reason prompt",
-            getSettings()->timeoutReasonPromptShowSendButton,
-            "When this is off, press Enter to send the prompt. Esc or clicking "
-            "away cancels it.");
-        promptOptions.append(showSendButton);
-
-        auto *prefillSavedReason = this->createCheckBox(
-            "Prefill the reason prompt with the saved reason",
-            getSettings()->timeoutReasonPromptPrefillSavedReason,
-            "When this is on, right-click and modifier prompts start with the "
-            "saved timeout or ban reason selected for quick editing.");
-        promptOptions.append(prefillSavedReason);
-    }
-    promptOptions->setContentsMargins(40, 12, 0, 15);
-    promptOptions->setSizeConstraint(QLayout::SetMaximumSize);
-
-    timeoutLayout->addStretch();
+    auto page =
+        LayoutCreator{tabs}.appendTab(new QVBoxLayout, "Usercard actions");
+    page.emplace<UsercardModerationSettings>();
 }
 
 void ModerationPage::selectModerationActions()

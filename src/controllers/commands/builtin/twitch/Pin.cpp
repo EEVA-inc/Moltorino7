@@ -7,6 +7,7 @@
 #include "messages/MessageFlag.hpp"
 #include "messages/Message.hpp"
 #include "providers/moltorino/MoltorinoAuth.hpp"
+#include "providers/twitch/api/Helix.hpp"
 #include "providers/twitch/api/TwitchGql.hpp"
 #include "providers/twitch/TwitchAccount.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
@@ -14,6 +15,7 @@
 #include "util/Twitch.hpp"
 
 #include <pajlada/signals/scoped-connection.hpp>
+#include <pajlada/signals/signalholder.hpp>
 
 #include <QRegularExpression>
 #include <QSet>
@@ -29,7 +31,37 @@ using namespace chatterino;
 using chatterino::commands::PinDurationParseResult;
 
 constexpr int MAX_TIMED_PIN_DURATION = 30 * 60;
-constexpr int SENT_MESSAGE_PIN_TIMEOUT_MS = 3000;
+constexpr int SENT_MESSAGE_PIN_TIMEOUT_MS = 10000;
+
+struct PendingPin {
+    bool active = true;
+    pajlada::Signals::SignalHolder connections;
+
+    explicit PendingPin(TwitchChannel *channel)
+    {
+        auto invalidate = [this] {
+            this->active = false;
+        };
+        this->connections.managedConnect(
+            getApp()->getAccounts()->twitch.currentUserChanged, invalidate);
+
+        auto checkAuth = [this, channelId = channel->roomId(),
+                          channelLogin = channel->getName(),
+                          token = MoltorinoAuth::resolveModerationToken(
+                                      channel->roomId(), channel->getName())
+                                      .token] {
+            if (MoltorinoAuth::resolveModerationToken(channelId, channelLogin)
+                    .token != token)
+            {
+                this->active = false;
+            }
+        };
+        getSettings()->customPinAuthToken.connect(checkAuth, this->connections,
+                                                 false);
+        getSettings()->moltorinoAuthAccounts.connect(checkAuth,
+                                                    this->connections, false);
+    }
+};
 
 QString usage()
 {
@@ -243,6 +275,28 @@ MessagePtr findLatestBufferedMessageFromUser(TwitchChannel *channel,
 void sendAndPinMessage(TwitchChannel *channel, const QString &messageText,
                        int durationSeconds);
 
+void handleUnknownPinUser(TwitchChannel *channel, const QString &login,
+                          const QString &fallbackMessage,
+                          int fallbackDurationSeconds, bool explicitUser)
+{
+    if (!explicitUser && !fallbackMessage.isEmpty())
+    {
+        if (!getSettings()->enablePinCommandMessages)
+        {
+            channel->addSystemMessage(
+                QStringLiteral("Could not find a user named %1. %2")
+                    .arg(login, pinTextDisabledMessage()));
+            return;
+        }
+
+        sendAndPinMessage(channel, fallbackMessage, fallbackDurationSeconds);
+        return;
+    }
+
+    channel->addSystemMessage(
+        QStringLiteral("Could not find a user named %1.").arg(login));
+}
+
 void pinLatestMessageFromUser(TwitchChannel *channel, const QString &login,
                               int durationSeconds,
                               const QString &fallbackMessage,
@@ -255,37 +309,75 @@ void pinLatestMessageFromUser(TwitchChannel *channel, const QString &login,
     }
 
     const auto weak = channel->weak_from_this();
+    const auto pending = std::make_shared<PendingPin>(channel);
+    if (!MoltorinoAuth::hasConfiguredAuth())
+    {
+        auto account = getApp()->getAccounts()->twitch.getCurrent();
+        if (!account || account->isAnon())
+        {
+            channel->addSystemMessage(
+                "Log in to Twitch to look up that username.");
+            return;
+        }
+
+        getHelix()->fetchUsers(
+            {}, {login},
+            [weak, pending, login, fallbackMessage, fallbackDurationSeconds,
+             explicitUser](const std::vector<HelixUser> &users) {
+                auto shared = std::dynamic_pointer_cast<TwitchChannel>(
+                    weak.lock());
+                if (!shared || !pending->active)
+                {
+                    return;
+                }
+                if (users.empty())
+                {
+                    handleUnknownPinUser(
+                        shared.get(), login, fallbackMessage,
+                        fallbackDurationSeconds, explicitUser);
+                    return;
+                }
+
+                const auto &user = users.front();
+                const auto displayName = user.displayName.isEmpty()
+                                             ? user.login
+                                             : user.displayName;
+                shared->addSystemMessage(
+                    QStringLiteral(
+                        "No recent message from %1 is in this chat buffer. "
+                        "Older message lookup requires Moltorino "
+                        "Authentication.")
+                        .arg(displayName));
+            },
+            [weak, pending, login] {
+                if (auto shared =
+                        std::dynamic_pointer_cast<TwitchChannel>(weak.lock());
+                    shared && pending->active)
+                {
+                    shared->addSystemMessage(
+                        QStringLiteral(
+                            "Could not look up user %1 through Twitch. Try again.")
+                            .arg(login));
+                }
+            });
+        return;
+    }
+
     TwitchGql::getUserByLogin(
         login, QString{},
-        [weak, login, fallbackMessage, fallbackDurationSeconds, explicitUser,
-         durationSeconds](std::optional<GqlUser> user) {
+        [weak, pending, login, fallbackMessage, fallbackDurationSeconds,
+         explicitUser, durationSeconds](std::optional<GqlUser> user) {
             auto shared =
                 std::dynamic_pointer_cast<TwitchChannel>(weak.lock());
-            if (!shared)
+            if (!shared || !pending->active)
             {
                 return;
             }
 
             if (!user.has_value())
             {
-                if (!explicitUser && !fallbackMessage.isEmpty())
-                {
-                    if (!getSettings()->enablePinCommandMessages)
-                    {
-                        shared->addSystemMessage(
-                            QStringLiteral("Could not find a user named %1. %2")
-                                .arg(login, pinTextDisabledMessage()));
-                        return;
-                    }
-
-                    sendAndPinMessage(shared.get(), fallbackMessage,
-                                      fallbackDurationSeconds);
-                    return;
-                }
-
-                shared->addSystemMessage(
-                    QStringLiteral("Could not find a user named %1.")
-                        .arg(login));
+                handleUnknownPinUser(shared.get(), login, fallbackMessage,
+                                     fallbackDurationSeconds, explicitUser);
                 return;
             }
 
@@ -306,11 +398,11 @@ void pinLatestMessageFromUser(TwitchChannel *channel, const QString &login,
 
             TwitchGql::getLatestModLogMessageBySender(
                 shared->roomId(), user->id, auth.token,
-                [weak, displayName, durationSeconds,
-                 token = auth.token](std::optional<GqlModLogMessage> message) {
+                [weak, pending, displayName,
+                 durationSeconds](std::optional<GqlModLogMessage> message) {
                     auto shared = std::dynamic_pointer_cast<TwitchChannel>(
                         weak.lock());
-                    if (!shared)
+                    if (!shared || !pending->active)
                     {
                         return;
                     }
@@ -324,30 +416,12 @@ void pinLatestMessageFromUser(TwitchChannel *channel, const QString &login,
                         return;
                     }
 
-                    TwitchGql::pinMessage(
-                        shared->roomId(), message->id, durationSeconds, token,
-                        [] {},
-                        [weak, displayName](const QString &error) {
-                            auto shared =
-                                std::dynamic_pointer_cast<TwitchChannel>(
-                                    weak.lock());
-                            if (!shared)
-                            {
-                                return;
-                            }
-
-                            shared->addSystemMessage(
-                                QStringLiteral(
-                                    "Failed to pin latest message from %1: %2")
-                                    .arg(displayName,
-                                         MoltorinoAuth::normalizeAuthError(
-                                             "pinning messages", error)));
-                        });
+                    shared->pinMessage(message->id, durationSeconds);
                 },
-                [weak, displayName](const QString &error) {
+                [weak, pending, displayName](const QString &error) {
                     auto shared = std::dynamic_pointer_cast<TwitchChannel>(
                         weak.lock());
-                    if (!shared)
+                    if (!shared || !pending->active)
                     {
                         return;
                     }
@@ -360,10 +434,10 @@ void pinLatestMessageFromUser(TwitchChannel *channel, const QString &login,
                                      "searching older messages", error)));
                 });
         },
-        [weak, login](const QString &error) {
+        [weak, pending, login](const QString &error) {
             auto shared =
                 std::dynamic_pointer_cast<TwitchChannel>(weak.lock());
-            if (!shared)
+            if (!shared || !pending->active)
             {
                 return;
             }
@@ -387,6 +461,11 @@ void sendAndPinMessage(TwitchChannel *channel, const QString &messageText,
         return;
     }
 
+    if (channel->trySendMessageViaHelixForPin(messageText, durationSeconds))
+    {
+        return;
+    }
+
     const auto login = currentUser->getUserName();
     const auto key = channel->roomId() + '\n' + messageText;
 
@@ -397,11 +476,18 @@ void sendAndPinMessage(TwitchChannel *channel, const QString &messageText,
             "Already waiting for that sent message to appear in chat.");
         return;
     }
+    if (pendingMessages.size() >= 32)
+    {
+        channel->addSystemMessage(
+            "Too many messages are waiting to be pinned. Try again shortly.");
+        return;
+    }
     pendingMessages.insert(key);
 
     auto done = std::make_shared<bool>(false);
     auto connection = std::make_shared<pajlada::Signals::ScopedConnection>();
     auto weakChannel = channel->weak_from_this();
+    const auto pending = std::make_shared<PendingPin>(channel);
 
     auto cleanup = [done, connection, key] {
         if (*done)
@@ -416,8 +502,8 @@ void sendAndPinMessage(TwitchChannel *channel, const QString &messageText,
     };
 
     *connection = channel->messageAppended.connect(
-        [cleanup, weakChannel, login, messageText,
-         durationSeconds](MessagePtr &message, auto) mutable {
+        [cleanup, weakChannel, pending, login, messageText, durationSeconds](
+            MessagePtr &message, auto) mutable {
             if (!isCurrentUserMessage(message, login, messageText))
             {
                 return;
@@ -430,7 +516,7 @@ void sendAndPinMessage(TwitchChannel *channel, const QString &messageText,
 
             auto shared =
                 std::dynamic_pointer_cast<TwitchChannel>(weakChannel.lock());
-            if (!shared)
+            if (!shared || !pending->active)
             {
                 return;
             }
@@ -439,7 +525,7 @@ void sendAndPinMessage(TwitchChannel *channel, const QString &messageText,
         });
 
     QTimer::singleShot(SENT_MESSAGE_PIN_TIMEOUT_MS,
-                       [cleanup, weakChannel, messageText] mutable {
+                       [cleanup, weakChannel, pending] mutable {
                            if (!cleanup())
                            {
                                return;
@@ -447,7 +533,7 @@ void sendAndPinMessage(TwitchChannel *channel, const QString &messageText,
 
                            auto shared = std::dynamic_pointer_cast<TwitchChannel>(
                                weakChannel.lock());
-                           if (!shared)
+                           if (!shared || !pending->active)
                            {
                                return;
                            }
