@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "singletons/Updates.hpp"
+#include "Application.hpp"
 
 #include "common/Literals.hpp"
 #include "common/Modes.hpp"
@@ -29,6 +30,7 @@ namespace {
 using namespace chatterino;
 using namespace literals;
 
+#ifndef MOLTORINO_VELOPACK_ENABLED
 QString currentBranch()
 {
     return getSettings()->betaUpdates ? "beta" : "stable";
@@ -66,6 +68,7 @@ QJsonValue getForArchitecture(const QJsonObject &obj, const QString &key)
 
     return val;
 }
+#endif
 
 }
 
@@ -73,16 +76,20 @@ namespace chatterino {
 
 Updates::Updates(const Paths &paths_, Settings &settings)
     : paths(paths_)
-    , currentVersion_(CHATTERINO_VERSION)
+    , currentVersion_(Version::instance().version())
     , updateGuideLink_("https://chatterino.com")
 {
     qCDebug(chatterinoUpdate) << "init UpdateManager";
 
+#ifndef MOLTORINO_VELOPACK_ENABLED
     settings.betaUpdates.connect(
         [this] {
             this->checkForUpdates();
         },
         this->managedConnections, false);
+#else
+    Q_UNUSED(settings);
+#endif
 }
 
 bool Updates::isDowngradeOf(const QString &online, const QString &current)
@@ -145,6 +152,7 @@ const QString &Updates::getOnlineVersion() const
 
 void Updates::installUpdates()
 {
+#ifndef MOLTORINO_VELOPACK_ENABLED
     if (this->status_ != UpdateAvailable)
     {
         assert(false);
@@ -240,7 +248,7 @@ void Updates::installUpdates()
                     return;
                 }
 
-                QApplication::exit(0);
+                requestApplicationQuit();
             })
             .execute();
         this->setStatus_(Downloading);
@@ -310,7 +318,7 @@ void Updates::installUpdates()
 
                 if (QProcess::startDetached(filePath, {}))
                 {
-                    QApplication::exit(0);
+                    requestApplicationQuit();
                 }
                 else
                 {
@@ -331,11 +339,12 @@ void Updates::installUpdates()
         this->setStatus_(Downloading);
     }
 #endif
+#endif
 }
 
 void Updates::checkForUpdates()
 {
-#ifndef CHATTERINO_DISABLE_UPDATER
+#if !defined(CHATTERINO_DISABLE_UPDATER) && !defined(MOLTORINO_VELOPACK_ENABLED)
     auto version = Version::instance();
 
     if (!version.isSupportedOS())

@@ -1,43 +1,40 @@
-![chatterinoLogo](https://user-images.githubusercontent.com/41973452/272541622-52457e89-5f16-4c83-93e7-91866c25b606.png)
-Chatterino7 [![GitHub Actions Build (Windows, Ubuntu, MacOS)](https://github.com/seventv/chatterino7/actions/workflows/build.yml/badge.svg?branch=chatterino7)](https://github.com/SevenTV/chatterino7/actions?query=workflow%3ABuild+branch%3Achatterino7) [![Chocolatey Package](https://img.shields.io/chocolatey/v/chatterino7?include_prereleases)](https://chocolatey.org/packages/chatterino7)
+<img src="resources/icon.png" alt="Moltorino" width="128">
+
+Moltorino
 ============
 
-Chatterino7 is a fork of Chatterino 2. This fork mainly contains features that aren't accepted into Chatterino 2, most notably 7TV subscriber features.
+Moltorino is a fork of [Chatterino7](https://github.com/SevenTV/chatterino7), which is based on [Chatterino 2](https://github.com/Chatterino/chatterino2). It supports Twitch, YouTube, Kick and TikTok chat.
 
-### Features of Chatterino7
+### Features of Moltorino
 
-- 7TV Name Paints
+- YouTube and TikTok accounts, live chat and moderation.
+- Poll and prediction menus for voting, betting and moderation.
+- A theme editor with share codes and image or video backgrounds.
+- A vanity menu for choosing paints, badges and badge order.
+- GIF search and sending from chat.
+- FFZ and BTTV emote modifiers, with controls for individual effects.
+- Message translation and local chat recording.
 
-- 7TV Personal Emotes
-
-- 7TV Animated Profile Avatars
-
-- 4x Images (7TV and FFZ)
-
-### Screenshots
+### Screenshots from Chatterino7
 
 ![Example of Personal Emotes](https://user-images.githubusercontent.com/27637025/227032811-837c56eb-7724-431b-b00e-b944c9289dff.png)
 ![Example of Paints](https://user-images.githubusercontent.com/27637025/227034147-cb1fcd76-dbae-4878-9551-96ffa64dd1a9.png)
 
 ### Downloads
 
-**Stable builds** can be downloaded from the [releases section](https://github.com/SevenTV/chatterino7/releases/latest).
-
-To test new features, you can download the **nighly build** [here](https://github.com/SevenTV/chatterino7/releases/tag/nightly-build).
-
-Windows users can install Chatterino7 [from Chocolatey](https://chocolatey.org/packages/chatterino7).
+**Stable builds** can be downloaded from [moltorino.com](https://moltorino.com), or from the [releases section](https://github.com/EEVA-inc/Moltorino7/releases) once my free CI minutes reset
 
 ### Issues
 
-If you have issues such as crashes or weird behaviour regarding 7TV features, report them [in the issue-section](https://github.com/SevenTV/chatterino7/issues). If you have issues with other features, please report them [in the upstream issue-section](https://github.com/Chatterino/chatterino2/issues).
+If you have issues such as crashes or weird behaviour, report them in [GitHub issues](https://github.com/EEVA-inc/Moltorino7/issues).
 
 ### Discord
 
-If you don't have a GitHub account and want to report issues or want to join the community you can join the official 7TV Discord using the link here: <https://discord.com/invite/7tv>.
+You can join the 7TV community using the link here: <https://discord.com/invite/7tv>.
 
 ### AVIF Support
 
-When building Chatterino 7, you might not have access to a static build of `libavif`. In that case, you can define `CHATTERINO_NO_AVIF_PLUGIN` in CMake. If you have `qavif.so` from [kimageformats](https://invent.kde.org/frameworks/kimageformats) installed on your system, Chatterino will pick it up and use AVIF images.
+When building Moltorino, you might not have access to a static build of `libavif`. In that case, you can define `CHATTERINO_NO_AVIF_PLUGIN` in CMake. If you have `qavif.so` from [kimageformats](https://invent.kde.org/frameworks/kimageformats) installed on your system, Chatterino will pick it up and use AVIF images.
 
 ## Original Chatterino 2 Readme
 
@@ -62,22 +59,22 @@ If you still receive an error about `MSVCR120.dll missing`, then you should inst
 To get source code with required submodules run:
 
 ```shell
-git clone --recurse-submodules https://github.com/Chatterino/chatterino2.git
+git clone --recurse-submodules https://github.com/EEVA-inc/Moltorino7.git
 ```
 
 or
 
 ```shell
-git clone https://github.com/Chatterino/chatterino2.git
-cd chatterino2
+git clone https://github.com/EEVA-inc/Moltorino7.git
+cd Moltorino7
 git submodule update --init --recursive
 ```
 
-- [Building on Windows](../master/BUILDING_ON_WINDOWS.md)
-- [Building on Windows with vcpkg](../master/BUILDING_ON_WINDOWS_WITH_VCPKG.md)
-- [Building on Linux](../master/BUILDING_ON_LINUX.md)
-- [Building on macOS](../master/BUILDING_ON_MAC.md)
-- [Building on FreeBSD](../master/BUILDING_ON_FREEBSD.md)
+- [Building on Windows](BUILDING_ON_WINDOWS.md)
+- [Building on Windows with vcpkg](BUILDING_ON_WINDOWS_WITH_VCPKG.md)
+- [Building on Linux](BUILDING_ON_LINUX.md)
+- [Building on macOS](BUILDING_ON_MAC.md)
+- [Building on FreeBSD](BUILDING_ON_FREEBSD.md)
 
 ## Git blame
 

@@ -87,3 +87,10 @@ if [[ " $* " == *" hunspell "* ]]; then
     echo "Relinking Hunspell"
     c2-make-universal-dylib lib/libhunspell-1.7.0.dylib
 fi
+
+if [[ " $* " == *" webp "* ]]; then
+    c2-make-universal-dylib lib/libwebp.dylib
+    c2-make-universal-dylib lib/libwebpdemux.dylib
+    c2-make-universal-dylib lib/libwebpmux.dylib
+    c2-make-universal-dylib lib/libsharpyuv.dylib
+fi

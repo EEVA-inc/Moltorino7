@@ -100,12 +100,17 @@ mkdir -p appdir/usr/share/doc/libc6/
 cp /usr/share/doc/libc6/copyright appdir/usr/share/doc/libc6/
 
 echo "Run LinuxDeployQT"
+helper_args=""
+if [ -x appdir/usr/libexec/moltorino/moltorino-tiktok-browser ]; then
+    helper_args="-executable=$PWD/appdir/usr/libexec/moltorino/moltorino-tiktok-browser"
+fi
 host_runtime_exclude_libs="libglib-2.0.so.0,libgobject-2.0.so.0,libgio-2.0.so.0,libgmodule-2.0.so.0,libgthread-2.0.so.0,libffi.so.8,libpcre.so.3,libpcre2-8.so.0,libselinux.so.1,libmount.so.1,libsystemd.so.0,libgcrypt.so.20,libgpg-error.so.0,libcap.so.2,liblz4.so.1,liblzma.so.5,libzstd.so.1,libdbus-1.so.3,libblkid.so.1"
 "$linuxdeployqt_path" \
     --appimage-extract-and-run \
     "appdir/usr/share/applications/$desktop_file_base" \
     -no-translations \
     -bundle-non-qt-libs \
+    ${helper_args:+"$helper_args"} \
     -exclude-libs="$host_runtime_exclude_libs" \
     -unsupported-allow-new-glibc
 

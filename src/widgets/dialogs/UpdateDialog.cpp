@@ -4,113 +4,220 @@
 
 #include "widgets/dialogs/UpdateDialog.hpp"
 
-#include "Application.hpp"
-#include "singletons/Updates.hpp"
-#include "util/LayoutCreator.hpp"
+#include "providers/moltorino/MoltorinoUpdater.hpp"
 #include "widgets/Label.hpp"
 
+#include <QDesktopServices>
 #include <QDialogButtonBox>
+#include <QProgressBar>
 #include <QPushButton>
+#include <QRegularExpression>
+#include <QStringList>
+#include <QTextBrowser>
+#include <QUrl>
+#include <QVariant>
 #include <QVBoxLayout>
 
 namespace chatterino {
 
-UpdateDialog::UpdateDialog()
-    : BaseWindow({BaseWindow::Frameless, BaseWindow::TopMost,
-                  BaseWindow::EnableCustomFrame, BaseWindow::DisableLayoutSave})
+namespace {
+
+class ReleaseSummaryBrowser final : public QTextBrowser
 {
-    this->windowDeactivateAction = WindowDeactivateAction::Delete;
+public:
+    explicit ReleaseSummaryBrowser(QWidget *parent)
+        : QTextBrowser(parent)
+    {
+        this->setFrameShape(QFrame::NoFrame);
+        this->setOpenExternalLinks(false);
+        this->setOpenLinks(false);
+        this->setMaximumHeight(150);
+        QObject::connect(this, &QTextBrowser::anchorClicked, this,
+                         [](const QUrl &url) {
+                             const auto scheme = url.scheme().toLower();
+                             if (url.isValid() &&
+                                 (scheme == "https" || scheme == "http"))
+                             {
+                                 QDesktopServices::openUrl(url);
+                             }
+                         });
+    }
 
-    auto layout =
-        LayoutCreator<UpdateDialog>(this).setLayoutType<QVBoxLayout>();
+    void setReleaseMarkdown(QString markdown)
+    {
+        markdown.remove(QRegularExpression(R"(<[^>]*>)"));
+        this->document()->setMarkdown(markdown.trimmed());
+    }
 
-    layout.emplace<Label>("You shouldn't be seeing this dialog.")
-        .assign(&this->ui_.label)
-        ->setWordWrap(true);
+protected:
+    QVariant loadResource(int type, const QUrl &name) override
+    {
+        if (type == QTextDocument::ImageResource)
+        {
+            return {};
+        }
+        return QTextBrowser::loadResource(type, name);
+    }
+};
 
-    auto buttons = layout.emplace<QDialogButtonBox>();
-    auto *install = buttons->addButton("Install", QDialogButtonBox::AcceptRole);
-    this->ui_.installButton = install;
-    auto *dismiss = buttons->addButton("Dismiss", QDialogButtonBox::RejectRole);
-
-    QObject::connect(install, &QPushButton::clicked, this, [this] {
-        getApp()->getUpdates().installUpdates();
-        this->close();
-    });
-    QObject::connect(dismiss, &QPushButton::clicked, this, [this] {
-        this->buttonClicked.invoke(Dismiss);
-        this->close();
-    });
-
-    this->updateStatusChanged(getApp()->getUpdates().getStatus());
-    this->connections_.managedConnect(getApp()->getUpdates().statusUpdated,
-                                      [this](auto status) {
-                                          this->updateStatusChanged(status);
-                                      });
-
-    this->setScaleIndependentHeight(150);
-    this->setScaleIndependentWidth(250);
 }
 
-void UpdateDialog::updateStatusChanged(Updates::Status status)
+UpdateDialog::UpdateDialog()
+    : BaseWindow({BaseWindow::Frameless, BaseWindow::TopMost,
+                  BaseWindow::EnableCustomFrame, BaseWindow::Dialog,
+                  BaseWindow::DisableLayoutSave})
 {
-    this->ui_.installButton->setVisible(status == Updates::UpdateAvailable);
+    this->setAttribute(Qt::WA_DeleteOnClose);
+    this->setWindowTitle("Moltorino Update");
 
+    auto *layout = new QVBoxLayout();
+    layout->setContentsMargins(18, 16, 18, 14);
+    layout->setSpacing(9);
+    this->getLayoutContainer()->setLayout(layout);
+
+    this->ui_.heading =
+        new Label(this, "Moltorino Update", FontStyle::UiMediumBold);
+    this->ui_.heading->setWordWrap(true);
+    layout->addWidget(this->ui_.heading);
+
+    this->ui_.details = new Label(this);
+    this->ui_.details->setWordWrap(true);
+    layout->addWidget(this->ui_.details);
+
+    this->ui_.status = new Label(this);
+    this->ui_.status->setWordWrap(true);
+    layout->addWidget(this->ui_.status);
+
+    this->ui_.summary = new ReleaseSummaryBrowser(this);
+    layout->addWidget(this->ui_.summary);
+
+    this->ui_.progress = new QProgressBar(this);
+    this->ui_.progress->setRange(0, 100);
+    this->ui_.progress->setTextVisible(true);
+    layout->addWidget(this->ui_.progress);
+
+    auto *buttons = new QDialogButtonBox(this);
+    this->ui_.changelogButton = buttons->addButton(
+        "View changelog", QDialogButtonBox::ActionRole);
+    this->ui_.retryButton =
+        buttons->addButton("Retry", QDialogButtonBox::ActionRole);
+    this->ui_.restartButton =
+        buttons->addButton("Restart and update", QDialogButtonBox::AcceptRole);
+    auto *closeButton =
+        buttons->addButton("Close", QDialogButtonBox::RejectRole);
+    layout->addWidget(buttons);
+
+    QObject::connect(this->ui_.changelogButton, &QPushButton::clicked, this,
+                     [] {
+                         getMoltorinoUpdater()->showFullChangelog();
+                     });
+    QObject::connect(this->ui_.retryButton, &QPushButton::clicked, this, [] {
+        getMoltorinoUpdater()->retry();
+    });
+    QObject::connect(this->ui_.restartButton, &QPushButton::clicked, this,
+                     [] {
+                         getMoltorinoUpdater()->restartToUpdate();
+                     });
+    QObject::connect(closeButton, &QPushButton::clicked, this,
+                     &QWidget::close);
+
+    this->connections_.managedConnect(
+        getMoltorinoUpdater()->stateChanged, [this] {
+            this->refresh();
+        });
+
+    this->setScaleIndependentWidth(440);
+    this->refresh();
+}
+
+void UpdateDialog::refresh()
+{
+    const auto *updater = getMoltorinoUpdater();
+    const auto status = updater->status();
+
+    QString heading;
     switch (status)
     {
-        case Updates::UpdateAvailable: {
-            this->ui_.label->setText(
-                (getApp()->getUpdates().isDowngrade()
-                     ? QString(
-                           "The version online (%1) seems to be lower than the "
-                           "current (%2).\nEither a version was reverted or "
-                           "you are running a newer build.\n\nDo you want to "
-                           "download and install it?")
-                           .arg(getApp()->getUpdates().getOnlineVersion(),
-                                getApp()->getUpdates().getCurrentVersion())
-                     : QString("An update (%1) is available.\n\nDo you want to "
-                               "download and install it?")
-                           .arg(getApp()->getUpdates().getOnlineVersion())));
-            this->updateGeometry();
-        }
-        break;
-
-        case Updates::SearchFailed: {
-            this->ui_.label->setText("Failed to load version information.");
-        }
-        break;
-
-        case Updates::Downloading: {
-            this->ui_.label->setText(
-                "Downloading updates.\n\nChatterino will restart "
-                "automatically when the download is done.");
-        }
-        break;
-
-        case Updates::DownloadFailed: {
-            this->ui_.label->setText("Failed to download the update.");
-        }
-        break;
-
-        case Updates::WriteFileFailed: {
-            this->ui_.label->setText("Failed to save the update to disk.");
-        }
-        break;
-
-        case Updates::MissingPortableUpdater: {
-            this->ui_.label->setText("The portable updater (expected in " %
-                                     Updates::portableUpdaterPath() %
-                                     ") was not found.");
-        }
-        break;
-
-        case Updates::RunUpdaterFailed: {
-            this->ui_.label->setText("Failed to run the updater.");
-        }
-        break;
-
-        default:;
+        case MoltorinoUpdateStatus::Disabled:
+            heading = "Updates unavailable";
+            break;
+        case MoltorinoUpdateStatus::Idle:
+            heading = "Moltorino updates";
+            break;
+        case MoltorinoUpdateStatus::Checking:
+            heading = "Checking for updates";
+            break;
+        case MoltorinoUpdateStatus::Downloading:
+            heading = updater->isRollback() ? "Downloading the rollback"
+                                            : "Downloading Moltorino update";
+            break;
+        case MoltorinoUpdateStatus::Ready:
+            heading = updater->isRollback() ? "Rollback ready"
+                                            : "Update ready";
+            break;
+        case MoltorinoUpdateStatus::Applying:
+            heading = updater->isRollback() ? "Finishing the rollback"
+                                            : "Finishing the update";
+            break;
+        case MoltorinoUpdateStatus::UpToDate:
+            heading = "You're up to date";
+            break;
+        case MoltorinoUpdateStatus::Error:
+            heading = "The update needs attention";
+            break;
     }
+    this->ui_.heading->setText(heading);
+
+    QStringList details;
+    if (!updater->targetBuild().isEmpty())
+    {
+        details.append(updater->targetBuild());
+    }
+    if (!updater->targetPackageVersion().isEmpty() &&
+        updater->targetPackageVersion() != updater->targetBuild())
+    {
+        details.append(
+            QString("Version %1").arg(updater->targetPackageVersion()));
+    }
+    if (!updater->channel().isEmpty())
+    {
+        details.append(updater->channel() == "internal" ? "Internal channel"
+                                                         : "Stable channel");
+    }
+    if (updater->isRollback())
+    {
+        details.append("Rollback");
+    }
+    this->ui_.details->setText(details.join("  ·  "));
+    this->ui_.details->setVisible(!details.isEmpty());
+
+    this->ui_.status->setText(updater->statusText());
+
+    const auto summary = updater->summaryMarkdown().trimmed();
+    static_cast<ReleaseSummaryBrowser *>(this->ui_.summary)
+        ->setReleaseMarkdown(summary);
+    this->ui_.summary->setVisible(!summary.isEmpty());
+
+    const bool downloading =
+        status == MoltorinoUpdateStatus::Downloading;
+    this->ui_.progress->setValue(updater->progress());
+    this->ui_.progress->setFormat(QString::number(updater->progress()) + "%");
+    this->ui_.progress->setVisible(downloading);
+
+    const bool ready = updater->canRestartToUpdate();
+    this->ui_.restartButton->setText(updater->isRollback()
+                                         ? "Restart and roll back"
+                                         : "Restart and update");
+    this->ui_.restartButton->setVisible(ready);
+    this->ui_.restartButton->setDefault(ready);
+    this->ui_.retryButton->setVisible(status == MoltorinoUpdateStatus::Error);
+    this->ui_.changelogButton->setVisible(
+        !updater->targetBuild().trimmed().isEmpty());
+    if (this->getLayoutContainer()->layout() != nullptr)
+    {
+        this->getLayoutContainer()->layout()->activate();
+    }
+    this->adjustSize();
 }
 
 }

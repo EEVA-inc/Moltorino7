@@ -1,5 +1,7 @@
 param (
-    [string] $InstallDir = "Chatterino2"
+    [string] $InstallDir = "Chatterino2",
+    [ValidateSet('x64', 'arm64', 'x86')]
+    [string] $Architecture = 'x64'
 )
 
 if ($null -eq $Env:VCToolsRedistDir) {
@@ -8,7 +10,7 @@ if ($null -eq $Env:VCToolsRedistDir) {
 }
 
 # A path to the runtime libraries (e.g. "$Env:VCToolsRedistDir\onecore\x64\Microsoft.VC143.CRT")
-$vclibs = (Get-ChildItem "$Env:VCToolsRedistDir\onecore\x64" -Filter '*.CRT')[0].FullName;
+$vclibs = (Get-ChildItem "$Env:VCToolsRedistDir\onecore\$Architecture" -Filter '*.CRT')[0].FullName;
 
 # All executables and libraries in the installation directory
 $targets = Get-ChildItem -Recurse -Include '*.dll', '*.exe' $InstallDir;

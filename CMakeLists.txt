@@ -1,9 +1,12 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.24)
 # CMake upgrade notes:
 #  - In CMake >= 3.29, we should deprecate USE_ALTERNATE_LINKER in favour of CMake's CMAKE_LINKER_TYPE
 set(CMAKE_EXPORT_NO_PACKAGE_REGISTRY On) # For rapidjson
 cmake_policy(SET CMP0087 NEW) # evaluates generator expressions in `install(CODE/SCRIPT)`
 cmake_policy(SET CMP0091 NEW) # select MSVC runtime library through `CMAKE_MSVC_RUNTIME_LIBRARY`
+if(POLICY CMP0207)
+    cmake_policy(SET CMP0207 NEW)
+endif()
 include(FeatureSummary)
 include(FetchContent)
 
@@ -11,24 +14,24 @@ list(APPEND CMAKE_MODULE_PATH
     "${CMAKE_SOURCE_DIR}/cmake"
     )
 
+if(WIN32 AND NOT MINGW)
+    include(EnableSegmentHeap)
+endif()
+
 option(BUILD_APP "Build Chatterino" ON)
 option(BUILD_TESTS "Build the tests for Chatterino" OFF)
 option(BUILD_BENCHMARKS "Build the benchmarks for Chatterino" OFF)
 option(USE_SYSTEM_PAJLADA_SETTINGS "Use system pajlada settings library" OFF)
 option(USE_SYSTEM_LIBCOMMUNI "Use system communi library" OFF)
-option(USE_SYSTEM_QTKEYCHAIN "Use system QtKeychain library" OFF)
-option(BUILD_WITH_QTKEYCHAIN "Build Chatterino with support for your system key chain" ON)
 option(USE_SYSTEM_MINIAUDIO "Build Chatterino with your system miniaudio" OFF)
 option(BUILD_WITH_CRASHPAD "Build chatterino with crashpad" OFF)
 option(USE_PRECOMPILED_HEADERS "Use precompiled headers (Temporarily not supported on macOS)" ON)
 option(BUILD_WITH_QT6 "Build with Qt6" On)
 option(BUILD_WITH_LIBNOTIFY "Build with libnotify" ON)
 option(CHATTERINO_GENERATE_COVERAGE "Generate coverage files" OFF)
-
-# We don't use translations, and we don't want qtkeychain to build translations
-option(BUILD_TRANSLATIONS "" OFF)
 option(BUILD_SHARED_LIBS "" OFF)
 option(CHATTERINO_LTO "Enable LTO for all targets" OFF)
+option(MOLTORINO_RELEASE_HARDENING "Enable Windows release linker settings" OFF)
 option(CHATTERINO_NO_AVIF_PLUGIN "Disable AVIF plugin" OFF)
 option(CHATTERINO_PLUGINS "Enable ALPHA plugin support in Chatterino" ON)
 option(CHATTERINO_USE_GDI_FONTENGINE "Use the legacy GDI fontengine instead of the new DirectWrite one on Windows (Qt 6.8.0 and later)" ON)
@@ -42,6 +45,42 @@ add_feature_info("Chatterino code sanitizer support" CHATTERINO_SANITIZER_SUPPOR
 
 option(CHATTERINO_UPDATER "Enable legacy Chatterino update checks" OFF)
 mark_as_advanced(CHATTERINO_UPDATER)
+
+option(MOLTORINO_VELOPACK "Enable Velopack updates" OFF)
+set(MOLTORINO_WINDOWS_APP_ID "" CACHE STRING "Windows app ID")
+if(MOLTORINO_WINDOWS_APP_ID)
+    string(LENGTH "${MOLTORINO_WINDOWS_APP_ID}" _moltorino_app_id_length)
+    if(NOT MOLTORINO_WINDOWS_APP_ID MATCHES "^[A-Za-z0-9][A-Za-z0-9._-]*$" OR
+       _moltorino_app_id_length GREATER 128)
+        message(FATAL_ERROR "Invalid MOLTORINO_WINDOWS_APP_ID: use up to 128 letters, digits, dots, underscores or hyphens.")
+    endif()
+endif()
+set(MOLTORINO_UPDATE_CHANNEL "stable" CACHE STRING "Update channel")
+set_property(CACHE MOLTORINO_UPDATE_CHANNEL PROPERTY STRINGS stable internal)
+if(NOT MOLTORINO_UPDATE_CHANNEL MATCHES "^(stable|internal)$")
+    message(FATAL_ERROR "MOLTORINO_UPDATE_CHANNEL must be stable or internal.")
+endif()
+
+option(MOLTORINO_YOUTUBE_ACCOUNTS "Enable YouTube accounts" ON)
+option(MOLTORINO_TIKTOK_ACCOUNTS "Enable TikTok accounts" ON)
+option(MOLTORINO_YOUTUBE_DIRECT_READ "Enable direct YouTube chat reading" ON)
+set(MOLTORINO_YOUTUBE_OAUTH_CLIENT_ID "" CACHE STRING "YouTube OAuth client ID")
+set(MOLTORINO_YOUTUBE_OAUTH_CLIENT_SECRET "" CACHE STRING "YouTube OAuth client secret")
+set(MOLTORINO_YOUTUBE_READ_ROOT "" CACHE STRING "YouTube read relay URL")
+if(NOT MOLTORINO_YOUTUBE_OAUTH_CLIENT_ID AND DEFINED ENV{MOLTORINO_YOUTUBE_OAUTH_CLIENT_ID})
+    set(MOLTORINO_YOUTUBE_OAUTH_CLIENT_ID "$ENV{MOLTORINO_YOUTUBE_OAUTH_CLIENT_ID}"
+        CACHE STRING "YouTube OAuth client ID" FORCE)
+endif()
+if(NOT MOLTORINO_YOUTUBE_OAUTH_CLIENT_SECRET AND DEFINED ENV{MOLTORINO_YOUTUBE_OAUTH_CLIENT_SECRET})
+    set(MOLTORINO_YOUTUBE_OAUTH_CLIENT_SECRET "$ENV{MOLTORINO_YOUTUBE_OAUTH_CLIENT_SECRET}"
+        CACHE STRING "YouTube OAuth client secret" FORCE)
+endif()
+mark_as_advanced(
+    MOLTORINO_YOUTUBE_OAUTH_CLIENT_ID
+    MOLTORINO_YOUTUBE_OAUTH_CLIENT_SECRET
+    MOLTORINO_YOUTUBE_READ_ROOT
+    MOLTORINO_YOUTUBE_DIRECT_READ
+)
 
 set(CHATTERINO_EXTRA_BUILD_STRING "" CACHE STRING "Provide an extra string to show in the about page under the Chatterino version. This string allows the use of Qt's HTML subset.")
 
@@ -63,10 +102,14 @@ if(BUILD_BENCHMARKS)
 endif()
 
 project(chatterino
-    VERSION 7.5.5
-    DESCRIPTION "Chat client for twitch.tv"
-    HOMEPAGE_URL "https://chatterino.com/"
+    VERSION 15.5.1
+    DESCRIPTION "Moltorino chat client"
+    HOMEPAGE_URL "https://moltorino.com/"
 )
+
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
 
 if(APPLE AND CHATTERINO_SPELLCHECK)
     message(STATUS "Spellcheck is disabled on macOS builds to avoid bundling Hunspell dylibs.")
@@ -89,6 +132,22 @@ if(CHATTERINO_LTO)
     message(STATUS "LTO: Enabled (Supported: ${CHATTERINO_ENABLE_LTO} - ${IPO_ERROR})")
 else()
     message(STATUS "LTO: Disabled")
+endif()
+
+if(MOLTORINO_RELEASE_HARDENING)
+    if(NOT WIN32 OR NOT MSVC)
+        message(FATAL_ERROR "MOLTORINO_RELEASE_HARDENING requires the Windows MSVC toolchain")
+    endif()
+    if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+        message(FATAL_ERROR "MOLTORINO_RELEASE_HARDENING requires a Release build")
+    endif()
+    if(NOT CHATTERINO_LTO OR NOT CHATTERINO_ENABLE_LTO)
+        message(FATAL_ERROR "MOLTORINO_RELEASE_HARDENING requires supported CHATTERINO_LTO=ON")
+    endif()
+    set(CMAKE_PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/private-symbols/$<CONFIG>")
+    set_property(GLOBAL APPEND PROPERTY JOB_POOLS moltorino_release_link=1)
+    set(CMAKE_JOB_POOL_LINK moltorino_release_link)
+    add_link_options("$<$<CONFIG:Release>:/DEBUG:FULL;/OPT:REF,ICF;/INCREMENTAL:NO;/CGTHREADS:1>")
 endif()
 
 if(BUILD_WITH_QT6)
@@ -168,7 +227,9 @@ find_package(Qt${MAJOR_QT_VERSION} REQUIRED
     Gui
     Network
     Svg
+    SvgWidgets
     Concurrent
+    Sql
 )
 
 find_package(Qt${MAJOR_QT_VERSION} COMPONENTS WidgetsPrivate QUIET)
@@ -180,17 +241,47 @@ endif()
 
 message(STATUS "Qt version: ${Qt${MAJOR_QT_VERSION}_VERSION}")
 
+if(APPLE AND TARGET WrapOpenGL::WrapOpenGL)
+    get_target_property(_qt_opengl_libraries WrapOpenGL::WrapOpenGL INTERFACE_LINK_LIBRARIES)
+    list(FILTER _qt_opengl_libraries EXCLUDE REGEX "(^-framework AGL$|/AGL[.]framework(/AGL)?$)")
+    set_property(TARGET WrapOpenGL::WrapOpenGL PROPERTY INTERFACE_LINK_LIBRARIES "${_qt_opengl_libraries}")
+    unset(_qt_opengl_libraries)
+endif()
+
 if(WIN32)
     add_subdirectory(lib/WinToast EXCLUDE_FROM_ALL)
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/WinToast.cmake)
+endif()
+
+if(BUILD_APP)
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/Velopack.cmake)
 endif()
 
 # Find boost on the system
-find_package(Boost REQUIRED CONFIG OPTIONAL_COMPONENTS headers)
+set(BOOST_REQUIRED_COMPONENTS "")
+if (VCPKG_TARGET_TRIPLET)
+    list(APPEND BOOST_REQUIRED_COMPONENTS json)
+endif ()
+find_package(Boost REQUIRED CONFIG COMPONENTS ${BOOST_REQUIRED_COMPONENTS} OPTIONAL_COMPONENTS headers)
 
 # Find OpenSSL on the system
 find_package(OpenSSL REQUIRED)
-
+if(MOLTORINO_YOUTUBE_ACCOUNTS OR MOLTORINO_TIKTOK_ACCOUNTS)
+    include(Keychain)
+endif()
+if(WIN32 AND MOLTORINO_TIKTOK_ACCOUNTS)
+    include(WebView2)
+endif()
 find_package(Threads REQUIRED)
+
+find_package(WebP QUIET CONFIG)
+if(TARGET WebP::webpdemux AND TARGET WebP::webp)
+    set(CHATTERINO_WEBP_TARGETS WebP::webpdemux WebP::webp)
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(WebP REQUIRED IMPORTED_TARGET libwebpdemux libwebp)
+    set(CHATTERINO_WEBP_TARGETS PkgConfig::WebP)
+endif()
 
 if(CHATTERINO_SPELLCHECK)
     # Find from package manager
@@ -200,6 +291,37 @@ if(CHATTERINO_SPELLCHECK)
         pkg_check_modules(hunspell REQUIRED IMPORTED_TARGET hunspell)
         add_library(hunspell::hunspell ALIAS PkgConfig::hunspell)
     endif()
+endif()
+
+find_package(libvpx QUIET CONFIG)
+find_package(webm QUIET CONFIG)
+find_package(libyuv QUIET CONFIG)
+if(NOT TARGET libvpx::libvpx)
+    find_path(VPX_INCLUDE_DIR vpx/vpx_decoder.h REQUIRED)
+    find_library(VPX_LIBRARY NAMES vpx REQUIRED)
+    add_library(libvpx::libvpx UNKNOWN IMPORTED)
+    set_target_properties(libvpx::libvpx PROPERTIES
+        IMPORTED_LOCATION "${VPX_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${VPX_INCLUDE_DIR}"
+    )
+endif()
+if(NOT TARGET webm::webm)
+    find_path(WEBM_INCLUDE_DIR webm/webm_parser.h REQUIRED)
+    find_library(WEBM_LIBRARY NAMES webm REQUIRED)
+    add_library(webm::webm UNKNOWN IMPORTED)
+    set_target_properties(webm::webm PROPERTIES
+        IMPORTED_LOCATION "${WEBM_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${WEBM_INCLUDE_DIR}"
+    )
+endif()
+if(NOT TARGET libyuv::libyuv)
+    find_path(YUV_INCLUDE_DIR libyuv/convert_argb.h REQUIRED)
+    find_library(YUV_LIBRARY NAMES yuv REQUIRED)
+    add_library(libyuv::libyuv UNKNOWN IMPORTED)
+    set_target_properties(libyuv::libyuv PROPERTIES
+        IMPORTED_LOCATION "${YUV_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${YUV_INCLUDE_DIR}"
+    )
 endif()
 
 find_library(LIBRT rt)
@@ -214,34 +336,6 @@ else()
     endif()
 
     add_subdirectory("${LIBCOMMUNI_ROOT_LIB_FOLDER}" EXCLUDE_FROM_ALL)
-endif()
-
-if(BUILD_WITH_QTKEYCHAIN)
-    # Link QtKeychain statically
-    if(USE_SYSTEM_QTKEYCHAIN)
-        find_package(Qt${MAJOR_QT_VERSION}Keychain REQUIRED)
-    else()
-        set(QTKEYCHAIN_ROOT_LIB_FOLDER "${CMAKE_SOURCE_DIR}/lib/qtkeychain")
-
-        if(NOT EXISTS "${QTKEYCHAIN_ROOT_LIB_FOLDER}/CMakeLists.txt")
-            message(FATAL_ERROR "Submodules probably not loaded, unable to find lib/qtkeychain/CMakeLists.txt")
-        endif()
-
-        set(_prev_testing ${BUILD_TESTING})
-        set(BUILD_TESTING Off)
-        add_subdirectory("${QTKEYCHAIN_ROOT_LIB_FOLDER}" EXCLUDE_FROM_ALL)
-        set(BUILD_TESTING ${_prev_testing})
-
-        if(NOT TARGET qt${MAJOR_QT_VERSION}keychain)
-            message(FATAL_ERROR "qt${MAJOR_QT_VERSION}keychain target was not created :@")
-        endif()
-
-        if(MSVC AND "${MAJOR_QT_VERSION}" STREQUAL "5")
-            target_compile_definitions(qt5keychain PRIVATE UNICODE)
-            target_compile_options(qt5keychain PRIVATE /utf-8)
-            set_target_properties(qt5keychain PROPERTIES CXX_STANDARD 17)
-        endif()
-    endif()
 endif()
 
 if (BUILD_TESTS)
@@ -283,19 +377,19 @@ FetchContent_Declare(
     PajladaSignals
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/lib/signals
     EXCLUDE_FROM_ALL
-    FIND_PACKAGE_ARGS CONFIG
+    FIND_PACKAGE_ARGS 0.1.3 CONFIG
 )
 FetchContent_Declare(
     PajladaSerialize
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/lib/serialize
     EXCLUDE_FROM_ALL
-    FIND_PACKAGE_ARGS CONFIG
+    FIND_PACKAGE_ARGS 0.3.0 CONFIG
 )
 FetchContent_Declare(
     PajladaSettings
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/lib/settings
     EXCLUDE_FROM_ALL
-    FIND_PACKAGE_ARGS CONFIG
+    FIND_PACKAGE_ARGS 0.5.1 CONFIG
 )
 
 FetchContent_MakeAvailable(RapidJSON PajladaSignals PajladaSerialize PajladaSettings)

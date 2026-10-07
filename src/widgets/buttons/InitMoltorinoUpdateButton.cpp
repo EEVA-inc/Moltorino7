@@ -1,6 +1,6 @@
 #include "widgets/buttons/InitMoltorinoUpdateButton.hpp"
 
-#include "providers/moltorino/MoltorinoPresence.hpp"
+#include "providers/moltorino/MoltorinoUpdater.hpp"
 #include "widgets/buttons/PixmapButton.hpp"
 
 namespace chatterino {
@@ -12,22 +12,28 @@ void initMoltorinoUpdateButton(PixmapButton &button,
     button.hide();
 
     QObject::connect(&button, &Button::leftClicked, [] {
-        getMoltorinoPresence()->installAvailableUpdate();
+        getMoltorinoUpdater()->requestUpdatePrompt();
     });
 
     auto updateButton = [&button, relayout] {
-        auto *presence = getMoltorinoPresence();
-        button.setVisible(presence->shouldShowUpdateButton());
-        button.setPixmap(QPixmap(presence->isUpdateError()
+        auto *updater = getMoltorinoUpdater();
+        const bool shouldShow = updater->shouldShowUpdateButton();
+        const bool visibilityChanged = button.isHidden() == shouldShow;
+        button.setVisible(shouldShow);
+        button.setPixmap(QPixmap(updater->isError()
                                      ? ":/buttons/updateError.png"
                                      : ":/buttons/update.png"));
-        button.setDim(presence->isUpdateBusy() ? DimButton::Dim::Lots
-                                               : DimButton::Dim::Some);
-        relayout();
+        button.setDim(updater->isBusy() ? DimButton::Dim::Lots
+                                        : DimButton::Dim::Some);
+        button.setToolTip(updater->statusText());
+        if (visibilityChanged)
+        {
+            relayout();
+        }
     };
 
     updateButton();
-    signalHolder.managedConnect(getMoltorinoPresence()->updateStateChanged,
+    signalHolder.managedConnect(getMoltorinoUpdater()->stateChanged,
                                 [updateButton] {
                                     updateButton();
                                 });

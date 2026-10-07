@@ -34,6 +34,8 @@ case "$ubuntu_release" in
         ;;
 esac
 
+dependencies="$dependencies, libwebkit2gtk-4.1-0 (>= 2.42), libjson-glib-1.0-0, libwebpdemux2, libwebp7, libsecret-1-0"
+
 echo "Building Ubuntu .deb file on '$ubuntu_release'"
 echo "Dependencies: $dependencies"
 
