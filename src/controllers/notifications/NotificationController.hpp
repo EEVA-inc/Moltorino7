@@ -9,6 +9,7 @@
 #include "util/QCompareTransparent.hpp"
 
 #include <QTimer>
+#include <QUrl>
 
 namespace chatterino {
 
@@ -20,6 +21,7 @@ class NotificationModel;
 
 enum class Platform : uint8_t {
     Twitch,
+    YouTube,
 };
 
 class NotificationController final
@@ -29,10 +31,14 @@ public:
 
     void initialize();
 
-    bool isChannelNotified(const QString &channelName, Platform p) const;
-    void updateChannelNotification(const QString &channelName, Platform p);
-    void addChannelNotification(const QString &channelName, Platform p);
-    void removeChannelNotification(const QString &channelName, Platform p);
+    bool isChannelNotified(const QString &channelName, Platform p,
+                           const QString &resolvedChannelId = {}) const;
+    void updateChannelNotification(const QString &channelName, Platform p,
+                                   const QString &resolvedChannelId = {});
+    void addChannelNotification(const QString &channelName, Platform p,
+                                const QString &resolvedChannelId = {});
+    void removeChannelNotification(const QString &channelName, Platform p,
+                                   const QString &resolvedChannelId = {});
 
     struct NotificationPayload {
         QString channelId;
@@ -40,9 +46,13 @@ public:
         QString displayName;
         QString title;
         bool isInitialUpdate = false;
+        Platform platform = Platform::Twitch;
+        QUrl url;
+        QString resolvedChannelId;
+        bool isDuplicateBroadcast = false;
     };
 
-    void notifyTwitchChannelLive(const NotificationPayload &payload) const;
+    void notifyChannelLive(const NotificationPayload &payload) const;
 
     void notifyTwitchChannelOffline(const QString &id) const;
 
@@ -69,6 +79,8 @@ private:
 
     ChatterinoSetting<std::vector<QString>> twitchSetting_ = {
         "/notifications/twitch"};
+    ChatterinoSetting<std::vector<QString>> youtubeSetting_ = {
+        "/moltorino/notifications/youtube"};
 };
 
 }

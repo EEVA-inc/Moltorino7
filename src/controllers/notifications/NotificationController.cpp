@@ -10,8 +10,10 @@
 #include "controllers/sound/ISoundController.hpp"
 #include "messages/Message.hpp"
 #include "messages/MessageBuilder.hpp"
+#include "messages/MessageElement.hpp"
 #include "providers/twitch/api/Helix.hpp"
 #include "providers/twitch/TwitchIrcServer.hpp"
+#include "providers/youtube/YouTubeApi.hpp"
 #include "singletons/Settings.hpp"
 #include "singletons/StreamerMode.hpp"
 #include "singletons/Toasts.hpp"
@@ -28,6 +30,16 @@ namespace chatterino {
 
 NotificationController::NotificationController()
 {
+    for (const QString &channelName : this->youtubeSetting_.getValue())
+    {
+        this->channelMap[Platform::YouTube].append(
+            YouTubeApi::normalizeSource(channelName));
+    }
+    std::ignore =
+        this->channelMap[Platform::YouTube].delayedItemsChanged.connect([this] {
+            this->youtubeSetting_.setValue(
+                this->channelMap[Platform::YouTube].raw());
+        });
     for (const QString &channelName : this->twitchSetting_.getValue())
     {
         this->channelMap[Platform::Twitch].append(channelName);
@@ -51,40 +63,71 @@ void NotificationController::initialize()
 }
 
 void NotificationController::updateChannelNotification(
-    const QString &channelName, Platform p)
+    const QString &channelName, Platform p, const QString &resolvedChannelId)
 {
-    if (this->isChannelNotified(channelName, p))
+    if (this->isChannelNotified(channelName, p, resolvedChannelId))
     {
-        this->removeChannelNotification(channelName, p);
+        this->removeChannelNotification(channelName, p, resolvedChannelId);
     }
     else
     {
-        this->addChannelNotification(channelName, p);
+        this->addChannelNotification(channelName, p, resolvedChannelId);
     }
 }
 
-bool NotificationController::isChannelNotified(const QString &channelName,
-                                               Platform p) const
+bool NotificationController::isChannelNotified(
+    const QString &channelName, Platform p,
+    const QString &resolvedChannelId) const
 {
+    const auto normalized = p == Platform::YouTube
+                                ? YouTubeApi::normalizeSource(channelName)
+                                : channelName;
+    const auto canonical = resolvedChannelId.isEmpty()
+                               ? QString{}
+                               : QStringLiteral("channel:") + resolvedChannelId;
     return ranges::any_of(this->channelMap.at(p).raw(), [&](const auto &name) {
-        return name.compare(channelName, Qt::CaseInsensitive) == 0;
+        return p == Platform::YouTube
+                   ? name == normalized ||
+                         (!canonical.isEmpty() && name == canonical)
+                   : name.compare(channelName, Qt::CaseInsensitive) == 0;
     });
 }
 
-void NotificationController::addChannelNotification(const QString &channelName,
-                                                    Platform p)
+void NotificationController::addChannelNotification(
+    const QString &channelName, Platform p, const QString &resolvedChannelId)
 {
-    this->channelMap[p].append(channelName);
+    if (this->isChannelNotified(channelName, p, resolvedChannelId))
+    {
+        return;
+    }
+
+    auto name = channelName;
+    if (p == Platform::YouTube)
+    {
+        name = resolvedChannelId.isEmpty()
+                   ? YouTubeApi::normalizeSource(channelName)
+                   : QStringLiteral("channel:") + resolvedChannelId;
+    }
+    this->channelMap[p].append(name);
 }
 
 void NotificationController::removeChannelNotification(
-    const QString &channelName, Platform p)
+    const QString &channelName, Platform p, const QString &resolvedChannelId)
 {
+    const auto normalized = p == Platform::YouTube
+                                ? YouTubeApi::normalizeSource(channelName)
+                                : channelName;
+    const auto canonical = resolvedChannelId.isEmpty()
+                               ? QString{}
+                               : QStringLiteral("channel:") + resolvedChannelId;
     for (std::vector<int>::size_type i = 0;
          i != this->channelMap[p].raw().size(); i++)
     {
-        if (this->channelMap[p].raw()[i].compare(channelName,
-                                                 Qt::CaseInsensitive) == 0)
+        const auto &name = this->channelMap[p].raw()[i];
+        if (p == Platform::YouTube
+                ? name == normalized ||
+                      (!canonical.isEmpty() && name == canonical)
+                : name.compare(channelName, Qt::CaseInsensitive) == 0)
         {
             this->channelMap[p].removeAt(static_cast<int>(i));
             i--;
@@ -106,15 +149,16 @@ void NotificationController::playSound() const
 NotificationModel *NotificationController::createModel(QObject *parent,
                                                        Platform p)
 {
-    auto *model = new NotificationModel(parent);
+    auto *model = new NotificationModel(parent, p);
     model->initialize(&this->channelMap[p]);
     return model;
 }
 
-void NotificationController::notifyTwitchChannelLive(
+void NotificationController::notifyChannelLive(
     const NotificationPayload &payload) const
 {
     bool showNotification =
+        !payload.isDuplicateBroadcast &&
         !(getSettings()->suppressInitialLiveNotification &&
           payload.isInitialUpdate) &&
         !(getApp()->getStreamerMode()->isEnabled() &&
@@ -122,12 +166,14 @@ void NotificationController::notifyTwitchChannelLive(
     bool playedSound = false;
 
     if (showNotification &&
-        this->isChannelNotified(payload.channelName, Platform::Twitch))
+        this->isChannelNotified(payload.channelName, payload.platform,
+                                payload.resolvedChannelId))
     {
         if (Toasts::isEnabled())
         {
-            getApp()->getToasts()->sendChannelNotification(payload.channelName,
-                                                           payload.title);
+            getApp()->getToasts()->sendChannelNotification(
+                payload.channelName, payload.title, payload.url,
+                payload.displayName);
         }
         if (getSettings()->notificationPlaySound)
         {
@@ -140,10 +186,34 @@ void NotificationController::notifyTwitchChannelLive(
         }
     }
 
-    getApp()->getTwitch()->getLiveChannel()->addMessage(
-        MessageBuilder::makeLiveMessage(payload.displayName, payload.channelId,
-                                        payload.title),
-        MessageContext::Original);
+    auto liveChannel = getApp()->getTwitch()->getLiveChannel();
+    if (payload.platform == Platform::YouTube)
+    {
+        MessageBuilder builder;
+        builder.emplace<TimestampElement>();
+        builder->messageText =
+            getSettings()->showTitleInLiveMessage
+                ? QString("%1 is live: %2")
+                      .arg(payload.displayName, payload.title)
+                : QString("%1 is live!").arg(payload.displayName);
+        builder->searchText = builder->messageText;
+        builder
+            .emplace<TextElement>(builder->messageText,
+                                  MessageElementFlag::Text, MessageColor::Text)
+            ->setLink({Link::Url, payload.url.toString()});
+        builder->id = payload.channelId;
+        builder->channelName = payload.channelName;
+        builder->platform = MessagePlatform::YouTube;
+        builder->flags.set(MessageFlag::DoNotLog);
+        liveChannel->addMessage(builder.release(), MessageContext::Original);
+    }
+    else
+    {
+        liveChannel->addMessage(
+            MessageBuilder::makeLiveMessage(payload.displayName,
+                                            payload.channelId, payload.title),
+            MessageContext::Original);
+    }
 
     if (showNotification && !playedSound &&
         getSettings()->notificationOnAnyChannel)
@@ -262,7 +332,7 @@ void NotificationController::updateFakeChannel(
         return;
     }
 
-    this->notifyTwitchChannelLive({
+    this->notifyChannelLive({
         .channelId = stream->userId,
         .channelName = channelName,
         .displayName = stream->userName,

@@ -8,13 +8,17 @@
 
 #include <QObject>
 
+#include <cstdint>
+
 namespace chatterino {
 
 class NotificationController;
+enum class Platform : uint8_t;
 
 class NotificationModel : public SignalVectorModel<QString>
 {
-    explicit NotificationModel(QObject *parent);
+    explicit NotificationModel(QObject *parent, Platform platform);
+    Platform platform_;
 
 protected:
 

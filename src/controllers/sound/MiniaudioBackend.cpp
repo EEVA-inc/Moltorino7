@@ -112,6 +112,8 @@ MiniaudioBackend::MiniaudioBackend(bool keepEngineAlive_)
             return;
         }
 
+        this->contextInitialized = true;
+
         QFile defaultPingFile(":/sounds/ping2.wav");
         if (!defaultPingFile.open(QIODevice::ReadOnly))
         {
@@ -133,6 +135,8 @@ MiniaudioBackend::MiniaudioBackend(bool keepEngineAlive_)
             this->state = State::Failed;
             return;
         }
+
+        this->engineInitialized = true;
 
         if (this->keepEngineAlive)
         {
@@ -188,6 +192,7 @@ MiniaudioBackend::MiniaudioBackend(bool keepEngineAlive_)
                     qCWarning(chatterinoSound)
                         << "Error initializing default sound from data source:"
                         << result;
+                    ma_decoder_uninit(dec.get());
                     this->state = State::Failed;
                     return;
                 }
@@ -199,7 +204,8 @@ MiniaudioBackend::MiniaudioBackend(bool keepEngineAlive_)
 
         qCInfo(chatterinoSound) << "miniaudio sound system initialized";
 
-        this->state = State::Initialized;
+        auto expected = State::Uninitialized;
+        this->state.compare_exchange_strong(expected, State::Initialized);
     });
 
     this->audioThread = std::make_unique<std::thread>([this] {
@@ -217,6 +223,7 @@ MiniaudioBackend::~MiniaudioBackend()
     this->state = State::Stopping;
 
     boost::asio::post(this->ioContext, [this] {
+        this->sleepTimer.cancel();
         for (const auto &snd : this->defaultPingSounds)
         {
             ma_sound_uninit(snd.get());
@@ -226,23 +233,26 @@ MiniaudioBackend::~MiniaudioBackend()
             ma_decoder_uninit(dec.get());
         }
 
-        ma_engine_uninit(this->engine.get());
-        ma_context_uninit(this->context.get());
+        if (this->engineInitialized)
+        {
+            ma_engine_uninit(this->engine.get());
+        }
+        if (this->contextInitialized)
+        {
+            ma_context_uninit(this->context.get());
+        }
     });
 
     this->workGuard.reset();
-    this->sleepTimer.cancel();
 
     if (this->audioThread->joinable())
     {
-        if (this->stoppedFlag.waitFor(std::chrono::seconds{1}))
+        if (!this->stoppedFlag.waitFor(std::chrono::seconds{1}))
         {
-            this->audioThread->join();
-            return;
+            qCWarning(chatterinoSound) << "Waiting for audio cleanup to finish";
         }
 
-        qCWarning(chatterinoSound)
-            << "Audio thread did not stop within 1 second";
+        this->audioThread->join();
     }
 }
 
@@ -285,23 +295,24 @@ void MiniaudioBackend::play(const QUrl &sound)
                                            << soundPath << ":" << result;
             }
 
-            return;
         }
-
-        auto &snd = this->defaultPingSounds[++i % NUM_SOUNDS];
-        ma_sound_seek_to_pcm_frame(snd.get(), 0);
-        result = ma_sound_start(snd.get());
-        if (result != MA_SUCCESS)
+        else
         {
-            qCWarning(chatterinoSound)
-                << "Failed to play default ping" << result;
+            auto &snd = this->defaultPingSounds[++i % NUM_SOUNDS];
+            ma_sound_seek_to_pcm_frame(snd.get(), 0);
+            result = ma_sound_start(snd.get());
+            if (result != MA_SUCCESS)
+            {
+                qCWarning(chatterinoSound)
+                    << "Failed to play default ping" << result;
+            }
         }
 
         if (!this->keepEngineAlive)
         {
             this->sleepTimer.expires_after(STOP_AFTER_DURATION);
             this->sleepTimer.async_wait([this](const auto &ec) {
-                if (ec)
+                if (ec || this->state != State::Initialized)
                 {
 
                     return;

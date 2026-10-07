@@ -53,6 +53,8 @@ private:
     std::unique_ptr<ma_context> context;
 
     std::unique_ptr<ma_engine> engine;
+    bool contextInitialized = false;
+    bool engineInitialized = false;
 
     QByteArray defaultPingData;
 

@@ -6,6 +6,7 @@
 
 #include <pajlada/settings/setting.hpp>
 #include <QString>
+#include <QUrl>
 
 namespace chatterino {
 
@@ -23,7 +24,9 @@ public:
     ~Toasts();
 
     void sendChannelNotification(const QString &channelName,
-                                 const QString &channelTitle);
+                                 const QString &channelTitle,
+                                 const QUrl &url = {},
+                                 const QString &displayName = {});
     bool sendHighlightNotification(const QString &channelName,
                                    const QString &title, const QString &body,
                                    const QString &messageId);

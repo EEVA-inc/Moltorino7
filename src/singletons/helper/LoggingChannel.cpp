@@ -51,6 +51,53 @@ QString generateClosingString(
     return ret;
 }
 
+QString filesystemSafeComponent(const QString &value)
+{
+    QString result;
+    result.reserve(value.size());
+
+    static const auto invalidCharacters = QStringLiteral("<>:\"/\\|?*%");
+    for (qsizetype index = 0; index < value.size(); ++index)
+    {
+        const auto character = value.at(index);
+        const bool invalid = character.unicode() < 0x20 ||
+                             invalidCharacters.contains(character) ||
+                             (index == value.size() - 1 &&
+                              (character == u'.' || character == u' '));
+        if (invalid)
+        {
+            result += u'%';
+            result += QString::number(character.unicode(), 16)
+                          .rightJustified(4, u'0')
+                          .toUpper();
+        }
+        else
+        {
+            result += character;
+        }
+    }
+
+    if (result.isEmpty())
+    {
+        return QStringLiteral("_");
+    }
+
+    const auto deviceName = result.section(u'.', 0, 0).toUpper();
+    if (deviceName == QStringLiteral("CON") ||
+        deviceName == QStringLiteral("PRN") ||
+        deviceName == QStringLiteral("AUX") ||
+        deviceName == QStringLiteral("NUL") ||
+        (deviceName.size() == 4 &&
+         (deviceName.startsWith(QStringLiteral("COM")) ||
+          deviceName.startsWith(QStringLiteral("LPT"))) &&
+         deviceName.at(3) >= u'1' && deviceName.at(3) <= u'9'))
+    {
+        result.prepend(u'_');
+    }
+
+    return result;
+}
+
 QString generateDateString(const QDateTime &now)
 {
     return now.toString("yyyy-MM-dd");
@@ -62,6 +109,7 @@ namespace chatterino {
 
 LoggingChannel::LoggingChannel(QString _channelName, QString _platform)
     : channelName(std::move(_channelName))
+    , fileSystemName(filesystemSafeComponent(this->channelName))
     , platform(std::move(_platform))
 {
     if (this->channelName.startsWith("/whispers"))
@@ -82,25 +130,32 @@ LoggingChannel::LoggingChannel(QString _channelName, QString _platform)
     }
     else
     {
-        this->subDirectory =
-            QStringLiteral("Channels") + QDir::separator() + this->channelName;
+        this->subDirectory = QStringLiteral("Channels") + QDir::separator() +
+                             this->fileSystemName;
     }
 
     this->subDirectory = this->platform[0].toUpper() +
                          this->platform.mid(1).toLower() + QDir::separator() +
                          this->subDirectory;
 
-    getSettings()->logPath.connect([this](const QString &logPath, auto) {
-        this->baseDirectory = logPath.isEmpty()
-                                  ? getApp()->getPaths().messageLogDirectory
+    getSettings()->logPath.connect(
+        [this](const QString &logPath, auto) {
+            this->baseDirectory =
+                logPath.isEmpty() ? getApp()->getPaths().messageLogDirectory
                                   : logPath;
-        this->openLogFile();
-    });
+            this->openLogFile();
+            this->currentStreamFileHandle.close();
+            this->currentStreamID.clear();
+        },
+        this->settingConnections_);
 }
 
 LoggingChannel::~LoggingChannel()
 {
-    appendLine(this->fileHandle, generateClosingString());
+    if (this->fileHandle.isOpen())
+    {
+        appendLine(this->fileHandle, generateClosingString());
+    }
     this->fileHandle.close();
     this->currentStreamFileHandle.close();
 }
@@ -116,7 +171,8 @@ void LoggingChannel::openLogFile()
         this->fileHandle.close();
     }
 
-    QString baseFileName = this->channelName + "-" + this->dateString + ".log";
+    QString baseFileName =
+        this->fileSystemName + "-" + this->dateString + ".log";
 
     QString directory =
         this->baseDirectory + QDir::separator() + this->subDirectory;
@@ -152,7 +208,8 @@ void LoggingChannel::openStreamLogFile(const QString &streamID)
         this->currentStreamFileHandle.close();
     }
 
-    QString baseFileName = this->channelName + "-" + streamID + ".log";
+    QString baseFileName =
+        this->fileSystemName + "-" + filesystemSafeComponent(streamID) + ".log";
 
     QString directory =
         this->baseDirectory + QDir::separator() + this->subDirectory;
@@ -244,18 +301,24 @@ void LoggingChannel::addMessage(const MessagePtr &message,
             {
                 rootMessageChatter = message->replyParent->loginName;
             }
-            else
+            else if (message->replyThread)
             {
 
                 rootMessageChatter = message->replyThread->root()->loginName;
             }
-            messageText.insert(colonIndex + 1, " @" + rootMessageChatter);
+            if (!rootMessageChatter.isEmpty())
+            {
+                messageText.insert(colonIndex + 1, " @" + rootMessageChatter);
+            }
         }
     }
     str.append(messageText);
     str.append(ENDLINE);
 
-    appendLine(this->fileHandle, str);
+    if (this->fileHandle.isOpen())
+    {
+        appendLine(this->fileHandle, str);
+    }
 
     if (!streamID.isEmpty() && getSettings()->separatelyStoreStreamLogs)
     {
@@ -264,7 +327,10 @@ void LoggingChannel::addMessage(const MessagePtr &message,
             this->openStreamLogFile(streamID);
         }
 
-        appendLine(this->currentStreamFileHandle, str);
+        if (this->currentStreamFileHandle.isOpen())
+        {
+            appendLine(this->currentStreamFileHandle, str);
+        }
     }
 }
 

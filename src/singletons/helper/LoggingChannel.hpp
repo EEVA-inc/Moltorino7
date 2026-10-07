@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <pajlada/signals/signalholder.hpp>
 #include <QFile>
 #include <QString>
 
@@ -35,6 +36,7 @@ private:
     void openStreamLogFile(const QString &streamID);
 
     const QString channelName;
+    const QString fileSystemName;
     const QString platform;
     QString baseDirectory;
     QString subDirectory;
@@ -44,6 +46,7 @@ private:
     QString currentStreamID;
 
     QString dateString;
+    pajlada::Signals::SignalHolder settingConnections_;
 
     friend class Logging;
 };

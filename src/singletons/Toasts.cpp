@@ -43,9 +43,26 @@ namespace {
 using namespace chatterino;
 using namespace literals;
 
+void activateHighlightNotification(const QString &channelName,
+                                   const QString &messageId)
+{
+    const QUrl url(channelName);
+    if (url.scheme() == u"https" && url.host() == u"www.youtube.com")
+    {
+        if (static_cast<ToastReaction>(
+                getSettings()->openFromToast.getValue()) !=
+            ToastReaction::DontOpen)
+        {
+            QDesktopServices::openUrl(url);
+        }
+        return;
+    }
+    getApp()->getWindows()->openChannelOrMessageFromTray(channelName,
+                                                         messageId);
+}
+
 QString avatarFilePath(const QString &channelName)
 {
-
     return getApp()->getPaths().twitchProfileAvatars % '/' % channelName %
            u".png";
 }
@@ -181,8 +198,7 @@ void onHighlightAction(NotifyNotification *notif, const char * ,
         const auto channelName = data->channelName;
         const auto messageId = data->messageId;
         runInGuiThread([channelName, messageId] {
-            getApp()->getWindows()->openChannelOrMessageFromTray(channelName,
-                                                                 messageId);
+            activateHighlightNotification(channelName, messageId);
         });
     }
 
@@ -261,8 +277,17 @@ QString Toasts::findStringFromReaction(
 }
 
 void Toasts::sendChannelNotification(const QString &channelName,
-                                     const QString &channelTitle)
+                                     const QString &channelTitle,
+                                     const QUrl &url,
+                                     const QString &displayName)
 {
+    if (!url.isEmpty())
+    {
+        this->sendHighlightNotification(url.toString(),
+                                        QString("%1 is live").arg(displayName),
+                                        channelTitle, {});
+        return;
+    }
 #ifdef Q_OS_WIN
     auto sendChannelNotification = [this, channelName, channelTitle] {
         this->sendWindowsNotification(channelName, channelTitle);
@@ -345,10 +370,12 @@ public:
     }
     void toastActivated() const override
     {
-        auto toastReaction =
-            static_cast<ToastReaction>(getSettings()->openFromToast.getValue());
-
-        performReaction(toastReaction, channelName_);
+        const auto channelName = this->channelName_;
+        runInGuiThread([channelName] {
+            auto toastReaction = static_cast<ToastReaction>(
+                getSettings()->openFromToast.getValue());
+            performReaction(toastReaction, channelName);
+        });
     }
 
     void toastActivated(int actionIndex) const override
@@ -387,8 +414,7 @@ public:
         const auto messageId = this->messageId_;
 
         runInGuiThread([channelName, messageId] {
-            getApp()->getWindows()->openChannelOrMessageFromTray(channelName,
-                                                                 messageId);
+            activateHighlightNotification(channelName, messageId);
         });
     }
 
@@ -423,8 +449,11 @@ void Toasts::ensureInitialized()
     this->initialized_ = true;
 
     auto *instance = WinToast::instance();
-    instance->setAppName(L"Moltorino7");
-    instance->setAppUserModelId(Version::instance().appUserModelID());
+    const auto &appId = Version::instance().appUserModelID();
+    const bool official = appId == L"MoltoBenne.Moltorino7" ||
+                          appId == L"MoltoBenne.Moltorino7UpdaterTest";
+    instance->setAppName(official ? L"Moltorino7" : appId);
+    instance->setAppUserModelId(appId);
     if (isRunningFromBuildTree() || !getSettings()->createShortcutForToasts)
     {
         instance->setShortcutPolicy(WinToast::SHORTCUT_POLICY_IGNORE);
@@ -497,7 +526,8 @@ void Toasts::sendWindowsNotification(const QString &channelName,
     QString avatarPath;
     avatarPath = avatarFilePath(channelName);
     templ.setImagePath(avatarPath.toStdWString());
-    if (getSettings()->notificationPlaySound)
+    if (getSettings()->notificationPlaySound ||
+        getSettings()->notificationOnAnyChannel)
     {
         templ.setAudioOption(WinToastTemplate::AudioOption::Silent);
     }

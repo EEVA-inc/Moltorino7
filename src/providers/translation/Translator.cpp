@@ -2,10 +2,18 @@
 
 #include "common/network/NetworkRequest.hpp"
 #include "common/network/NetworkResult.hpp"
+#include "providers/translation/TranslationRequest.hpp"
+#include "singletons/Settings.hpp"
 
 #include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QJsonValue>
 #include <QHash>
+#include <QPointer>
+#include <QRegularExpression>
+#include <QSet>
+#include <QTextDocumentFragment>
 #include <QUrl>
 #include <QUrlQuery>
 
@@ -17,43 +25,593 @@ namespace chatterino {
 namespace {
 
 constexpr int MAX_TRANSLATION_TEXT_LENGTH = 1200;
+constexpr qsizetype MAX_TRANSLATION_RESPONSE_BYTES = 1024 * 1024;
 
-std::optional<TranslationResult> parseGoogleTranslationResult(
-    const NetworkResult &result)
+const QHash<QChar, QString> &morseAlphabet()
 {
-    const auto root = result.parseJsonArray();
-    const auto segments = root.isEmpty() ? QJsonArray{} : root.at(0).toArray();
-    if (segments.isEmpty())
-    {
-        return std::nullopt;
-    }
+    static const QHash<QChar, QString> alphabet{
+        {'A', QStringLiteral(".-")},      {'B', QStringLiteral("-...")},
+        {'C', QStringLiteral("-.-.")},    {'D', QStringLiteral("-..")},
+        {'E', QStringLiteral(".")},       {'F', QStringLiteral("..-.")},
+        {'G', QStringLiteral("--.")},     {'H', QStringLiteral("....")},
+        {'I', QStringLiteral("..")},      {'J', QStringLiteral(".---")},
+        {'K', QStringLiteral("-.-")},     {'L', QStringLiteral(".-..")},
+        {'M', QStringLiteral("--")},      {'N', QStringLiteral("-.")},
+        {'O', QStringLiteral("---")},     {'P', QStringLiteral(".--.")},
+        {'Q', QStringLiteral("--.-")},    {'R', QStringLiteral(".-.")},
+        {'S', QStringLiteral("...")},     {'T', QStringLiteral("-")},
+        {'U', QStringLiteral("..-")},     {'V', QStringLiteral("...-")},
+        {'W', QStringLiteral(".--")},     {'X', QStringLiteral("-..-")},
+        {'Y', QStringLiteral("-.--")},    {'Z', QStringLiteral("--..")},
+        {'0', QStringLiteral("-----")},   {'1', QStringLiteral(".----")},
+        {'2', QStringLiteral("..---")},   {'3', QStringLiteral("...--")},
+        {'4', QStringLiteral("....-")},   {'5', QStringLiteral(".....")},
+        {'6', QStringLiteral("-....")},   {'7', QStringLiteral("--...")},
+        {'8', QStringLiteral("---..")},   {'9', QStringLiteral("----.")},
+        {'.', QStringLiteral(".-.-.-")},  {',', QStringLiteral("--..--")},
+        {'?', QStringLiteral("..--..")},  {'\'', QStringLiteral(".----.")},
+        {'!', QStringLiteral("-.-.--")},  {'/', QStringLiteral("-..-.")},
+        {'(', QStringLiteral("-.--.")},   {')', QStringLiteral("-.--.-")},
+        {'&', QStringLiteral(".-...")},   {':', QStringLiteral("---...")},
+        {';', QStringLiteral("-.-.-.")},  {'=', QStringLiteral("-...-")},
+        {'+', QStringLiteral(".-.-.")},   {'-', QStringLiteral("-....-")},
+        {'_', QStringLiteral("..--.-")},  {'"', QStringLiteral(".-..-.")},
+        {'$', QStringLiteral("...-..-")}, {'@', QStringLiteral(".--.-.")},
+    };
+    return alphabet;
+}
 
-    QString translated;
-    for (const auto &segmentValue : segments)
-    {
-        const auto segment = segmentValue.toArray();
-        if (!segment.isEmpty())
+const QHash<QString, QString> &morseDecodingAlphabet()
+{
+    static const auto alphabet = [] {
+        QHash<QString, QString> decoded;
+        for (auto it = morseAlphabet().cbegin(); it != morseAlphabet().cend();
+             ++it)
         {
-            translated += segment.at(0).toString();
+            decoded.insert(it.value(), QString(it.key()));
+        }
+        return decoded;
+    }();
+    return alphabet;
+}
+
+const QRegularExpression &protectedEmotePlaceholder()
+{
+    static const QRegularExpression placeholder(
+        QStringLiteral(R"(^MOLTOEMOTE\d{4}$)"));
+    return placeholder;
+}
+
+QString normalizeMorseNotation(QString text)
+{
+    for (qsizetype i = 0; i < text.size(); ++i)
+    {
+        switch (text.at(i).unicode())
+        {
+            case 0x00B7:
+            case 0x2022:
+            case 0x22C5:
+                text[i] = QLatin1Char('.');
+                break;
+            case 0x2212:
+            case 0x2013:
+            case 0x2014:
+            case '_':
+                text[i] = QLatin1Char('-');
+                break;
+            default:
+                break;
         }
     }
-    translated = translated.trimmed();
-    if (translated.isEmpty())
+    return text.trimmed();
+}
+
+QString encodeMorseWord(const QString &word)
+{
+    if (protectedEmotePlaceholder().match(word).hasMatch())
+    {
+        return word;
+    }
+
+    const auto normalized =
+        word.normalized(QString::NormalizationForm_D).toUpper();
+    QStringList encoded;
+    encoded.reserve(normalized.size());
+    const auto &alphabet = morseAlphabet();
+    for (const auto codePoint : normalized.toUcs4())
+    {
+        if (QChar::category(static_cast<char32_t>(codePoint)) ==
+            QChar::Mark_NonSpacing)
+        {
+            continue;
+        }
+
+        if (codePoint <= 0xFFFF)
+        {
+            const QChar character(static_cast<char16_t>(codePoint));
+            const auto it = alphabet.constFind(character);
+            encoded.push_back(it == alphabet.cend() ? QString(character) : *it);
+        }
+        else
+        {
+            const auto unicodeCharacter = static_cast<char32_t>(codePoint);
+            encoded.push_back(QString::fromUcs4(&unicodeCharacter, 1));
+        }
+    }
+    return encoded.join(QLatin1Char(' '));
+}
+
+QString encodeTextToMorse(const QString &text)
+{
+    QStringList encodedWords;
+    for (const auto &word : text.split(
+             QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts))
+    {
+        encodedWords.push_back(encodeMorseWord(word));
+    }
+    return encodedWords.join(QStringLiteral(" / "));
+}
+
+std::optional<QString> decodeTextFromMorse(const QString &text,
+                                           int minimumTokenCount,
+                                           bool requireLanguageConfidence)
+{
+    const auto normalized = normalizeMorseNotation(text);
+    if (normalized.isEmpty())
     {
         return std::nullopt;
     }
 
-    auto detectedLanguage = root.size() > 2
-                                ? normalizedLanguageCode(root.at(2).toString())
-                                : QString{};
+    static const QRegularExpression separator(QStringLiteral(R"([/|\s]+)"));
+    static const QRegularExpression morseToken(QStringLiteral(R"(^[.-]+$)"));
 
-    return TranslationResult{
-        .translatedText = translated,
-        .detectedLanguage = detectedLanguage,
+    QString currentWord;
+    QStringList decodedWords;
+    QSet<QString> distinctMorseTokens;
+    int morseTokenCount = 0;
+    bool hasExplicitWordSeparator = false;
+    bool hasCompactSos = false;
+
+    const auto finishWord = [&] {
+        if (!currentWord.isEmpty())
+        {
+            decodedWords.push_back(std::move(currentWord));
+            currentWord.clear();
+        }
     };
+
+    const auto decodeToken = [&](const QString &token) {
+        if (token.isEmpty())
+        {
+            return true;
+        }
+
+        if (protectedEmotePlaceholder().match(token).hasMatch())
+        {
+            finishWord();
+            decodedWords.push_back(token);
+            return true;
+        }
+
+        if (morseToken.match(token).hasMatch())
+        {
+            if (token == QStringLiteral("...---..."))
+            {
+                currentWord += QStringLiteral("SOS");
+                distinctMorseTokens.insert(QStringLiteral("..."));
+                distinctMorseTokens.insert(QStringLiteral("---"));
+                morseTokenCount += 3;
+                hasCompactSos = true;
+                return true;
+            }
+
+            const auto it = morseDecodingAlphabet().constFind(token);
+            if (it == morseDecodingAlphabet().cend())
+            {
+                return false;
+            }
+
+            currentWord += *it;
+            distinctMorseTokens.insert(token);
+            ++morseTokenCount;
+            return true;
+        }
+
+        for (const auto codePoint : token.toUcs4())
+        {
+            if (QChar::isLetterOrNumber(static_cast<char32_t>(codePoint)))
+            {
+                return false;
+            }
+        }
+
+        finishWord();
+        decodedWords.push_back(token);
+        return true;
+    };
+
+    qsizetype tokenStart = 0;
+    auto separators = separator.globalMatch(normalized);
+    while (separators.hasNext())
+    {
+        const auto match = separators.next();
+        if (!decodeToken(
+                normalized.mid(tokenStart, match.capturedStart() - tokenStart)))
+        {
+            return std::nullopt;
+        }
+
+        if (match.captured() != QStringLiteral(" "))
+        {
+            hasExplicitWordSeparator = true;
+            finishWord();
+        }
+        tokenStart = match.capturedEnd();
+    }
+
+    if (!decodeToken(normalized.mid(tokenStart)))
+    {
+        return std::nullopt;
+    }
+    finishWord();
+
+    if (morseTokenCount < minimumTokenCount || decodedWords.isEmpty())
+    {
+        return std::nullopt;
+    }
+
+    const auto decoded = decodedWords.join(QLatin1Char(' '));
+    if (requireLanguageConfidence && !hasCompactSos &&
+        !hasExplicitWordSeparator)
+    {
+        static const QRegularExpression vowel(QStringLiteral("[AEIOU]"));
+        if (distinctMorseTokens.size() < 2 || !decoded.contains(vowel))
+        {
+            return std::nullopt;
+        }
+    }
+
+    return decoded;
+}
+
+QString providerErrorDetail(const NetworkResult &result)
+{
+    const auto root = result.parseJson();
+    auto detail = root.value(QStringLiteral("message")).toString().trimmed();
+    if (detail.isEmpty())
+    {
+        detail = root.value(QStringLiteral("error"))
+                     .toObject()
+                     .value(QStringLiteral("message"))
+                     .toString()
+                     .trimmed();
+    }
+    if (detail.isEmpty())
+    {
+        detail = root.value(QStringLiteral("error")).toString().trimmed();
+    }
+    detail.replace(QRegularExpression(QStringLiteral("\\s+")),
+                   QStringLiteral(" "));
+    return detail.left(240);
+}
+
+struct GoogleTranslationCallbacks {
+    TranslationSuccessCallback onSuccess;
+    TranslationErrorCallback onError;
+    TranslationFinishedCallback onFinished;
+    QPointer<QObject> caller;
+    bool hadCaller = false;
+    bool finished = false;
+};
+
+void finishGoogleRequest(
+    const std::shared_ptr<GoogleTranslationCallbacks> &callbacks,
+    const std::optional<TranslationResult> &result)
+{
+    if (callbacks->finished || (callbacks->hadCaller && !callbacks->caller))
+    {
+        return;
+    }
+    callbacks->finished = true;
+    if (result && callbacks->onSuccess)
+    {
+        callbacks->onSuccess(*result);
+    }
+    else if (!result && callbacks->onError)
+    {
+        callbacks->onError(translation::detail::failureMessage());
+    }
+    if ((!callbacks->hadCaller || callbacks->caller) && callbacks->onFinished)
+    {
+        callbacks->onFinished();
+    }
+}
+
+void executeGoogleBuiltInRequest(
+    const QString &text, const QString &target, bool sourceWasMorse,
+    qsizetype clientIndex,
+    const std::shared_ptr<GoogleTranslationCallbacks> &callbacks)
+{
+    if (callbacks->finished || (callbacks->hadCaller && !callbacks->caller))
+    {
+        return;
+    }
+    const auto built = translation::detail::makeProviderRequest(
+        TranslationProvider::GoogleBuiltIn, text, target, {}, {}, clientIndex);
+    if (!built)
+    {
+        finishGoogleRequest(callbacks, std::nullopt);
+        return;
+    }
+
+    auto next = [text, target, sourceWasMorse, clientIndex, callbacks] {
+        executeGoogleBuiltInRequest(text, target, sourceWasMorse,
+                                    clientIndex + 1, callbacks);
+    };
+    auto request =
+        NetworkRequest(built->url, NetworkRequestType::Get)
+            .timeout(built->timeoutMs)
+            .maximumResponseSize(MAX_TRANSLATION_RESPONSE_BYTES)
+            .followRedirects(false)
+            .hideRequestBody()
+            .onSuccess(
+                [sourceWasMorse, callbacks, next](const NetworkResult &result) {
+                    auto parsed = translation::detail::parseProviderResponse(
+                        TranslationProvider::GoogleBuiltIn, result);
+                    if (!parsed)
+                    {
+                        next();
+                        return;
+                    }
+                    if (sourceWasMorse)
+                    {
+                        parsed->detectedLanguage = QStringLiteral("morse");
+                    }
+                    finishGoogleRequest(callbacks, parsed);
+                })
+            .onError([next](const NetworkResult &) {
+                next();
+            });
+    if (callbacks->caller)
+    {
+        request = std::move(request).caller(callbacks->caller.data());
+    }
+    std::move(request).execute();
+}
+
+void executeProviderRequest(
+    TranslationProvider provider, const QString &text, const QString &target,
+    const QString &credential,
+    const translation::detail::ConnectionSettings &connection, QObject *caller,
+    bool sourceWasMorse, TranslationSuccessCallback onSuccess,
+    TranslationErrorCallback onError, TranslationFinishedCallback onFinished)
+{
+    if (provider == TranslationProvider::GoogleBuiltIn)
+    {
+        auto callbacks = std::make_shared<GoogleTranslationCallbacks>(
+            std::move(onSuccess), std::move(onError), std::move(onFinished),
+            QPointer<QObject>(caller), caller != nullptr);
+        executeGoogleBuiltInRequest(text, target, sourceWasMorse, 0, callbacks);
+        return;
+    }
+
+    const auto built = translation::detail::makeProviderRequest(
+        provider, text, target, credential, connection);
+    if (!built)
+    {
+        const QPointer<QObject> guard(caller);
+        const bool hadCaller = caller != nullptr;
+        if (onError)
+        {
+            onError(built.error());
+        }
+        if ((!hadCaller || guard) && onFinished)
+        {
+            onFinished();
+        }
+        return;
+    }
+    auto request =
+        NetworkRequest(built->url, NetworkRequestType::Post)
+            .timeout(built->timeoutMs)
+            .maximumResponseSize(MAX_TRANSLATION_RESPONSE_BYTES)
+            .followRedirects(false)
+            .hideRequestBody()
+            .json(built->body)
+            .headerList(built->headers)
+            .onSuccess([provider, onSuccess, onError,
+                        sourceWasMorse](const NetworkResult &result) {
+                auto parsed = translation::detail::parseProviderResponse(
+                    provider, result);
+                if (!parsed)
+                {
+                    if (onError)
+                    {
+                        onError(translation::detail::failureMessage());
+                    }
+                    return;
+                }
+                if (sourceWasMorse)
+                {
+                    parsed->detectedLanguage = QStringLiteral("morse");
+                }
+                if (onSuccess)
+                {
+                    onSuccess(*parsed);
+                }
+            })
+            .onError([provider, onError](const NetworkResult &result) {
+                if (!onError)
+                {
+                    return;
+                }
+                const auto detail = providerErrorDetail(result);
+                onError(detail.isEmpty()
+                            ? translation::detail::failureMessage()
+                            : QStringLiteral("%1: %2").arg(
+                                  translationProviderName(provider), detail));
+            })
+            .finally([onFinished] {
+                if (onFinished)
+                {
+                    onFinished();
+                }
+            });
+    if (caller != nullptr)
+    {
+        request = std::move(request).caller(caller);
+    }
+    std::move(request).execute();
 }
 
 }  // namespace
+
+QString providerTargetLanguage(TranslationProvider provider, QString target)
+{
+    target = normalizedTranslationTargetLanguage(std::move(target));
+    switch (provider)
+    {
+        case TranslationProvider::DeepL:
+            if (target == QStringLiteral("en"))
+            {
+                return QStringLiteral("EN-US");
+            }
+            if (target == QStringLiteral("pt"))
+            {
+                return QStringLiteral("PT-PT");
+            }
+            if (target == QStringLiteral("zh-cn"))
+            {
+                return QStringLiteral("ZH-HANS");
+            }
+            if (target == QStringLiteral("zh-tw"))
+            {
+                return QStringLiteral("ZH-HANT");
+            }
+            if (target == QStringLiteral("iw"))
+            {
+                return QStringLiteral("HE");
+            }
+            if (target == QStringLiteral("tl"))
+            {
+                return QStringLiteral("FIL");
+            }
+            return target.toUpper();
+        case TranslationProvider::MicrosoftAzure:
+        case TranslationProvider::MicrosoftFree:
+            if (target == QStringLiteral("zh-cn"))
+            {
+                return QStringLiteral("zh-Hans");
+            }
+            if (target == QStringLiteral("zh-tw"))
+            {
+                return QStringLiteral("zh-Hant");
+            }
+            if (target == QStringLiteral("iw"))
+            {
+                return QStringLiteral("he");
+            }
+            if (target == QStringLiteral("tl"))
+            {
+                return QStringLiteral("fil");
+            }
+            if (target == QStringLiteral("ku"))
+            {
+                return QStringLiteral("kmr");
+            }
+            if (target == QStringLiteral("mn"))
+            {
+                return QStringLiteral("mn-Cyrl");
+            }
+            if (target == QStringLiteral("no"))
+            {
+                return QStringLiteral("nb");
+            }
+            if (target == QStringLiteral("sr"))
+            {
+                return QStringLiteral("sr-Cyrl");
+            }
+            return target;
+        case TranslationProvider::GoogleCloud:
+        case TranslationProvider::LibreTranslate:
+            if (target == QStringLiteral("iw"))
+            {
+                return QStringLiteral("he");
+            }
+            if (target == QStringLiteral("tl"))
+            {
+                return provider == TranslationProvider::GoogleCloud
+                           ? QStringLiteral("fil")
+                           : QStringLiteral("tl");
+            }
+            return target;
+        case TranslationProvider::GoogleBuiltIn:
+            return target;
+    }
+    return target;
+}
+
+const QStringList &googleBuiltInClientIds()
+{
+    static const QStringList clientIds{
+        QStringLiteral("dict-chrome-ex"),
+        QStringLiteral("it"),
+        QStringLiteral("at"),
+    };
+    return clientIds;
+}
+
+const std::vector<TranslationProviderDescriptor> &translationProviders()
+{
+    static const std::vector<TranslationProviderDescriptor> providers{
+        {TranslationProvider::GoogleBuiltIn, QStringLiteral("google"),
+         QStringLiteral("Google (free)"), false, false},
+        {TranslationProvider::MicrosoftFree, QStringLiteral("microsoft-free"),
+         QStringLiteral("Microsoft (free)"), false, false},
+        {TranslationProvider::DeepL, QStringLiteral("deepl"),
+         QStringLiteral("DeepL"), true, false},
+        {TranslationProvider::LibreTranslate, QStringLiteral("libretranslate"),
+         QStringLiteral("LibreTranslate"), true, true},
+        {TranslationProvider::GoogleCloud, QStringLiteral("google-cloud"),
+         QStringLiteral("Google Cloud Translation"), true, false},
+        {TranslationProvider::MicrosoftAzure, QStringLiteral("azure"),
+         QStringLiteral("Microsoft Azure Translator"), true, false},
+    };
+    return providers;
+}
+
+TranslationProvider translationProviderFromId(const QString &id)
+{
+    const auto normalized = id.trimmed().toLower();
+    const auto &providers = translationProviders();
+    const auto it = std::ranges::find_if(
+        providers, [&normalized](const TranslationProviderDescriptor &item) {
+            return item.id == normalized;
+        });
+    return it == providers.end() ? TranslationProvider::GoogleBuiltIn
+                                 : it->provider;
+}
+
+QString translationProviderId(TranslationProvider provider)
+{
+    const auto &providers = translationProviders();
+    const auto it = std::ranges::find_if(
+        providers, [provider](const TranslationProviderDescriptor &item) {
+            return item.provider == provider;
+        });
+    return it == providers.end() ? QStringLiteral("google") : it->id;
+}
+
+QString translationProviderName(TranslationProvider provider)
+{
+    const auto &providers = translationProviders();
+    const auto it = std::ranges::find_if(
+        providers, [provider](const TranslationProviderDescriptor &item) {
+            return item.provider == provider;
+        });
+    return it == providers.end() ? QStringLiteral("Google Translate")
+                                 : it->name;
+}
 
 QString normalizedLanguageCode(QString language)
 {
@@ -132,6 +690,7 @@ const std::vector<TranslationLanguage> &supportedTranslationLanguages()
         {QStringLiteral("mt"), QStringLiteral("Maltese")},
         {QStringLiteral("mi"), QStringLiteral("Maori")},
         {QStringLiteral("mr"), QStringLiteral("Marathi")},
+        {QStringLiteral("morse"), QStringLiteral("Morse")},
         {QStringLiteral("mn"), QStringLiteral("Mongolian")},
         {QStringLiteral("my"), QStringLiteral("Myanmar (Burmese)")},
         {QStringLiteral("ne"), QStringLiteral("Nepali")},
@@ -205,12 +764,18 @@ QString translationLanguageCodeFromInput(QString language)
         {"he", QStringLiteral("iw")},
         {"fil", QStringLiteral("tl")},
         {"filipino", QStringLiteral("tl")},
+        {"kmr", QStringLiteral("ku")},
+        {"mn-cyrl", QStringLiteral("mn")},
+        {"nb", QStringLiteral("no")},
+        {"sr-cyrl", QStringLiteral("sr")},
         {"burmese", QStringLiteral("my")},
         {"br", QStringLiteral("pt")},
         {"pt-br", QStringLiteral("pt")},
         {"jp", QStringLiteral("ja")},
         {"kr", QStringLiteral("ko")},
         {"ua", QStringLiteral("uk")},
+        {"morse-code", QStringLiteral("morse")},
+        {"morse code", QStringLiteral("morse")},
     };
 
     return aliases.value(normalized);
@@ -259,17 +824,46 @@ QString trimTextForTranslation(QString text)
     if (text.size() > MAX_TRANSLATION_TEXT_LENGTH)
     {
         text = text.left(MAX_TRANSLATION_TEXT_LENGTH);
+        if (text.back().isHighSurrogate())
+        {
+            text.chop(1);
+        }
     }
 
     return text;
+}
+
+QString encodeMorseText(const QString &text)
+{
+    return encodeTextToMorse(text);
+}
+
+std::optional<QString> decodeMorseText(const QString &text)
+{
+    return decodeTextFromMorse(text, 2, true);
+}
+
+bool isMorseText(const QString &text)
+{
+    return decodeTextFromMorse(text, 1, false).has_value();
 }
 
 void requestTextTranslation(const QString &text, const QString &targetLanguage,
                             QObject *caller,
                             TranslationSuccessCallback onSuccess,
                             TranslationErrorCallback onError,
-                            TranslationFinishedCallback onFinished)
+                            TranslationFinishedCallback onFinished,
+                            std::optional<TranslationProvider> providerOverride)
 {
+    const QPointer<QObject> finishCaller(caller);
+    const bool hasFinishCaller = caller != nullptr;
+    onFinished = [finishCaller, hasFinishCaller,
+                  callback = std::move(onFinished)] {
+        if ((!hasFinishCaller || finishCaller) && callback)
+        {
+            callback();
+        }
+    };
     const auto requestText = trimTextForTranslation(text);
     if (requestText.isEmpty())
     {
@@ -285,61 +879,140 @@ void requestTextTranslation(const QString &text, const QString &targetLanguage,
     }
 
     const auto target = normalizedTranslationTargetLanguage(targetLanguage);
-
-    QUrl url(QStringLiteral(
-        "https://translate.googleapis.com/translate_a/single"));
-    QUrlQuery query;
-    query.addQueryItem(QStringLiteral("client"), QStringLiteral("gtx"));
-    query.addQueryItem(QStringLiteral("sl"), QStringLiteral("auto"));
-    query.addQueryItem(QStringLiteral("tl"), target);
-    query.addQueryItem(QStringLiteral("dt"), QStringLiteral("t"));
-    query.addQueryItem(QStringLiteral("q"), requestText);
-    url.setQuery(query);
-
-    auto request = NetworkRequest(url)
-                       .timeout(8000)
-                       .onSuccess([onSuccess, onError](
-                                      const NetworkResult &result) {
-                           const auto parsed =
-                               parseGoogleTranslationResult(result);
-                           if (!parsed.has_value())
-                           {
-                               if (onError)
-                               {
-                                   onError(QStringLiteral(
-                                       "Translation failed: invalid response."));
-                               }
-                               return;
-                           }
-
-                           if (onSuccess)
-                           {
-                               onSuccess(*parsed);
-                           }
-                       })
-                       .onError([onError](const NetworkResult &result) {
-                           (void)result;
-                           if (onError)
-                           {
-                               onError(QStringLiteral(
-                                   "Translation failed: network error."));
-                           }
-                       })
-                       .finally([onFinished] {
-                           if (onFinished)
-                           {
-                               onFinished();
-                           }
-                       });
-
-    if (caller != nullptr)
+    const auto decodedMorse = decodeMorseText(requestText);
+    if (target == QStringLiteral("morse"))
     {
-        std::move(request).caller(caller).execute();
+        const auto permissiveMorse = decodeTextFromMorse(requestText, 1, false);
+        const auto translated = encodeMorseText(
+            permissiveMorse.has_value() ? *permissiveMorse : requestText);
+        if (translated.isEmpty())
+        {
+            if (onError)
+            {
+                onError(
+                    QStringLiteral("Translation failed: unsupported text."));
+            }
+        }
+        else if (onSuccess)
+        {
+            onSuccess({
+                .translatedText = translated,
+                .detectedLanguage = permissiveMorse.has_value()
+                                        ? QStringLiteral("morse")
+                                        : QString{},
+            });
+        }
+        if (onFinished)
+        {
+            onFinished();
+        }
+        return;
     }
-    else
+
+    if (decodedMorse.has_value() && target == QStringLiteral("en"))
     {
-        std::move(request).execute();
+        if (onSuccess)
+        {
+            onSuccess({
+                .translatedText = *decodedMorse,
+                .detectedLanguage = QStringLiteral("morse"),
+            });
+        }
+        if (onFinished)
+        {
+            onFinished();
+        }
+        return;
     }
+
+    const auto textForTranslation =
+        decodedMorse.has_value() ? *decodedMorse : requestText;
+    const bool sourceWasMorse = decodedMorse.has_value();
+    auto *settings = getSettings();
+    const auto &providers = translationProviders();
+    const auto configuredId =
+        settings->translationProvider.getValue().trimmed().toLower();
+    const auto descriptor = std::ranges::find_if(
+        providers, [&](const TranslationProviderDescriptor &item) {
+            return providerOverride ? item.provider == *providerOverride
+                                    : item.id == configuredId;
+        });
+    if (descriptor == providers.end())
+    {
+        if (onError)
+        {
+            onError(
+                QStringLiteral("Choose a translation provider in Settings."));
+        }
+        if (onFinished)
+        {
+            onFinished();
+        }
+        return;
+    }
+
+    const auto provider = descriptor->provider;
+    const translation::detail::ConnectionSettings connection{
+        .libreEndpoint = settings->translationLibreEndpoint.getValue(),
+        .azureRegion = settings->translationAzureRegion.getValue(),
+        .azureEndpoint = settings->translationAzureEndpoint.getValue(),
+    };
+    if (!descriptor->usesApiKey)
+    {
+        executeProviderRequest(provider, textForTranslation, target, {},
+                               connection, caller, sourceWasMorse,
+                               std::move(onSuccess), std::move(onError),
+                               std::move(onFinished));
+        return;
+    }
+
+    const bool hadCaller = caller != nullptr;
+    const QPointer<QObject> callerGuard(caller);
+    readTranslationProviderCredential(
+        provider,
+        [provider, descriptor = *descriptor, textForTranslation, target,
+         connection, callerGuard, hadCaller, sourceWasMorse,
+         onSuccess = std::move(onSuccess), onError = std::move(onError),
+         onFinished =
+             std::move(onFinished)](ExpectedStr<QString> credential) mutable {
+            if (hadCaller && !callerGuard)
+            {
+                return;
+            }
+
+            if (!credential)
+            {
+                if (onError)
+                {
+                    onError(credential.error());
+                }
+                if (onFinished)
+                {
+                    onFinished();
+                }
+                return;
+            }
+            const auto key = credential->trimmed();
+            if (key.isEmpty() && !descriptor.apiKeyOptional)
+            {
+                if (onError)
+                {
+                    onError(
+                        QStringLiteral("Set up %1 with an API key in Settings.")
+                            .arg(descriptor.name));
+                }
+                if ((!hadCaller || callerGuard) && onFinished)
+                {
+                    onFinished();
+                }
+                return;
+            }
+
+            executeProviderRequest(provider, textForTranslation, target, key,
+                                   connection, callerGuard.data(),
+                                   sourceWasMorse, std::move(onSuccess),
+                                   std::move(onError), std::move(onFinished));
+        });
 }
 
 }  // namespace chatterino
