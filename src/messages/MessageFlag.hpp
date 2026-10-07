@@ -77,8 +77,14 @@ enum class MessageFlag : std::int64_t {
     /// Note: If this message is inside a reply thread, the root must not have the flag either.
     InvalidReplyTarget = (1LL << 42),
     WatchStreak = (1LL << 43),
-    ChatWarning = (1LL << 44),
-    RepeatedMessage = (1LL << 45),
+    Announcement = (1LL << 44),
+    UncategorizedNotification = (1LL << 45),
+    ChatWarning = (1LL << 46),
+    RepeatedMessage = (1LL << 47),
+    GigantifiedEmote = (1LL << 48),
+    TwitchGif = (1LL << 49),
+    AsciiArt = (1LL << 50),
+    ExtendedClientNonce = (1LL << 51),
 };
 using MessageFlags = FlagsEnum<MessageFlag>;
 

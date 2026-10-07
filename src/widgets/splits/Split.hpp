@@ -9,11 +9,11 @@
 #include "widgets/BaseWidget.hpp"
 #include "widgets/splits/SplitCommon.hpp"
 
-#include <boost/signals2.hpp>
 #include <pajlada/signals/signalholder.hpp>
 #include <QDateTime>
 #include <QFont>
 #include <QPointer>
+#include <QSet>
 #include <QShortcut>
 #include <QShowEvent>
 #include <QString>
@@ -21,11 +21,14 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <memory>
+
 namespace chatterino {
 
 class ChannelView;
 class SplitHeader;
 class PinnedMessageBanner;
+class AutoModReviewBar;
 class PollBanner;
 class PredictionBanner;
 class SplitInput;
@@ -63,6 +66,7 @@ public:
 
     ChannelView &getChannelView();
     SplitInput &getInput();
+    bool hasVisibleBanner() const;
 
     IndirectChannel getIndirectChannel();
     ChannelPtr getChannel() const;
@@ -74,6 +78,8 @@ public:
 
     void setModerationMode(bool value);
     bool getModerationMode() const;
+    void setAutoModChannelFilter(QString channel);
+    QString getAutoModChannelFilter() const;
 
     std::optional<bool> checkSpellingOverride() const;
     void setCheckSpellingOverride(std::optional<bool> override);
@@ -86,6 +92,7 @@ public:
     void updateLastReadMessage();
     void setIsTopRightSplit(bool value);
     void scheduleDeferredTwitchRefresh(bool interactive = false);
+    void refreshSelectedYouTube();
 
     void drag();
 
@@ -123,7 +130,9 @@ public:
 
 protected:
     void paintEvent(QPaintEvent *event) override;
+    void themeChangedEvent() override;
     void showEvent(QShowEvent *event) override;
+    void hideEvent(QHideEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void keyReleaseEvent(QKeyEvent *event) override;
@@ -135,6 +144,13 @@ protected:
     void dropEvent(QDropEvent *event) override;
 
 private:
+    SplitHeader *ensureHeader();
+    AutoModReviewBar *ensureAutoModReviewBar();
+    SplitOverlay *ensureOverlay();
+    SplitInput *ensureInput();
+    void applyScaleToLazyChild(BaseWidget *widget) const;
+    void initializeInputConnections();
+    void setSendWaitStatus(QString text);
     void channelNameUpdated(const QString &newChannelName);
     void handleModifiers(Qt::KeyboardModifiers modifiers);
     void updateInputPlaceholder();
@@ -165,10 +181,23 @@ private:
      **/
     void refreshModerationMode();
 
+    void refreshInputState(const QString &inputText);
+
+    PinnedMessageBanner *ensurePinnedBanner();
+    PredictionBanner *ensurePredictionBanner();
+    PollBanner *ensurePollBanner();
+    void cycleBannerSelection();
+    void handleBannerDismissed();
     void updateBannerVisibility();
     void noteBannerStateChanged(TwitchChannel *channel, int bannerId);
     void clearBannerAttention();
     void runDeferredTwitchRefresh();
+    void updateChannelConnections();
+    std::shared_ptr<TwitchChannel> getTwitchFeatureChannel() const;
+    void updateTwitchFeatureChannel();
+    void bindTwitchFeatureChannel(
+        const std::shared_ptr<TwitchChannel> &channel);
+    void clearTwitchFeatureState();
 
     IndirectChannel channel_;
 
@@ -187,13 +216,18 @@ private:
     bool primingBannerState_{false};
 
     QVBoxLayout *const vbox_;
-    SplitHeader *const header_;
-    PinnedMessageBanner *const pinnedBanner_;
-    PredictionBanner *const predictionBanner_;
-    PollBanner *const pollBanner_;
+    SplitHeader *header_{};
+    PinnedMessageBanner *pinnedBanner_{};
+    PredictionBanner *predictionBanner_{};
+    PollBanner *pollBanner_{};
     ChannelView *const view_;
-    SplitInput *const input_;
-    SplitOverlay *const overlay_;
+    AutoModReviewBar *autoModReviewBar_{};
+    QString autoModChannelFilter_;
+    SplitInput *input_{};
+    SplitOverlay *overlay_{};
+    bool shortcutsActive_{};
+    QString pendingSendWaitStatus_;
+    std::optional<bool> checkSpellingOverride_;
 
     QPointer<OverlayWindow> overlayWindow_;
 
@@ -202,19 +236,22 @@ private:
     pajlada::Signals::Connection channelIDChangedConnection_;
     pajlada::Signals::Connection usermodeChangedConnection_;
     pajlada::Signals::Connection roomModeChangedConnection_;
+    pajlada::Signals::ScopedConnection sendWaitConnection_;
 
     pajlada::Signals::Connection indirectChannelChangedConnection_;
 
     // This signal-holder is cleared whenever this split changes the underlying channel
     pajlada::Signals::SignalHolder channelSignalHolder_;
 
+    pajlada::Signals::SignalHolder twitchFeatureSignalHolder_;
+    std::weak_ptr<TwitchChannel> twitchFeatureChannel_;
     pajlada::Signals::SignalHolder signalHolder_;
-    std::vector<boost::signals2::scoped_connection> bSignals_;
     QTimer *deferredTwitchRefreshTimer_{};
     int deferredTwitchRefreshRetries_{};
     bool deferredTwitchRefreshInteractive_{};
     bool deferredTwitchForcePersonalRefresh_{};
     bool deferredTwitchWarningStartupSeen_{};
+    QSet<QString> editorAccessProbedChannels_;
 
 public Q_SLOTS:
     void addSibling();

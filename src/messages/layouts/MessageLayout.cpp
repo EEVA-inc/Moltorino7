@@ -5,6 +5,7 @@
 #include "messages/layouts/MessageLayout.hpp"
 
 #include "Application.hpp"
+#include "controllers/highlights/HighlightPhrase.hpp"
 #include "messages/layouts/MessageLayoutContainer.hpp"
 #include "messages/layouts/MessageLayoutContext.hpp"
 #include "messages/layouts/MessageLayoutElement.hpp"
@@ -14,6 +15,7 @@
 #include "providers/colors/ColorProvider.hpp"
 #include "singletons/Settings.hpp"
 #include "singletons/StreamerMode.hpp"
+#include "singletons/ThemeCustomization.hpp"
 #include "singletons/WindowManager.hpp"
 #include "util/DebugCount.hpp"
 
@@ -23,18 +25,66 @@
 #include <QtGlobal>
 #include <QThread>
 
+#include <algorithm>
+#include <limits>
+#include <optional>
+#include <utility>
+
 namespace chatterino {
 
 namespace {
 
-QColor blendColors(const QColor &base, const QColor &apply)
+uint32_t toCachedMessageMetric(size_t value)
 {
-    const qreal &alpha = apply.alphaF();
-    QColor result;
-    result.setRgbF(base.redF() * (1 - alpha) + apply.redF() * alpha,
-                   base.greenF() * (1 - alpha) + apply.greenF() * alpha,
-                   base.blueF() * (1 - alpha) + apply.blueF() * alpha);
-    return result;
+    return static_cast<uint32_t>(std::min(
+        value, static_cast<size_t>(std::numeric_limits<uint32_t>::max())));
+}
+
+struct ClientDetectionMarker {
+    const QPixmap *icon = nullptr;
+    QColor color;
+    QString tooltip;
+};
+
+std::optional<ClientDetectionMarker> clientDetectionMarker(
+    const Message &message, const MessagePreferences &preferences)
+{
+    static const QPixmap desktopIcon(
+        QStringLiteral(":/badges/client-desktop.svg"));
+    static const QPixmap androidIcon(
+        QStringLiteral(":/badges/client-android.svg"));
+    static const QPixmap iosIcon(QStringLiteral(":/badges/client-ios.svg"));
+    static const QPixmap unknownIcon(
+        QStringLiteral(":/badges/client-unknown.svg"));
+
+    using Status = Message::ClientDetectionStatus;
+    switch (message.clientDetection)
+    {
+        case Status::Web:
+            return ClientDetectionMarker{
+                &desktopIcon, preferences.clientDetectionWebColor,
+                QStringLiteral("Sent from Twitch Web")};
+        case Status::Android:
+            return ClientDetectionMarker{
+                &androidIcon, preferences.clientDetectionAndroidColor,
+                QStringLiteral("Sent from Twitch for Android")};
+        case Status::IOS:
+            return ClientDetectionMarker{
+                &iosIcon, preferences.clientDetectionIosColor,
+                QStringLiteral("Sent from Twitch for iOS")};
+        case Status::Abnormal:
+            if (preferences.enableAbnormalClientDetectionHighlight)
+            {
+                return ClientDetectionMarker{
+                    &unknownIcon, preferences.clientDetectionAbnormalColor,
+                    QStringLiteral("Unrecognized message source")};
+            }
+            return std::nullopt;
+        case Status::Unknown:
+            return std::nullopt;
+    }
+
+    return std::nullopt;
 }
 }
 
@@ -46,6 +96,7 @@ MessageLayout::MessageLayout(MessagePtr message)
 
 MessageLayout::~MessageLayout()
 {
+    this->deleteBuffer();
     DebugCount::decrease(DebugObject::MessageLayout);
 }
 
@@ -61,29 +112,41 @@ const MessagePtr &MessageLayout::getMessagePtr() const
 
 int MessageLayout::getHeight() const
 {
-    return static_cast<int>(this->container_.getHeight());
+    return static_cast<int>(this->height_);
 }
 
 int MessageLayout::getFirstLineHeight() const
 {
-    return this->container_.getFirstLineHeight();
+    return this->firstLineHeight_;
 }
 
 int MessageLayout::getWidth() const
 {
-    return static_cast<int>(this->container_.getWidth());
+    return this->width_;
 }
 
 size_t MessageLayout::getLineCount() const
 {
-    return this->container_.getLineCount();
+    return this->lineCount_;
 }
 
 bool MessageLayout::layout(const MessageLayoutContext &ctx,
                            bool shouldInvalidateBuffer)
 {
+    return this->layoutImpl(ctx, shouldInvalidateBuffer, true);
+}
 
-    bool layoutRequired = false;
+bool MessageLayout::layoutForMeasurement(const MessageLayoutContext &ctx)
+{
+    return this->layoutImpl(ctx, false, false);
+}
+
+bool MessageLayout::layoutImpl(const MessageLayoutContext &ctx,
+                               bool shouldInvalidateBuffer,
+                               bool retainContainer)
+{
+    const bool hadContainer = this->container_ != nullptr;
+    bool layoutRequired = retainContainer && !hadContainer;
 
     bool widthChanged = ctx.width != this->currentLayoutWidth_;
     layoutRequired |= widthChanged;
@@ -99,6 +162,31 @@ bool MessageLayout::layout(const MessageLayoutContext &ctx,
 
     layoutRequired |= this->currentWordFlags_ != ctx.flags;
     this->currentWordFlags_ = ctx.flags;
+
+    if (this->showHighlights_ != ctx.showHighlights())
+    {
+        this->showHighlights_ = ctx.showHighlights();
+        this->flags.set(MessageLayoutFlag::RequiresBufferUpdate);
+        layoutRequired = true;
+    }
+
+    if (this->autoModReviewExpanded_ != ctx.autoModReviewExpanded)
+    {
+        this->autoModReviewExpanded_ = ctx.autoModReviewExpanded;
+        this->flags.set(MessageLayoutFlag::AutoModReviewSelected,
+                        ctx.autoModReviewExpanded);
+        this->flags.set(MessageLayoutFlag::RequiresBufferUpdate);
+        layoutRequired = true;
+    }
+
+    if (this->flags.has(MessageLayoutFlag::AutoModReviewChannel) !=
+        ctx.autoModReviewChannel)
+    {
+        this->flags.set(MessageLayoutFlag::AutoModReviewChannel,
+                        ctx.autoModReviewChannel);
+        this->flags.set(MessageLayoutFlag::RequiresBufferUpdate);
+        layoutRequired = true;
+    }
 
     layoutRequired |= this->flags.has(MessageLayoutFlag::RequiresLayout);
     this->flags.unset(MessageLayoutFlag::RequiresLayout);
@@ -125,22 +213,34 @@ bool MessageLayout::layout(const MessageLayoutContext &ctx,
         return false;
     }
 
-    qreal oldHeight = this->container_.getHeight();
+    qreal oldHeight = this->height_;
     this->actuallyLayout(ctx);
-    if (widthChanged || this->container_.getHeight() != oldHeight)
+    if (widthChanged || this->height_ != oldHeight)
     {
         this->deleteBuffer();
     }
     this->invalidateBuffer();
+
+    if (!retainContainer && !hadContainer)
+    {
+        this->container_.reset();
+    }
 
     return true;
 }
 
 void MessageLayout::actuallyLayout(const MessageLayoutContext &ctx)
 {
+    ctx.resetMessageTextCursor();
 #ifdef FOURTF
     this->layoutCount_++;
 #endif
+
+    if (!this->container_)
+    {
+        this->container_ = std::make_unique<MessageLayoutContainer>();
+    }
+    auto &container = *this->container_;
 
     auto messageFlags = this->message_->flags;
 
@@ -158,13 +258,48 @@ void MessageLayout::actuallyLayout(const MessageLayoutContext &ctx)
         ShowModerationState::Never;
     bool hideSimilar = getSettings()->hideSimilar;
     bool hideReplies = !ctx.flags.has(MessageElementFlag::RepliedMessage);
+    const bool hideGigantifyReward =
+        this->message_->usesTwitchGigantifyPresentation();
+    const bool hideClientNonce = this->message_->isHiddenByClientNonce();
 
-    this->container_.beginLayout(ctx.width, this->scale_, this->imageScale_,
-                                 this->emoteScale_, this->badgeScale_,
-                                 this->centerBadges_, messageFlags);
+    container.beginLayout(ctx.width, this->scale_, this->imageScale_,
+                          this->emoteScale_, this->badgeScale_,
+                          this->centerBadges_, messageFlags);
+
+    std::optional<ClientDetectionMarker> clientMarker;
+    if (ctx.preferences != nullptr &&
+        ctx.preferences->enableClientDetectionIcon &&
+        ctx.flags.has(MessageElementFlag::Username))
+    {
+        clientMarker = clientDetectionMarker(*this->message_, *ctx.preferences);
+    }
+    bool clientMarkerAdded = false;
 
     for (const auto &element : this->message_->elements)
     {
+        if (hideClientNonce)
+        {
+            break;
+        }
+        if (element->getFlags().has(
+                MessageElementFlag::AutoModReviewExpanded) &&
+            !ctx.autoModReviewExpanded)
+        {
+            continue;
+        }
+        if (element->getFlags().has(MessageElementFlag::AutoModReviewCompact) &&
+            ctx.autoModReviewExpanded)
+        {
+            continue;
+        }
+        if (hideGigantifyReward &&
+            element->getFlags().hasAny(
+                {MessageElementFlag::ChannelPointReward,
+                 MessageElementFlag::ChannelPointRewardHeader}))
+        {
+            continue;
+        }
+
         if (hideModerated && this->message_->flags.has(MessageFlag::Disabled))
         {
             continue;
@@ -207,19 +342,37 @@ void MessageLayout::actuallyLayout(const MessageLayoutContext &ctx)
             continue;
         }
 
-        element->addToContainer(this->container_, ctx);
+        if (!clientMarkerAdded && clientMarker &&
+            (element->getFlags().hasAny(
+                 {MessageElementFlag::Badges, MessageElementFlag::Pronouns}) ||
+             element->getFlags().has(MessageElementFlag::Username)))
+        {
+            container.addElement(new ClientDetectionLayoutElement(
+                *clientMarker->icon, clientMarker->color, clientMarker->tooltip,
+                container.getBadgeScale()));
+            clientMarkerAdded = true;
+        }
+
+        element->addToContainer(container, ctx);
     }
 
-    if (this->height_ != this->container_.getHeight())
+    if (this->height_ != container.getHeight())
     {
         this->deleteBuffer();
     }
 
-    this->container_.endLayout();
-    this->height_ = this->container_.getHeight();
+    container.endLayout();
+    this->height_ = container.getHeight();
+    this->firstLineHeight_ = container.getFirstLineHeight();
+    this->width_ = static_cast<int>(container.getWidth());
+    this->lineCount_ = toCachedMessageMetric(container.getLineCount());
+    this->firstMessageCharacterIndex_ =
+        toCachedMessageMetric(container.getFirstMessageCharacterIndex());
+    this->lastCharacterIndex_ =
+        toCachedMessageMetric(container.getLastCharacterIndex());
 
     this->flags.unset(MessageLayoutFlag::Collapsed);
-    if (this->container_.isCollapsed())
+    if (container.isCollapsed())
     {
         this->flags.set(MessageLayoutFlag::Collapsed);
     }
@@ -228,6 +381,11 @@ void MessageLayout::actuallyLayout(const MessageLayoutContext &ctx)
 MessagePaintResult MessageLayout::paint(const MessagePaintContext &ctx)
 {
     MessagePaintResult result;
+    if (!this->container_)
+    {
+        return result;
+    }
+    auto &container = *this->container_;
 
     QPixmap *pixmap = this->ensureBuffer(ctx.painter, ctx.canvasWidth,
                                          ctx.messageColors.hasTransparency);
@@ -243,8 +401,21 @@ MessagePaintResult MessageLayout::paint(const MessagePaintContext &ctx)
 
     ctx.painter.drawPixmap(QPoint{0, ctx.y}, *pixmap);
 
-    result.hasAnimatedElements =
-        this->container_.paintAnimatedElements(ctx.painter, ctx.y, ctx.isCollapsed);
+    const AnimatedMessageShadow animatedShadow{
+        ctx.messageShadowColor,
+        ctx.messageShadowOpacity / 100.0,
+        QPointF(ctx.messageShadowOffset) * this->scale_,
+        std::clamp(ctx.messageShadowBlur, 0, 8) * this->scale_,
+        ctx.messageShadowEmotes,
+    };
+    const auto *shadow = ctx.paintMessageShadow && ctx.messageShadowOpacity > 0
+                             ? &animatedShadow
+                             : nullptr;
+    const auto animatedRegions = container.paintAnimatedElements(
+        ctx.painter, ctx.y, ctx.isCollapsed, shadow, ctx.hoveredElement,
+        ctx.hoverAnimateOnly);
+    result.animatedRegion += animatedRegions.periodic;
+    result.selfTimedAnimatedRegion += animatedRegions.selfTimed;
 
     if (this->message_->flags.has(MessageFlag::Disabled))
     {
@@ -271,8 +442,9 @@ MessagePaintResult MessageLayout::paint(const MessagePaintContext &ctx)
             ctx.messageColors.disabled);
     }
 
-    if (!ctx.isMentions &&
-        (this->message_->flags.has(MessageFlag::RedeemedChannelPointReward) ||
+    if (ctx.preferences.showHighlights && !ctx.isMentions &&
+        ((this->message_->flags.has(MessageFlag::RedeemedChannelPointReward) &&
+          !this->message_->usesTwitchGigantifyPresentation()) ||
          this->message_->flags.has(MessageFlag::RedeemedHighlight)) &&
         ctx.preferences.enableRedeemedHighlight)
     {
@@ -288,8 +460,8 @@ MessagePaintResult MessageLayout::paint(const MessagePaintContext &ctx)
 
     if (!ctx.selection.isEmpty())
     {
-        this->container_.paintSelection(ctx.painter, ctx.messageIndex,
-                                        ctx.selection, ctx.y);
+        container.paintSelection(ctx.painter, ctx.messageIndex,
+                                 ctx.selection, ctx.y);
     }
 
     if (ctx.preferences.separateMessages)
@@ -298,7 +470,7 @@ MessagePaintResult MessageLayout::paint(const MessagePaintContext &ctx)
             QRectF{
                 0.0,
                 static_cast<qreal>(ctx.y),
-                this->container_.getWidth() + 64,
+                static_cast<qreal>(ctx.canvasWidth),
                 1.0,
             },
             ctx.messageColors.messageSeperator);
@@ -323,7 +495,7 @@ MessagePaintResult MessageLayout::paint(const MessagePaintContext &ctx)
         ctx.painter.fillRect(
             QRectF{
                 0,
-                ctx.y + this->container_.getHeight() - 1,
+                ctx.y + container.getHeight() - 1,
                 static_cast<qreal>(pixmap->width()),
                 1,
             },
@@ -344,7 +516,7 @@ QPixmap *MessageLayout::ensureBuffer(QPainter &painter, qreal width, bool clear)
 
     this->buffer_ = std::make_unique<QPixmap>(
         static_cast<int>(width * painter.device()->devicePixelRatioF()),
-        static_cast<int>(this->container_.getHeight() *
+        static_cast<int>(this->height_ *
                          painter.device()->devicePixelRatioF()));
     this->buffer_->setDevicePixelRatio(painter.device()->devicePixelRatioF());
 
@@ -361,7 +533,7 @@ QPixmap *MessageLayout::ensureBuffer(QPainter &painter, qreal width, bool clear)
 void MessageLayout::updateBuffer(QPixmap *buffer,
                                  const MessagePaintContext &ctx)
 {
-    if (buffer->isNull())
+    if (buffer->isNull() || !this->container_)
     {
         return;
     }
@@ -379,115 +551,236 @@ void MessageLayout::updateBuffer(QPixmap *buffer,
         return ctx.messageColors.regularBg;
     }();
 
-    if (this->message_->flags.has(MessageFlag::ElevatedMessage) &&
-        ctx.preferences.enableElevatedMessageHighlight)
+    if (ctx.preferences.showHighlights &&
+        this->flags.has(MessageLayoutFlag::AutoModReviewSelected))
     {
-        backgroundColor = blendColors(
-            backgroundColor,
-            *ctx.colorProvider.color(ColorType::ElevatedMessageHighlight));
+        auto selection = ctx.messageColors.selection;
+        selection.setAlpha(26);
+        backgroundColor = blendThemeHighlight(backgroundColor, selection, 0);
     }
 
-    else if (this->message_->flags.has(MessageFlag::FirstMessage) &&
-             ctx.preferences.enableFirstMessageHighlight)
+    if (ctx.preferences.showHighlights)
     {
-        backgroundColor = blendColors(
-            backgroundColor,
-            *ctx.colorProvider.color(ColorType::FirstMessageHighlight));
-    }
-    else if (this->message_->flags.has(MessageFlag::WatchStreak) &&
-             ctx.preferences.enableWatchStreakHighlight)
-    {
-        backgroundColor = blendColors(
-            backgroundColor, *ctx.colorProvider.color(ColorType::WatchStreak));
-    }
-    else if ((this->message_->flags.has(MessageFlag::Highlighted) ||
-              this->message_->flags.has(MessageFlag::HighlightedWhisper)) &&
-             !this->flags.has(MessageLayoutFlag::IgnoreHighlights))
-    {
-        assert(this->message_->highlightColor);
-        if (this->message_->highlightColor)
+        if (this->message_->flags.has(MessageFlag::ElevatedMessage) &&
+            ctx.preferences.enableElevatedMessageHighlight)
         {
-
-            backgroundColor =
-                blendColors(backgroundColor, *this->message_->highlightColor);
-        }
-    }
-    else if (this->message_->flags.has(MessageFlag::Subscription) &&
-             ctx.preferences.enableSubHighlight)
-    {
-
-        backgroundColor = blendColors(
-            backgroundColor, *ctx.colorProvider.color(ColorType::Subscription));
-    }
-    else if ((this->message_->flags.has(MessageFlag::RedeemedHighlight) ||
-              this->message_->flags.has(
-                  MessageFlag::RedeemedChannelPointReward)) &&
-             ctx.preferences.enableRedeemedHighlight)
-    {
-
-        backgroundColor =
-            blendColors(backgroundColor,
-                        *ctx.colorProvider.color(ColorType::RedeemedHighlight));
-    }
-    else if (this->message_->flags.has(MessageFlag::ChatWarning) &&
-             ctx.preferences.enableAutomodHighlight)
-    {
-        backgroundColor = blendColors(
-            backgroundColor,
-            *ctx.colorProvider.color(ColorType::AutomodHighlight));
-    }
-    else if (this->message_->flags.has(MessageFlag::AutoMod) ||
-             this->message_->flags.has(MessageFlag::LowTrustUsers))
-    {
-        if (ctx.preferences.enableAutomodHighlight &&
-            (this->message_->flags.has(MessageFlag::AutoModOffendingMessage) ||
-             this->message_->flags.has(
-                 MessageFlag::AutoModOffendingMessageHeader)))
-        {
-            backgroundColor = blendColors(
+            backgroundColor = blendThemeHighlight(
                 backgroundColor,
-                *ctx.colorProvider.color(ColorType::AutomodHighlight));
+                *ctx.colorProvider.color(ColorType::ElevatedMessageHighlight),
+                ctx.highlightOpacityAdjustment);
         }
-        else
+
+        else if (this->message_->flags.has(MessageFlag::FirstMessage) &&
+                 ctx.preferences.enableFirstMessageHighlight)
         {
-            backgroundColor = QColor("#404040");
+            backgroundColor = blendThemeHighlight(
+                backgroundColor,
+                *ctx.colorProvider.color(ColorType::FirstMessageHighlight),
+                ctx.highlightOpacityAdjustment);
         }
-    }
-    else if (this->message_->flags.has(MessageFlag::Debug))
-    {
-        backgroundColor = QColor("#4A273D");
-    }
-    else if (ctx.preferences.enableClientDetectionHighlight)
-    {
-        switch (this->message_->clientDetection)
+        else if (this->message_->flags.has(MessageFlag::WatchStreak) &&
+                 ctx.preferences.enableWatchStreakHighlight)
         {
-            case Message::ClientDetectionStatus::Web:
-                backgroundColor = blendColors(
+            backgroundColor = blendThemeHighlight(
+                backgroundColor,
+                *ctx.colorProvider.color(ColorType::WatchStreak),
+                ctx.highlightOpacityAdjustment);
+        }
+        else if ((this->message_->flags.has(MessageFlag::Highlighted) ||
+                  this->message_->flags.has(MessageFlag::HighlightedWhisper)) &&
+                 !this->flags.has(MessageLayoutFlag::IgnoreHighlights))
+        {
+            assert(this->message_->highlightColor);
+            if (this->message_->highlightColor)
+            {
+                backgroundColor = blendThemeHighlight(
+                    backgroundColor, *this->message_->highlightColor,
+                    ctx.highlightOpacityAdjustment);
+            }
+        }
+        else if (this->message_->flags.has(MessageFlag::Announcement) &&
+                 ctx.preferences.enableAnnouncementHighlight)
+        {
+            backgroundColor = blendThemeHighlight(
+                backgroundColor,
+                *ctx.colorProvider.color(colorTypeFromHelixAnnouncementColor(
+                    this->message_->announcementColor,
+                    ctx.preferences.enableColoredAnnouncementHighlight)),
+                ctx.highlightOpacityAdjustment);
+        }
+        else if (this->message_->flags.has(MessageFlag::Subscription) &&
+                 ctx.preferences.enableSubHighlight)
+        {
+            backgroundColor = blendThemeHighlight(
+                backgroundColor,
+                *ctx.colorProvider.color(ColorType::Subscription),
+                ctx.highlightOpacityAdjustment);
+        }
+        else if ((this->message_->flags.has(MessageFlag::RedeemedHighlight) ||
+                  (this->message_->flags.has(
+                       MessageFlag::RedeemedChannelPointReward) &&
+                   !this->message_->usesTwitchGigantifyPresentation())) &&
+                 ctx.preferences.enableRedeemedHighlight)
+        {
+            backgroundColor = blendThemeHighlight(
+                backgroundColor,
+                *ctx.colorProvider.color(ColorType::RedeemedHighlight),
+                ctx.highlightOpacityAdjustment);
+        }
+        else if (this->message_->flags.has(MessageFlag::ChatWarning) &&
+                 ctx.preferences.enableAutomodHighlight)
+        {
+            backgroundColor = blendThemeHighlight(
+                backgroundColor,
+                *ctx.colorProvider.color(ColorType::AutomodHighlight),
+                ctx.highlightOpacityAdjustment);
+        }
+        else if (this->message_->flags.has(MessageFlag::AutoMod) ||
+                 this->message_->flags.has(MessageFlag::LowTrustUsers))
+        {
+            if (this->message_->autoModReview)
+            {
+                if (ctx.preferences.enableAutomodHighlight)
+                {
+                    auto accent =
+                        *ctx.colorProvider.color(ColorType::AutomodHighlight);
+                    if (this->flags.has(
+                            MessageLayoutFlag::AutoModReviewChannel))
+                    {
+                        accent.setAlpha(18);
+                    }
+                    backgroundColor =
+                        blendThemeHighlight(backgroundColor, accent,
+                                            ctx.highlightOpacityAdjustment);
+                }
+            }
+            else if (ctx.preferences.enableAutomodHighlight &&
+                     (this->message_->flags.has(
+                          MessageFlag::AutoModOffendingMessage) ||
+                      this->message_->flags.has(
+                          MessageFlag::AutoModOffendingMessageHeader)))
+            {
+                backgroundColor = blendThemeHighlight(
                     backgroundColor,
-                    ctx.preferences.clientDetectionWebColor);
-                break;
-            case Message::ClientDetectionStatus::Android:
-                backgroundColor = blendColors(
+                    *ctx.colorProvider.color(ColorType::AutomodHighlight),
+                    ctx.highlightOpacityAdjustment);
+            }
+            else if (ctx.preferences.enableAutomodHighlight)
+            {
+                backgroundColor = blendThemeHighlight(
                     backgroundColor,
-                    ctx.preferences.clientDetectionAndroidColor);
-                break;
-            case Message::ClientDetectionStatus::IOS:
-                backgroundColor = blendColors(
-                    backgroundColor,
-                    ctx.preferences.clientDetectionIosColor);
-                break;
-            case Message::ClientDetectionStatus::Unknown:
-            case Message::ClientDetectionStatus::Abnormal:
-                break;
+                    HighlightPhrase::FALLBACK_AUTOMOD_HIGHLIGHT_COLOR,
+                    ctx.highlightOpacityAdjustment);
+            }
+        }
+        else if (this->message_->flags.has(MessageFlag::Debug))
+        {
+            backgroundColor = QColor("#4A273D");
+        }
+        else if ((ctx.preferences.enableClientDetectionHighlight &&
+                  this->message_->clientDetection !=
+                      Message::ClientDetectionStatus::Unknown &&
+                  this->message_->clientDetection !=
+                      Message::ClientDetectionStatus::Abnormal) ||
+                 (ctx.preferences.enableAbnormalClientDetectionHighlight &&
+                  this->message_->clientDetection ==
+                      Message::ClientDetectionStatus::Abnormal))
+        {
+            switch (this->message_->clientDetection)
+            {
+                case Message::ClientDetectionStatus::Web:
+                    backgroundColor = blendThemeHighlight(
+                        backgroundColor,
+                        ctx.preferences.clientDetectionWebColor,
+                        ctx.highlightOpacityAdjustment);
+                    break;
+                case Message::ClientDetectionStatus::Android:
+                    backgroundColor = blendThemeHighlight(
+                        backgroundColor,
+                        ctx.preferences.clientDetectionAndroidColor,
+                        ctx.highlightOpacityAdjustment);
+                    break;
+                case Message::ClientDetectionStatus::IOS:
+                    backgroundColor = blendThemeHighlight(
+                        backgroundColor,
+                        ctx.preferences.clientDetectionIosColor,
+                        ctx.highlightOpacityAdjustment);
+                    break;
+                case Message::ClientDetectionStatus::Abnormal:
+                    backgroundColor = blendThemeHighlight(
+                        backgroundColor,
+                        ctx.preferences.clientDetectionAbnormalColor,
+                        ctx.highlightOpacityAdjustment);
+                    break;
+                case Message::ClientDetectionStatus::Unknown:
+                    break;
+            }
+        }
+        else if (this->message_->flags.has(
+                     MessageFlag::UncategorizedNotification))
+        {
+            backgroundColor = blendThemeHighlight(
+                backgroundColor,
+                *ctx.colorProvider.color(ColorType::Subscription),
+                ctx.highlightOpacityAdjustment);
         }
     }
 
     painter.fillRect(buffer->rect(), backgroundColor);
+    if (ctx.preferences.showHighlights && this->message_->autoModReview)
+    {
+        const bool selected =
+            this->flags.has(MessageLayoutFlag::AutoModReviewSelected);
+        auto accent =
+            selected ? ctx.messageColors.linkText
+                     : *ctx.colorProvider.color(ColorType::AutomodHighlight);
+        accent.setAlpha(selected ? 205 : 110);
+        painter.fillRect(
+            QRectF(0, 0, std::max(1.0, (selected ? 2.0 : 1.0) * this->scale_),
+                   buffer->height()),
+            accent);
+    }
 
-    this->container_.paintElements(painter, ctx);
+    if (ctx.paintMessageShadow && ctx.messageShadowOpacity > 0)
+    {
+        QImage shadow(buffer->size(), QImage::Format_ARGB32_Premultiplied);
+        shadow.setDevicePixelRatio(buffer->devicePixelRatio());
+        shadow.fill(Qt::transparent);
+        {
+            QPainter shadowPainter(&shadow);
+            shadowPainter.setRenderHint(QPainter::SmoothPixmapTransform);
+
+            this->container_->paintElements(shadowPainter, ctx, false,
+                                            ctx.messageShadowEmotes);
+            shadowPainter.setCompositionMode(
+                QPainter::CompositionMode_SourceIn);
+            shadowPainter.fillRect(
+                QRectF(QPointF(), shadow.deviceIndependentSize()),
+                ctx.messageShadowColor);
+        }
+        const int blur = std::clamp(ctx.messageShadowBlur, 0, 8);
+        if (blur > 0)
+        {
+            const auto pixelRadius =
+                qRound(blur * this->scale_ * shadow.devicePixelRatio());
+            shadow = blurThemeShadow(std::move(shadow), pixelRadius);
+        }
+        const auto shadowPixmap = QPixmap::fromImage(std::move(shadow));
+
+        painter.save();
+        const QPointF offset{
+            ctx.messageShadowOffset.x() * this->scale_,
+            ctx.messageShadowOffset.y() * this->scale_,
+        };
+        painter.setOpacity(ctx.messageShadowOpacity / 100.0);
+        painter.drawPixmap(offset, shadowPixmap);
+        painter.restore();
+    }
+
+    assert(this->container_);
+    this->container_->paintElements(painter, ctx);
 
 #ifdef FOURTF
-
     painter.setPen(QColor(255, 0, 0));
     painter.drawRect(buffer->rect().x(), buffer->rect().y(),
                      buffer->rect().width() - 1, buffer->rect().height() - 1);
@@ -495,7 +788,7 @@ void MessageLayout::updateBuffer(QPixmap *buffer,
     QTextOption option;
     option.setAlignment(Qt::AlignRight | Qt::AlignTop);
 
-    painter.drawText(QRectF(1, 1, this->container_.getWidth() - 3, 1000),
+    painter.drawText(QRectF(1, 1, this->container_->getWidth() - 3, 1000),
                      QString::number(this->layoutCount_) + ", " +
                          QString::number(++this->bufferUpdatedCount_),
                      option);
@@ -519,17 +812,23 @@ void MessageLayout::deleteBuffer()
 
 void MessageLayout::deleteCache()
 {
+    if (this->container_)
+    {
+        this->container_->releasePickerImages();
+    }
     this->deleteBuffer();
+    this->container_.reset();
+}
 
-#ifdef XD
-    this->container_.clear();
-#endif
+bool MessageLayout::hasCache() const
+{
+    return this->container_ != nullptr;
 }
 
 const MessageLayoutElement *MessageLayout::getElementAt(QPointF point) const
 {
 
-    return this->container_.getElementAt(point);
+    return this->container_ ? this->container_->getElementAt(point) : nullptr;
 }
 
 std::pair<int, int> MessageLayout::getWordBounds(
@@ -538,7 +837,8 @@ std::pair<int, int> MessageLayout::getWordBounds(
 
     if (hoveredElement->getWordId() != -1)
     {
-        return this->container_.getWordBounds(hoveredElement);
+        assert(this->container_);
+        return this->container_->getWordBounds(hoveredElement);
     }
 
     const auto wordStart = this->getSelectionIndex(relativePos) -
@@ -552,23 +852,26 @@ std::pair<int, int> MessageLayout::getWordBounds(
 
 size_t MessageLayout::getLastCharacterIndex() const
 {
-    return this->container_.getLastCharacterIndex();
+    return this->lastCharacterIndex_;
 }
 
 size_t MessageLayout::getFirstMessageCharacterIndex() const
 {
-    return this->container_.getFirstMessageCharacterIndex();
+    return this->firstMessageCharacterIndex_;
 }
 
 size_t MessageLayout::getSelectionIndex(QPointF position) const
 {
-    return this->container_.getSelectionIndex(position);
+    return this->container_ ? this->container_->getSelectionIndex(position) : 0;
 }
 
 void MessageLayout::addSelectionText(QString &str, uint32_t from, uint32_t to,
                                      CopyMode copymode)
 {
-    this->container_.addSelectionText(str, from, to, copymode);
+    if (this->container_)
+    {
+        this->container_->addSelectionText(str, from, to, copymode);
+    }
 }
 
 }

@@ -43,6 +43,51 @@ public:
         return this->args_;
     }
 
+    ChatAutomationController *getChatAutomations() override
+    {
+        return nullptr;
+    }
+
+    ChatRecordingController *getChatRecordings() override
+    {
+        return nullptr;
+    }
+
+    HiddenUserController *getHiddenUsers() override
+    {
+        return nullptr;
+    }
+
+    FfzApBadges *getFfzApBadges() override
+    {
+        return nullptr;
+    }
+
+    BluzyrinoBadges *getBluzyrinoBadges() override
+    {
+        return nullptr;
+    }
+
+    PotatCommands *getPotatCommands() override
+    {
+        return nullptr;
+    }
+
+    YouTubeChatServer *getYouTubeChatServer() override
+    {
+        return nullptr;
+    }
+
+    TikTokChatServer *getTikTokChatServer() override
+    {
+        return nullptr;
+    }
+
+    automod::AutoModReviewController *getAutoModReview() override
+    {
+        return nullptr;
+    }
+
     Theme *getThemes() override
     {
         assert(

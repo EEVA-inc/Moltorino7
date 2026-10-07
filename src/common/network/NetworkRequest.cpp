@@ -12,11 +12,27 @@
 #include <QApplication>
 #include <QDebug>
 #include <QFile>
+#include <QLibraryInfo>
+#include <QVersionNumber>
 #include <QtConcurrent>
 
 #include <cassert>
 
 namespace chatterino {
+
+namespace network::detail {
+
+bool needsTwitchCdnHttp1(const QUrl &url, const QVersionNumber &qtVersion)
+{
+    const bool affectedQt =
+        qtVersion.majorVersion() == 6 &&
+        (qtVersion.minorVersion() == 7 ||
+         (qtVersion.minorVersion() == 8 && qtVersion.microVersion() < 2));
+    return affectedQt && url.scheme() == u"https" &&
+           url.host() == u"static-cdn.jtvnw.net" && url.port(443) == 443;
+}
+
+}
 
 NetworkRequest::NetworkRequest(const std::string &url,
                                NetworkRequestType requestType)
@@ -24,12 +40,6 @@ NetworkRequest::NetworkRequest(const std::string &url,
 {
     this->data->request.setUrl(QUrl(QString::fromStdString(url)));
     this->data->requestType = requestType;
-
-    if (getSettings()->xChatterino7NoHttp2)
-    {
-        this->data->request.setAttribute(QNetworkRequest::Http2AllowedAttribute,
-                                         false);
-    }
 
     this->initializeDefaultValues();
 }
@@ -146,6 +156,25 @@ NetworkRequest NetworkRequest::timeout(int ms) &&
     return std::move(*this);
 }
 
+NetworkRequest NetworkRequest::cancelWith(std::stop_token cancellation) &&
+{
+    this->data->cancellation = std::move(cancellation);
+    return std::move(*this);
+}
+
+NetworkRequest NetworkRequest::maximumResponseSize(qsizetype bytes) &&
+{
+    assert(bytes > 0);
+    this->data->maximumResponseSize = bytes;
+    return std::move(*this);
+}
+
+NetworkRequest NetworkRequest::maximumRedirectsAllowed(int maximum) &&
+{
+    this->data->request.setMaximumRedirectsAllowed(maximum);
+    return std::move(*this);
+}
+
 NetworkRequest NetworkRequest::concurrent() &&
 {
     this->data->executeConcurrently = true;
@@ -182,9 +211,11 @@ NetworkRequest NetworkRequest::payload(const QByteArray &payload) &&
     return std::move(*this);
 }
 
-NetworkRequest NetworkRequest::cache() &&
+NetworkRequest NetworkRequest::cache(
+    std::function<bool(const QByteArray &)> validator) &&
 {
     this->data->cache = true;
+    this->data->cacheValidator = std::move(validator);
     return std::move(*this);
 }
 
@@ -205,6 +236,15 @@ void NetworkRequest::execute()
 
 void NetworkRequest::initializeDefaultValues()
 {
+    static const auto qtVersion = QLibraryInfo::version();
+    if (getSettings()->xChatterino7NoHttp2 ||
+        network::detail::needsTwitchCdnHttp1(this->data->request.url(),
+                                             qtVersion))
+    {
+        this->data->request.setAttribute(QNetworkRequest::Http2AllowedAttribute,
+                                         false);
+    }
+
     const auto userAgent = QStringLiteral("chatterino/%1 (%2)")
                                .arg(Version::instance().version(),
                                     Version::instance().commitHash())

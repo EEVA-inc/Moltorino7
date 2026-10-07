@@ -10,6 +10,8 @@
 #include <QScreen>
 #include <QWidget>
 
+#include <algorithm>
+
 namespace {
 
 QPoint applyBounds(QScreen *screen, QPoint point, QSize frameSize, int height)
@@ -17,6 +19,11 @@ QPoint applyBounds(QScreen *screen, QPoint point, QSize frameSize, int height)
     if (screen == nullptr)
     {
         screen = QGuiApplication::primaryScreen();
+    }
+
+    if (screen == nullptr)
+    {
+        return point;
     }
 
     const QRect bounds = screen->availableGeometry();
@@ -32,15 +39,15 @@ QPoint applyBounds(QScreen *screen, QPoint point, QSize frameSize, int height)
     {
         point.setY(bounds.top());
     }
-    if (point.x() + frameSize.width() > bounds.right())
+    if (point.x() + frameSize.width() > bounds.right() + 1)
     {
         stickRight = true;
-        point.setX(bounds.right() - frameSize.width());
+        point.setX(bounds.right() + 1 - frameSize.width());
     }
-    if (point.y() + frameSize.height() > bounds.bottom())
+    if (point.y() + frameSize.height() > bounds.bottom() + 1)
     {
         stickBottom = true;
-        point.setY(bounds.bottom() - frameSize.height());
+        point.setY(bounds.bottom() + 1 - frameSize.height());
     }
 
     if (stickRight && stickBottom)
@@ -49,11 +56,33 @@ QPoint applyBounds(QScreen *screen, QPoint point, QSize frameSize, int height)
         point.setY(globalCursorPos.y() - height - 16);
     }
 
+    point.setX(std::clamp(
+        point.x(), bounds.left(),
+        std::max(bounds.left(), bounds.right() + 1 - frameSize.width())));
+    point.setY(std::clamp(
+        point.y(), bounds.top(),
+        std::max(bounds.top(), bounds.bottom() + 1 - frameSize.height())));
     return point;
 }
 
 void moveWithinScreen(QWidget *window, QScreen *screen, QPoint point)
 {
+    if (screen == nullptr)
+    {
+        screen = QGuiApplication::primaryScreen();
+    }
+    if (screen == nullptr)
+    {
+        return;
+    }
+    if (!window->isMaximized() && !window->isFullScreen())
+    {
+        const auto frame =
+            (window->frameSize() - window->size()).expandedTo(QSize(0, 0));
+        window->resize(window->size().boundedTo(
+            (screen->availableGeometry().size() - frame)
+                .expandedTo(QSize(1, 1))));
+    }
     auto checked =
         applyBounds(screen, point, window->frameSize(), window->height());
     window->move(checked);

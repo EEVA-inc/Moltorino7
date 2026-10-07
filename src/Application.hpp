@@ -5,6 +5,18 @@
 
 namespace chatterino {
 
+class ChatAutomationController;
+class ChatRecordingController;
+class HiddenUserController;
+class FfzApBadges;
+class BluzyrinoBadges;
+class PotatCommands;
+class YouTubeChatServer;
+class TikTokChatServer;
+namespace automod {
+class AutoModReviewController;
+}
+class MoltorinoDailyMessage;
 class Args;
 class TwitchIrcServer;
 class ITwitchIrcServer;
@@ -27,6 +39,7 @@ class TwitchBadges;
 class PluginController;
 #endif
 
+class Modes;
 class Theme;
 class WindowManager;
 class ILogging;
@@ -80,6 +93,16 @@ public:
     IApplication &operator=(IApplication &&) = delete;
 
     virtual bool isTest() const = 0;
+
+    virtual ChatAutomationController *getChatAutomations() = 0;
+    virtual ChatRecordingController *getChatRecordings() = 0;
+    virtual HiddenUserController *getHiddenUsers() = 0;
+    virtual FfzApBadges *getFfzApBadges() = 0;
+    virtual BluzyrinoBadges *getBluzyrinoBadges() = 0;
+    virtual PotatCommands *getPotatCommands() = 0;
+    virtual YouTubeChatServer *getYouTubeChatServer() = 0;
+    virtual TikTokChatServer *getTikTokChatServer() = 0;
+    virtual automod::AutoModReviewController *getAutoModReview() = 0;
 
     virtual const Paths &getPaths() = 0;
     virtual const Args &getArgs() = 0;
@@ -153,7 +176,7 @@ public:
         return false;
     }
 
-    void initialize(Settings &settings, const Paths &paths);
+    void initialize(Settings &settings, const Modes &modes, const Paths &paths);
     void load();
     void aboutToQuit();
     void stop();
@@ -176,16 +199,23 @@ private:
     std::unique_ptr<SeventvAPI> seventvAPI;
     std::unique_ptr<CrashHandler> crashHandler;
     std::unique_ptr<CommandController> commands;
+    std::unique_ptr<ChatAutomationController> chatAutomations;
+    std::unique_ptr<ChatRecordingController> chatRecordings;
     std::unique_ptr<NotificationController> notifications;
+    std::unique_ptr<SeventvPaints> seventvPaints;
+    std::unique_ptr<HiddenUserController> hiddenUsers;
     std::unique_ptr<HighlightController> highlights;
     std::unique_ptr<TwitchIrcServer> twitch;
     std::unique_ptr<FfzBadges> ffzBadges;
+    std::unique_ptr<FfzApBadges> ffzApBadges;
+    std::unique_ptr<BluzyrinoBadges> bluzyrinoBadges;
+    std::unique_ptr<PotatCommands> potatCommands;
     std::unique_ptr<BttvBadges> bttvBadges;
     std::unique_ptr<SeventvBadges> seventvBadges;
     std::unique_ptr<HomiesBadges> homiesBadges;
     std::unique_ptr<MoltorinoSupporterBadges> moltorinoSupporterBadges;
     std::unique_ptr<RepeatedMessageDetector> repeatedMessageDetector;
-    std::unique_ptr<SeventvPaints> seventvPaints;
+    std::unique_ptr<automod::AutoModReviewController> autoModReview;
     std::unique_ptr<SeventvPersonalEmotes> seventvPersonalEmotes;
     std::unique_ptr<UserDataController> userData;
     std::unique_ptr<ISoundController> sound;
@@ -204,6 +234,9 @@ private:
     std::unique_ptr<pronouns::Pronouns> pronouns;
     std::unique_ptr<SpellChecker> spellChecker;
     std::unique_ptr<KickChatServer> kickChatServer;
+    std::unique_ptr<YouTubeChatServer> youtubeChatServer;
+    std::unique_ptr<TikTokChatServer> tiktokChatServer;
+    std::unique_ptr<MoltorinoDailyMessage> dailyMessage;
 #ifdef CHATTERINO_HAVE_PLUGINS
     std::unique_ptr<PluginController> plugins;
 #endif
@@ -217,6 +250,15 @@ public:
     {
         return this->args_;
     }
+    ChatAutomationController *getChatAutomations() override;
+    ChatRecordingController *getChatRecordings() override;
+    HiddenUserController *getHiddenUsers() override;
+    FfzApBadges *getFfzApBadges() override;
+    BluzyrinoBadges *getBluzyrinoBadges() override;
+    PotatCommands *getPotatCommands() override;
+    YouTubeChatServer *getYouTubeChatServer() override;
+    TikTokChatServer *getTikTokChatServer() override;
+    automod::AutoModReviewController *getAutoModReview() override;
     Theme *getThemes() override;
     Fonts *getFonts() override;
     EmoteController *getEmotes() override;
@@ -267,7 +309,7 @@ public:
     KickChatServer *getKickChatServer() override;
 
 private:
-    void initNm(const Paths &paths);
+    void initNm(const Modes &modes, const Paths &paths);
 
     std::unique_ptr<NativeMessagingServer> nmServer;
     Updates &updates;
@@ -280,5 +322,6 @@ IApplication *getApp();
 IApplication *tryGetApp();
 
 bool isAppAboutToQuit();
+void requestApplicationQuit();
 
 }

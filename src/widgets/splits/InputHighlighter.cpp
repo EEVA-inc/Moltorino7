@@ -17,6 +17,7 @@
 #include "providers/seventv/SeventvEmotes.hpp"
 #include "providers/twitch/TwitchAccount.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
+#include "providers/youtube/YouTubeChannel.hpp"
 #include "singletons/Settings.hpp"
 
 #include <QTextCharFormat>
@@ -26,7 +27,8 @@ namespace {
 
 using namespace chatterino;
 
-bool isEmote(TwitchChannel *twitch, KickChannel *kick, const QString &word)
+bool isEmote(TwitchChannel *twitch, KickChannel *kick, YouTubeChannel *youtube,
+             const QString &word)
 {
     EmoteName name{word};
     if (twitch)
@@ -55,6 +57,10 @@ bool isEmote(TwitchChannel *twitch, KickChannel *kick, const QString &word)
             return true;
         }
     }
+    if (youtube)
+    {
+        return youtube->youtubeEmote(QStringView{word}) != nullptr;
+    }
 
     if (getApp()->getBttvEmotes()->emote(name) ||
         getApp()->getFfzEmotes()->emote(name) ||
@@ -75,16 +81,33 @@ bool isEmote(TwitchChannel *twitch, KickChannel *kick, const QString &word)
     return false;
 }
 
-bool isChatter(TwitchChannel *twitch, KickChannel *kick, const QString &word)
+bool isChatter(TwitchChannel *twitch, KickChannel *kick,
+               YouTubeChannel *youtube, const QString &word)
 {
-    ChannelChatters *cc =
-        twitch ? static_cast<ChannelChatters *>(twitch) : kick;
-    Channel *c = twitch ? static_cast<Channel *>(twitch) : kick;
+    ChannelChatters *cc = nullptr;
+    Channel *c = nullptr;
+    if (twitch)
+    {
+        cc = twitch;
+        c = twitch;
+    }
+    else if (kick)
+    {
+        cc = kick;
+        c = kick;
+    }
+    else if (youtube)
+    {
+        cc = youtube;
+        c = youtube;
+    }
     if (cc)
     {
+        const auto broadcasterName =
+            youtube ? c->getDisplayName() : c->getName();
         if (cc->accessChatters()->contains(word) ||
             (getSettings()->alwaysIncludeBroadcasterInUserCompletions &&
-             word.compare(c->getName(), Qt::CaseInsensitive) == 0))
+             word.compare(broadcasterName, Qt::CaseInsensitive) == 0))
         {
             return true;
         }
@@ -100,15 +123,16 @@ bool isLink(const QString &token)
 }
 
 bool isIgnoredWord(TwitchChannel *twitch, KickChannel *kick,
-                   const QString &word)
+                   YouTubeChannel *youtube, const QString &word)
 {
-    return isEmote(twitch, kick, word) || isChatter(twitch, kick, word);
+    return isEmote(twitch, kick, youtube, word) ||
+           isChatter(twitch, kick, youtube, word);
 }
 
 bool isIgnoredToken(TwitchChannel *twitch, KickChannel *kick,
-                    const QString &token)
+                    YouTubeChannel *youtube, const QString &token)
 {
-    return isEmote(twitch, kick, token) || isLink(token);
+    return isEmote(twitch, kick, youtube, token) || isLink(token);
 }
 
 }
@@ -120,7 +144,7 @@ namespace inputhighlight::detail {
 QRegularExpression wordRegex()
 {
     static QRegularExpression regex{
-        R"((?<=^|(?!_)\p{P})\p{L}+(?=$|(?!_)\p{P}))",
+        R"((?<=^|(?!_)\p{P})\p{L}+(?:['-]\p{L}+)*(?=$|(?!_)\p{P}))",
         QRegularExpression::PatternOption::UseUnicodePropertiesOption,
     };
     return regex;
@@ -145,6 +169,8 @@ void InputHighlighter::setChannel(const std::shared_ptr<Channel> &channel)
     this->channel = twitch;
     auto kick = std::dynamic_pointer_cast<KickChannel>(channel);
     this->kickChannel = kick;
+    auto youtube = std::dynamic_pointer_cast<YouTubeChannel>(channel);
+    this->youtubeChannel = youtube;
     this->rehighlight();
 }
 
@@ -215,6 +241,7 @@ void InputHighlighter::visitWords(
 {
     auto *channel = this->channel.lock().get();
     auto *kick = this->kickChannel.lock().get();
+    auto *youtube = this->youtubeChannel.lock().get();
 
     QStringView textView = text;
 
@@ -227,7 +254,7 @@ void InputHighlighter::visitWords(
     {
         auto tokenMatch = tokenIt.next();
         auto token = tokenMatch.captured();
-        if (isIgnoredToken(channel, kick, token))
+        if (isIgnoredToken(channel, kick, youtube, token))
         {
             continue;
         }
@@ -239,7 +266,7 @@ void InputHighlighter::visitWords(
             auto wordMatch = wordIt.next();
             auto word = wordMatch.captured();
 
-            if (!isIgnoredWord(channel, kick, word))
+            if (!isIgnoredWord(channel, kick, youtube, word))
             {
                 cb(word,
                    static_cast<int>(cmdTriggerLen + tokenMatch.capturedStart() +

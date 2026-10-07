@@ -9,6 +9,7 @@
 #include <boost/beast/http/string_body.hpp>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTimer>
 
 namespace {
 
@@ -22,6 +23,12 @@ public:
         , server(server)
         , socket(socket)
     {
+        this->socket->setParent(this);
+        this->socket->setReadBufferSize(64 * 1024);
+        QTimer::singleShot(30'000, this, [this] {
+            this->socket->abort();
+            this->deleteLater();
+        });
         QObject::connect(this->socket, &QTcpSocket::readyRead, this,
                          &Handler::readyRead);
         QObject::connect(this->socket, &QTcpSocket::disconnected, this,
@@ -34,7 +41,7 @@ public:
     }
 
     template <typename ConstBufferSequence>
-
+    // NOLINTNEXTLINE(readability-identifier-naming)
     size_t write_some(ConstBufferSequence cb)
     {
         boost::beast::error_code ec;
@@ -42,7 +49,7 @@ public:
     }
 
     template <typename ConstBufferSequence>
-
+    // NOLINTNEXTLINE(readability-identifier-naming)
     size_t write_some(ConstBufferSequence cb, boost::beast::error_code &ec)
     {
         ec = {};
@@ -65,17 +72,13 @@ private:
         while (true)
         {
             qint64 available = this->socket->bytesAvailable();
-            if (available <= 0)
+            if (available > 0)
+            {
+                this->message.append(this->socket->read(available));
+            }
+            if (this->message.isEmpty())
             {
                 return;
-            }
-            auto prevSize = this->message.size();
-            this->message.resize(prevSize + available);
-            auto nRead =
-                this->socket->read(this->message.data() + prevSize, available);
-            if (nRead < available)
-            {
-                this->message.resize(prevSize + nRead);
             }
 
             boost::beast::error_code ec;
@@ -102,7 +105,7 @@ private:
             {
                 if (ec == boost::beast::http::error::need_more)
                 {
-                    continue;
+                    return;
                 }
                 qCWarning(chatterinoHTTP) << ec.what();
                 this->socket->abort();
@@ -115,8 +118,12 @@ private:
                 auto target = msg.base().target();
                 auto path = QString::fromUtf8(
                     target.data(), static_cast<qsizetype>(target.size()));
+                auto method = msg.base().method_string();
                 bool keepAlive = msg.keep_alive();
-                auto [status, resBody] = this->server->handler()(path);
+                auto [status, resBody] = this->server->requestHandler()(
+                    {.method = QString::fromLatin1(
+                         method.data(), static_cast<qsizetype>(method.size())),
+                     .target = std::move(path)});
 
                 boost::beast::http::response<
                     boost::beast::http::span_body<char>>
@@ -157,7 +164,7 @@ private:
     Parser parser;
 };
 
-std::pair<unsigned, QByteArray> defaultHandler(const QString & )
+std::pair<unsigned, QByteArray> defaultHandler(const HttpServer::Request &)
 {
     return {404, {}};
 }
@@ -170,16 +177,21 @@ HttpServer::HttpServer(uint16_t port, QObject *parent)
     : QObject(parent)
     , handler_(defaultHandler)
 {
-    auto *tcpServer = new QTcpServer(this);
-    tcpServer->listen(QHostAddress::LocalHost, port);
+    this->server_ = new QTcpServer(this);
+    this->server_->listen(QHostAddress::LocalHost, port);
 
-    QObject::connect(tcpServer, &QTcpServer::newConnection, this,
-                     [this, tcpServer] {
-                         while (auto *conn = tcpServer->nextPendingConnection())
-                         {
-                             new Handler(this, conn);
-                         }
-                     });
+    QObject::connect(this->server_, &QTcpServer::newConnection, this, [this] {
+        while (auto *conn = this->server_->nextPendingConnection())
+        {
+            if (this->findChildren<QTcpSocket *>().size() >= 8)
+            {
+                conn->abort();
+                conn->deleteLater();
+                continue;
+            }
+            new Handler(this, conn);
+        }
+    });
 }
 
 void HttpServer::setHandler(HandlerCb handler)
@@ -188,12 +200,45 @@ void HttpServer::setHandler(HandlerCb handler)
     {
         return;
     }
-    this->handler_ = std::move(handler);
+    this->handler_ = [handler = std::move(handler)](const Request &request) {
+        return handler(request.target);
+    };
 }
 
-const HttpServer::HandlerCb &HttpServer::handler() const
+void HttpServer::setRequestHandler(RequestHandlerCb handler)
+{
+    if (handler)
+    {
+        this->handler_ = std::move(handler);
+    }
+}
+
+const HttpServer::RequestHandlerCb &HttpServer::requestHandler() const
 {
     return this->handler_;
+}
+
+bool HttpServer::isListening() const
+{
+    return this->server_ && this->server_->isListening();
+}
+
+uint16_t HttpServer::serverPort() const
+{
+    return this->server_ ? this->server_->serverPort() : 0;
+}
+
+QString HttpServer::errorString() const
+{
+    return this->server_ ? this->server_->errorString() : QString{};
+}
+
+void HttpServer::close()
+{
+    if (this->server_)
+    {
+        this->server_->close();
+    }
 }
 
 }

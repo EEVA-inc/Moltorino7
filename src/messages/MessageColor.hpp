@@ -12,7 +12,7 @@ namespace chatterino {
 struct MessageColors;
 
 struct MessageColor {
-    enum Type : uint8_t { Custom, Text, Link, System };
+    enum Type : uint8_t { Custom, Text, Link, System, Timestamp };
 
     MessageColor(const QColor &color);
     MessageColor(Type type_ = Text);

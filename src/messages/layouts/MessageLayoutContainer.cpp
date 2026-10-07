@@ -20,6 +20,7 @@
 #include <QPainter>
 #include <QVarLengthArray>
 
+#include <algorithm>
 #include <optional>
 
 namespace {
@@ -28,10 +29,19 @@ using namespace chatterino;
 
 constexpr QMargins MARGIN{8, 4, 8, 4};
 constexpr qreal COMPACT_EMOTES_OFFSET = 4;
+constexpr qreal ASCII_ART_WIDTH = 300.0;
 
 int maxUncollapsedLines()
 {
     return getSettings()->collpseMessagesMinLines.getValue();
+}
+
+bool usesCompactEmoteLayout(const MessageLayoutElement &element,
+                            MessageFlags flags)
+{
+    return !flags.has(MessageFlag::DisableCompactEmotes) &&
+           element.usesCompactEmoteLayout() &&
+           element.getCreator().getFlags().has(MessageElementFlag::EmoteImage);
 }
 
 }  // namespace
@@ -53,7 +63,12 @@ void MessageLayoutContainer::beginLayout(qreal width, float scale,
     this->lineHeight_ = 0;
     this->charIndex_ = 0;
 
-    this->width_ = width;
+    const auto horizontalMargin =
+        int(MARGIN.left() * scale) + int(MARGIN.right() * scale);
+    this->width_ =
+        flags.has(MessageFlag::AsciiArt) && getSettings()->wrapAsciiArt
+            ? std::min(width, ASCII_ART_WIDTH * scale + horizontalMargin)
+            : width;
     this->height_ = 0;
     this->scale_ = scale;
     this->imageScale_ = imageScale;
@@ -64,6 +79,11 @@ void MessageLayoutContainer::beginLayout(qreal width, float scale,
     auto mediumFontMetrics =
         getApp()->getFonts()->getFontMetrics(FontStyle::ChatMedium, scale);
     this->descent_ = mediumFontMetrics.descent();
+    this->useBalancedMetadataAlignment_ =
+        static_cast<BadgeAlignmentMode>(
+            getSettings()->badgeAlignment.getValue()) !=
+        BadgeAlignmentMode::Chatterino;
+    this->hasUsernameAlignment_ = false;
     this->textLineHeight_ = mediumFontMetrics.height();
     this->spaceWidth_ = mediumFontMetrics.horizontalAdvance(' ');
     this->dotdotdotWidth_ = mediumFontMetrics.horizontalAdvance("...");
@@ -139,7 +159,11 @@ void MessageLayoutContainer::endLayout()
 
 void MessageLayoutContainer::addElement(MessageLayoutElement *element)
 {
-    if (!this->fitsInLine(element->getRect().width()))
+    const auto width =
+        element->getRect().width() -
+        (this->shouldRemoveSpaceBetweenEmotes(*element, -2) ? this->spaceWidth_
+                                                            : 0);
+    if (!this->fitsInLine(width))
     {
         this->breakLine();
     }
@@ -213,9 +237,7 @@ void MessageLayoutContainer::breakLine()
         MessageLayoutElement *element = this->elements_.at(i).get();
 
         bool isCompactEmote =
-            !this->flags_.has(MessageFlag::DisableCompactEmotes) &&
-            element->getCreator().getFlags().has(
-                MessageElementFlag::EmoteImage);
+            usesCompactEmoteLayout(*element, this->flags_);
 
         qreal yExtra = 0;
         if (isCompactEmote)
@@ -227,11 +249,23 @@ void MessageLayoutContainer::breakLine()
                       MessageElementFlag::ModeratorTools,
                       MessageElementFlag::ReplyButton}))
         {
-            // Small meta-elements are bottom-aligned with text, but text line
-            // height includes the descender region (g, p, y, etc.). Shift them
-            // up by half the descent to split the difference between capital
-            // letters and lowercase letters with descenders.
-            yExtra = -this->descent_ / 2.0;
+            if (this->useBalancedMetadataAlignment_)
+            {
+                if (this->hasUsernameAlignment_)
+                {
+                    yExtra = std::min<qreal>(
+                        0, element->getRect().height() / 2.0 -
+                               this->metadataCenterAboveBottom_);
+                }
+                else
+                {
+                    // Small meta-elements are bottom-aligned with text, but text line
+                    // height includes the descender region (g, p, y, etc.). Shift them
+                    // up by half the descent to split the difference between capital
+                    // letters and lowercase letters with descenders.
+                    yExtra = -this->descent_ / 2.0;
+                }
+            }
         }
         else if (this->centerBadges_ &&
                  element->getCreator().getFlags().has(
@@ -288,7 +322,9 @@ void MessageLayoutContainer::breakLine()
 }
 
 void MessageLayoutContainer::paintElements(QPainter &painter,
-                                           const MessagePaintContext &ctx) const
+                                           const MessagePaintContext &ctx,
+                                           bool paintFragmentHighlights,
+                                           bool paintEmotes) const
 {
 #ifdef FOURTF
     static constexpr std::array<QColor, 5> lineColors{
@@ -309,6 +345,14 @@ void MessageLayoutContainer::paintElements(QPainter &painter,
 
     for (const auto &element : this->elements_)
     {
+        if (!paintEmotes &&
+            element->getCreator().getFlags().hasAny(
+                MessageElementFlag::EmoteImage, MessageElementFlag::EmojiImage,
+                MessageElementFlag::BitsStatic,
+                MessageElementFlag::BitsAnimated))
+        {
+            continue;
+        }
         if (ctx.isCollapsed && element->getLine() > 0)
         {
             continue;
@@ -320,7 +364,39 @@ void MessageLayoutContainer::paintElements(QPainter &painter,
 #endif
 
         painter.save();
-        element->paint(painter, ctx.messageColors);
+        const FragmentHighlight *highlight = nullptr;
+        if (paintFragmentHighlights && ctx.preferences.showHighlights &&
+            getSettings()->highlightMatchedFragments)
+        {
+            highlight = element->fragmentHighlight();
+            if (highlight != nullptr)
+            {
+                paintFragmentHighlightBackground(painter, element->getRect(),
+                                                 *highlight);
+            }
+        }
+        auto *textElement = paintFragmentHighlights
+                                ? nullptr
+                                : dynamic_cast<TextLayoutElement *>(
+                                      element.get());
+        if (textElement != nullptr)
+        {
+            textElement->paintWithoutFragmentHighlights(painter);
+        }
+        else if (ctx.hoverAnimateOnly)
+        {
+            element->paint(painter, ctx.messageColors, true,
+                           element.get() == ctx.hoveredElement);
+        }
+        else
+        {
+            element->paint(painter, ctx.messageColors);
+        }
+        if (highlight != nullptr)
+        {
+            paintFragmentHighlightForeground(painter, element->getRect(),
+                                             *highlight);
+        }
         painter.restore();
     }
 
@@ -363,20 +439,54 @@ void MessageLayoutContainer::paintElements(QPainter &painter,
     }
 }
 
-bool MessageLayoutContainer::paintAnimatedElements(QPainter &painter,
-                                                   qreal yOffset,
-                                                   bool isCollapsed) const
+AnimatedElementRegions MessageLayoutContainer::paintAnimatedElements(
+    QPainter &painter, qreal yOffset, bool isCollapsed,
+    const AnimatedMessageShadow *shadow,
+    const MessageLayoutElement *hoveredElement, bool hoverAnimateOnly) const
 {
-    bool anyAnimatedElement = false;
+    AnimatedElementRegions paintedRegions;
     for (const auto &element : this->elements_)
     {
         if (isCollapsed && element->getLine() > 0)
         {
             continue;
         }
-        anyAnimatedElement |= element->paintAnimated(painter, yOffset);
+        if (hoverAnimateOnly && element.get() != hoveredElement)
+        {
+            const auto *image =
+                dynamic_cast<const ImageLayoutElement *>(element.get());
+            if (!image || !image->hasPreviewImage())
+            {
+                continue;
+            }
+        }
+        const auto *elementShadow = shadow;
+        if (shadow && !shadow->emotes &&
+            element->getCreator().getFlags().hasAny(
+                MessageElementFlag::EmoteImage, MessageElementFlag::EmojiImage,
+                MessageElementFlag::BitsStatic,
+                MessageElementFlag::BitsAnimated))
+        {
+            elementShadow = nullptr;
+        }
+        const auto elementPaintedRegion =
+            hoverAnimateOnly
+                ? element->paintAnimated(painter, yOffset, elementShadow, true,
+                                         element.get() == hoveredElement)
+                : element->paintAnimated(painter, yOffset, elementShadow);
+        auto &paintedRegion = element->usesOwnAnimationTimer()
+                                  ? paintedRegions.selfTimed
+                                  : paintedRegions.periodic;
+        paintedRegion += elementPaintedRegion;
+        if (hoverAnimateOnly && element.get() == hoveredElement &&
+            !elementPaintedRegion.isEmpty())
+        {
+            auto elementRect = QRectF(element->getRect());
+            elementRect.moveTop(elementRect.y() + yOffset);
+            paintedRegion += elementRect.toAlignedRect();
+        }
     }
-    return anyAnimatedElement;
+    return paintedRegions;
 }
 
 void MessageLayoutContainer::paintSelection(QPainter &painter,
@@ -401,6 +511,10 @@ void MessageLayoutContainer::paintSelection(QPainter &painter,
 
         for (const Line &line : this->lines_)
         {
+            if (line.startIndex == line.endIndex)
+            {
+                continue;
+            }
             // Fully paint a selection rectangle over all lines
             auto left = this->elements_[line.startIndex]->getRect().left();
             auto right = this->elements_[line.endIndex - 1]->getRect().right();
@@ -454,6 +568,7 @@ void MessageLayoutContainer::addSelectionText(QString &str, uint32_t from,
             if (element->getCreator().getFlags().hasAny({
                     MessageElementFlag::Timestamp,
                     MessageElementFlag::Username,
+                    MessageElementFlag::Pronouns,
                     MessageElementFlag::Badges,
                     MessageElementFlag::ChannelName,
                 }))
@@ -570,7 +685,7 @@ size_t MessageLayoutContainer::getFirstMessageCharacterIndex() const
     static const FlagsEnum<MessageElementFlag> skippedFlags{
         MessageElementFlag::RepliedMessage, MessageElementFlag::Timestamp,
         MessageElementFlag::ModeratorTools, MessageElementFlag::Badges,
-        MessageElementFlag::Username,
+        MessageElementFlag::Username,       MessageElementFlag::Pronouns,
     };
 
     // Get the index of the first character of the real message
@@ -734,44 +849,29 @@ void MessageLayoutContainer::addElement(MessageLayoutElement *element,
     bool isAddingMode = prevIndex == -2;
     bool isRTLAdjusting = this->isRTL() && !isAddingMode;
 
-    /// Returns `true` if a previously added `spaceWidth_` should be removed
-    /// before the to be added emote. The space was inserted by the
-    /// previous element but isn't desired as "removeSpacesBetweenEmotes" is
-    /// enabled and both elements are emotes.
-    auto shouldRemoveSpaceBetweenEmotes = [this, prevIndex,
-                                           isAddingMode]() -> bool {
-        if (prevIndex == -1 || this->elements_.empty())
+    if (isAddingMode && this->useBalancedMetadataAlignment_ &&
+        !this->hasUsernameAlignment_ &&
+        element->getCreator().getFlags().has(MessageElementFlag::Username))
+    {
+        for (const auto character : element->getText())
         {
-            // No previous element found
-            return false;
+            if (character.isLetterOrNumber())
+            {
+                const auto &alignment =
+                    getApp()->getFonts()->getUsernameAlignmentMetrics(
+                        this->scale_);
+                this->metadataCenterAboveBottom_ =
+                    character.isLower() ? alignment.lowercaseCenterAboveBottom
+                                        : alignment.uppercaseCenterAboveBottom;
+                this->hasUsernameAlignment_ = true;
+                break;
+            }
         }
+    }
 
-        const auto &lastElement =
-            isAddingMode ? this->elements_.back() : this->elements_[prevIndex];
-
-        if (!lastElement)
-        {
-            assert(false && "Empty element in container found");
-            return false;
-        }
-
-        if (!lastElement->hasTrailingSpace())
-        {
-            // Last element did not have a trailing space, so we don't need to do anything.
-            return false;
-        }
-
-        if (lastElement->getLine() != this->line_)
-        {
-            // Last element was not on the same line as us
-            return false;
-        }
-
-        // Returns true if the last element was an emote image
-        return lastElement->getFlags().has(MessageElementFlag::EmoteImage);
-    };
-
-    bool isRTLElement = element->getText().isRightToLeft();
+    bool isRTLElement =
+        !element->getFlags().has(MessageElementFlag::EmoteImage) &&
+        element->getText().isRightToLeft();
     if (isRTLElement)
     {
         this->lineContainsRTL_ = true;
@@ -801,9 +901,7 @@ void MessageLayoutContainer::addElement(MessageLayoutElement *element,
     qreal elementLineHeight = element->getRect().height();
 
     // compact emote offset
-    bool isCompactEmote =
-        !this->flags_.has(MessageFlag::DisableCompactEmotes) &&
-        element->getCreator().getFlags().has(MessageElementFlag::EmoteImage);
+    bool isCompactEmote = usesCompactEmoteLayout(*element, this->flags_);
 
     if (isCompactEmote)
     {
@@ -824,9 +922,7 @@ void MessageLayoutContainer::addElement(MessageLayoutElement *element,
         yOffset -= (MARGIN.top() * this->scale_);
     }
 
-    if (getSettings()->removeSpacesBetweenEmotes &&
-        element->getFlags().hasAny({MessageElementFlag::EmoteImage}) &&
-        shouldRemoveSpaceBetweenEmotes())
+    if (this->shouldRemoveSpaceBetweenEmotes(*element, prevIndex))
     {
         // Move cursor one 'space width' to the left (right in case of RTL) to combine hug the previous emote
         if (isRTLAdjusting)
@@ -852,6 +948,16 @@ void MessageLayoutContainer::addElement(MessageLayoutElement *element,
                 this->currentY_ - element->getRect().height() + yOffset));
 
     element->setLine(this->line_);
+
+    if (isAddingMode && !this->elements_.empty())
+    {
+        auto *previous = this->elements_.back().get();
+        if (previous->getLine() != element->getLine())
+        {
+            previous->clearFragmentHighlightContinuity(false, true);
+            element->clearFragmentHighlightContinuity(true, false);
+        }
+    }
 
     // add element
     if (isAddingMode)
@@ -881,6 +987,69 @@ void MessageLayoutContainer::addElement(MessageLayoutElement *element,
             this->currentX_ += this->spaceWidth_;
         }
     }
+}
+
+void MessageLayoutContainer::releasePickerImages() const
+{
+    for (const auto &element : this->elements_)
+    {
+        if (const auto *image =
+                dynamic_cast<const ImageLayoutElement *>(element.get()))
+        {
+            image->releasePickerImages();
+        }
+    }
+}
+
+bool MessageLayoutContainer::shouldRemoveSpaceBetweenEmotes(
+    const MessageLayoutElement &element, qsizetype prevIndex) const
+{
+    if (!element.getFlags().has(MessageElementFlag::EmoteImage))
+    {
+        return false;
+    }
+    if (prevIndex == -1 || this->elements_.empty())
+    {
+        // No previous element found
+        return false;
+    }
+
+    const auto &lastElement =
+        prevIndex == -2 ? this->elements_.back() : this->elements_[prevIndex];
+
+    if (!lastElement)
+    {
+        assert(false && "Empty element in container found");
+        return false;
+    }
+
+    if (!lastElement->hasTrailingSpace())
+    {
+        // Last element did not have a trailing space, so we don't need to do anything.
+        return false;
+    }
+
+    if (lastElement->getLine() != this->line_)
+    {
+        // Last element was not on the same line as us
+        return false;
+    }
+
+    if (!lastElement->getFlags().has(MessageElementFlag::EmoteImage))
+    {
+        return false;
+    }
+    if (getSettings()->removeSpacesBetweenEmotes)
+    {
+        /// Returns `true` if a previously added `spaceWidth_` should be removed
+        /// before the to be added emote. The space was inserted by the
+        /// previous element but isn't desired as "removeSpacesBetweenEmotes" is
+        /// enabled and both elements are emotes.
+        return true;
+    }
+    const auto *layered =
+        dynamic_cast<const LayeredImageLayoutElement *>(&element);
+    return layered && layered->removesPreviousSpace();
 }
 
 void MessageLayoutContainer::reorderRTL(size_t firstTextIndex)
@@ -991,6 +1160,10 @@ std::optional<size_t> MessageLayoutContainer::paintSelectionStart(
         for (size_t i = startIndex; i < this->lines_.size(); i++)
         {
             const auto &line = this->lines_[i];
+            if (line.startIndex == line.endIndex)
+            {
+                continue;
+            }
             auto left = this->elements_[line.startIndex]->getRect().left();
             auto right = this->elements_[line.endIndex - 1]->getRect().right();
 
@@ -1004,6 +1177,10 @@ std::optional<size_t> MessageLayoutContainer::paintSelectionStart(
     {
         const Line &line = this->lines_[lineIndex];
 
+        if (line.startIndex == line.endIndex)
+        {
+            continue;
+        }
         // Selection doesn't start in this line
         if (selection.selectionMin.charIndex >= line.endCharIndex)
         {
@@ -1106,6 +1283,10 @@ void MessageLayoutContainer::paintSelectionEnd(QPainter &painter,
     for (; lineIndex < this->lines_.size(); lineIndex++)
     {
         const Line &line = this->lines_[lineIndex];
+        if (line.startIndex == line.endIndex)
+        {
+            continue;
+        }
         size_t index = line.startCharIndex;
 
         // the whole line is included

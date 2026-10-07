@@ -12,6 +12,8 @@ namespace chatterino {
 
 class AccountSwitchWidget;
 class KickAccountSwitchWidget;
+class TikTokAccountSwitchWidget;
+class YouTubeAccountSwitchWidget;
 
 class AccountSwitchPopup : public BaseWindow
 {
@@ -31,6 +33,8 @@ private:
     struct {
         AccountSwitchWidget *accountSwitchWidget = nullptr;
         KickAccountSwitchWidget *kickAccountSwitcher = nullptr;
+        TikTokAccountSwitchWidget *tiktokAccountSwitcher = nullptr;
+        YouTubeAccountSwitchWidget *youtubeAccountSwitcher = nullptr;
     } ui_;
 };
 

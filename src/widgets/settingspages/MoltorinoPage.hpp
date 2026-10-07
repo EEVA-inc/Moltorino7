@@ -2,10 +2,13 @@
 
 #include "widgets/settingspages/SettingsPage.hpp"
 
+#include <pajlada/signals/scoped-connection.hpp>
+
 class QFrame;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QTabBar;
 
 namespace chatterino {
 
@@ -20,6 +23,8 @@ public:
     MoltorinoPage();
 
     bool filterElements(const QString &query) override;
+    void showAccountSetup();
+    void showBotBadgeSetup();
 
 private:
     void openAuthDialog();
@@ -37,6 +42,8 @@ private:
     void verifyBotBadgeConfiguration();
 
     GeneralPageView *settingsView_{};
+    GeneralPageView *moderationView_{};
+    QTabBar *tabBar_{};
 
     QLabel *authStatusLabel_{};
     QLabel *authInstructionsLabel_{};
@@ -58,6 +65,7 @@ private:
     bool botBadgeUnlocked_{false};
     bool botBadgeIsValidating_{false};
     int botBadgeValidationGeneration_{0};
+    pajlada::Signals::ScopedConnection chatAutomationRulesConnection_;
 
 protected:
     void hideEvent(QHideEvent *event) override;

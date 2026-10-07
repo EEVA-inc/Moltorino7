@@ -63,6 +63,7 @@ void IvrApi::getModVip(
                     {"user_id", obj.value("id").toString()},
                     {"user_login", obj.value("login").toString()},
                     {"user_name", obj.value("displayName").toString()},
+                    {"granted_at", obj.value("grantedAt").toString()},
                 });
             }
 

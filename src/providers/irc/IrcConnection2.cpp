@@ -13,15 +13,10 @@ using namespace std::chrono_literals;
 
 namespace chatterino {
 
-namespace {
-
-const auto payload = "chatterino/" + CHATTERINO_VERSION;
-
-}
-
 IrcConnection::IrcConnection(QObject *parent)
     : Communi::IrcConnection(parent)
 {
+    static const auto payload = "chatterino/" + Version::instance().version();
 
     QObject::connect(this, &Communi::IrcConnection::socketError, this,
                      [](QAbstractSocket::SocketError error) {

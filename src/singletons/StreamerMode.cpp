@@ -96,7 +96,12 @@ bool isBroadcasterSoftwareActive()
                 shouldShowTimeoutWarning = false;
 
                 postToThread([] {
-                    getApp()->getTwitch()->addGlobalSystemMessage(
+                    auto *app = tryGetApp();
+                    if (!app || isAppAboutToQuit())
+                    {
+                        return;
+                    }
+                    app->getTwitch()->addGlobalSystemMessage(
                         "Streamer Mode is set to Automatic, but pgrep timed "
                         "out. This can happen if your system lagged at the "
                         "wrong moment. If Streamer Mode continues to not work, "
@@ -116,7 +121,12 @@ bool isBroadcasterSoftwareActive()
                 shouldShowWarning = false;
 
                 postToThread([] {
-                    getApp()->getTwitch()->addGlobalSystemMessage(
+                    auto *app = tryGetApp();
+                    if (!app || isAppAboutToQuit())
+                    {
+                        return;
+                    }
+                    app->getTwitch()->addGlobalSystemMessage(
                         "Streamer Mode is set to Automatic, but pgrep is "
                         "missing. "
                         "Install it to fix the issue or set Streamer Mode to "
@@ -242,18 +252,19 @@ void StreamerMode::start()
 
 StreamerModePrivate::StreamerModePrivate(StreamerMode *parent)
     : parent_(parent)
-    , timer_(new QTimer(&this->thread_))
+    , timer_(new QTimer)
 {
     this->thread_.setObjectName("StreamerMode");
     this->timer_->moveToThread(&this->thread_);
+    QObject::connect(&this->thread_, &QThread::finished, this->timer_,
+                     &QObject::deleteLater);
     QObject::connect(this->timer_, &QTimer::timeout, [this] {
         this->check();
     });
 
     getSettings()->enableStreamerMode.connect(
         [this](auto value) {
-            QMetaObject::invokeMethod(this->thread_.eventDispatcher(), [this,
-                                                                        value] {
+            QMetaObject::invokeMethod(this->timer_, [this, value] {
                 this->settingChanged(static_cast<StreamerModeSetting>(value));
             });
         },
@@ -271,15 +282,16 @@ void StreamerModePrivate::start()
 
 StreamerModePrivate::~StreamerModePrivate()
 {
-    this->timer_->deleteLater();
-    this->timer_ = nullptr;
-    this->thread_.quit();
-    if (!this->thread_.wait(500))
+    this->settingConnections_.clear();
+    if (!this->thread_.isRunning() && !this->thread_.isFinished())
     {
-        qCWarning(chatterinoStreamerMode)
-            << "Failed waiting for thread, terminating it";
-        this->thread_.terminate();
+
+        delete this->timer_;
+        return;
     }
+    this->thread_.quit();
+
+    this->thread_.wait();
 }
 
 bool StreamerModePrivate::isEnabled() const

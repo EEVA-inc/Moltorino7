@@ -5,15 +5,19 @@
 #pragma once
 
 #include <QString>
+#include <QStringList>
 
 #include <optional>
 
 namespace chatterino {
 
+class Modes;
+
 class Paths
 {
 public:
     Paths();
+    explicit Paths(const Modes &modes);
 
     QString rootAppDataDirectory;
 
@@ -32,6 +36,7 @@ public:
     QString pluginsDirectory;
 
     QString themesDirectory;
+    QStringList bluzyrinoDataDirectories;
 
     QString dictionariesDirectory;
 
@@ -48,7 +53,7 @@ public:
 private:
     void initAppFilePathHash();
     void initCheckPortable();
-    void initRootDirectory();
+    void initRootDirectory(const Modes &modes);
     void initSubDirectories();
 
     std::optional<bool> portable_;

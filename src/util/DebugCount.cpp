@@ -36,6 +36,7 @@ constexpr bool isBytes(DebugObject target)
         case DebugObject::BytesImageCurrent:
         case DebugObject::BytesImageLoaded:
         case DebugObject::BytesImageUnloaded:
+        case DebugObject::BytesMessageDrawingBufferCurrent:
             return true;
     }
 }
@@ -43,6 +44,12 @@ constexpr bool isBytes(DebugObject target)
 }
 
 namespace chatterino {
+
+int64_t DebugCount::get(DebugObject target)
+{
+    auto counts = COUNTS.access();
+    return counts->at(static_cast<size_t>(target)).value;
+}
 
 void DebugCount::set(DebugObject target, int64_t amount)
 {

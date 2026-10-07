@@ -238,7 +238,6 @@ void AdvancedLoginWidget::refreshButtons()
 LoginDialog::LoginDialog(QWidget *parent)
     : QDialog(parent)
 {
-    this->setMinimumWidth(300);
     this->setWindowFlags(
         (this->windowFlags() & ~(Qt::WindowContextHelpButtonHint)) |
         Qt::Dialog | Qt::MSWindowsFixedSizeDialogHint);
@@ -246,6 +245,8 @@ LoginDialog::LoginDialog(QWidget *parent)
     this->setWindowTitle("Add new account");
 
     this->setLayout(&this->ui_.mainLayout);
+    this->ui_.tabWidget.setUsesScrollButtons(false);
+    this->ui_.tabWidget.setElideMode(Qt::ElideNone);
     this->ui_.mainLayout.addWidget(&this->ui_.tabWidget);
 
     this->ui_.tabWidget.addTab(&this->ui_.basic, "Basic");
@@ -261,6 +262,10 @@ LoginDialog::LoginDialog(QWidget *parent)
     this->ui_.mainLayout.addWidget(&this->ui_.buttonBox);
 
     this->ui_.tabWidget.addTab(&this->ui_.kick, "Kick");
+#if MOLTORINO_HAVE_YOUTUBE_ACCOUNTS
+    this->ui_.tabWidget.addTab(&this->ui_.youtube, "YouTube");
+#endif
+    this->ui_.tabWidget.addTab(&this->ui_.tiktok, "TikTok");
 }
 
 }

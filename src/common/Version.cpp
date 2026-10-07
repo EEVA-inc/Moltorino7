@@ -7,45 +7,19 @@
 #include <QFileInfo>
 #include <QStringBuilder>
 
-#define STRINGIFY(x) #x
+#define STRINGIFY(...) #__VA_ARGS__
 
-#define STRINGIFY2(x) STRINGIFY(x)
+#define STRINGIFY2(...) STRINGIFY(__VA_ARGS__)
 
 namespace chatterino {
 
 using namespace Qt::Literals::StringLiterals;
 
-namespace {
-
-QString makeDefaultInternalVersion(const QString &commitHash, bool isModified,
-                                   const QString &dateOfBuild)
-{
-    QString normalizedDate = dateOfBuild;
-    normalizedDate.remove('-');
-    if (normalizedDate.isEmpty())
-    {
-        normalizedDate = "unknown";
-    }
-
-    QString shortHash = commitHash.left(7);
-    if (shortHash.isEmpty())
-    {
-        shortHash = "local";
-    }
-
-    auto internal = "molto-" + normalizedDate + "-" + shortHash;
-    if (isModified)
-    {
-        internal += "-dirty";
-    }
-    return internal;
-}
-
-}
-
 Version::Version()
-    : version_(CHATTERINO_VERSION)
+    : version_(QStringLiteral(MOLTORINO_VERSION))
+    , internalVersion_("M" + this->version_)
     , commitHash_(QStringLiteral(CHATTERINO_GIT_HASH))
+    , fullCommit_(QStringLiteral(CHATTERINO_GIT_COMMIT))
     , isModified_(CHATTERINO_GIT_MODIFIED == 1)
     , dateOfBuild_(QStringLiteral(CHATTERINO_CMAKE_GEN_DATE))
     , isNightly_(CHATTERINO_NIGHTLY_BUILD == 1)
@@ -56,22 +30,7 @@ Version::Version()
         this->fullVersion_ += "Nightly ";
     }
 
-    this->fullVersion_ += this->version_;
-
-    const auto configuredInternalVersion =
-        QStringLiteral(STRINGIFY2(MOLTORINO_INTERNAL_VERSION))
-            .trimmed()
-            .remove(u'"');
-    if (!configuredInternalVersion.isEmpty() &&
-        configuredInternalVersion != "__AUTO__")
-    {
-        this->internalVersion_ = configuredInternalVersion;
-    }
-    else
-    {
-        this->internalVersion_ = makeDefaultInternalVersion(
-            this->commitHash_, this->isModified_, this->dateOfBuild_);
-    }
+    this->fullVersion_ += this->internalVersion_;
 
 #ifndef NDEBUG
     this->fullVersion_ += " DEBUG";
@@ -89,7 +48,8 @@ Version::Version()
 
 #ifdef Q_OS_WIN
 
-    this->appUserModelID_ = L"MoltoBenne.Moltorino7";
+    this->appUserModelID_ =
+        QStringLiteral(MOLTORINO_WINDOWS_APP_ID).toStdWString();
 #endif
 }
 
@@ -117,6 +77,20 @@ const QString &Version::fullVersion() const
 const QString &Version::commitHash() const
 {
     return this->commitHash_;
+}
+
+const QString &Version::fullCommit() const
+{
+    return this->fullCommit_;
+}
+
+QString Version::updateChannel() const
+{
+#ifdef MOLTORINO_INTERNAL_UPDATE_CHANNEL
+    return QStringLiteral("internal");
+#else
+    return QStringLiteral("stable");
+#endif
 }
 
 const bool &Version::isModified() const
@@ -191,7 +165,7 @@ void Version::generateBuildString()
 
     s +=
         QString(
-            R"( (commit <a href="https://github.com/MoltoBenne/Moltorino/commit/%1">%1</a>)")
+            R"( (commit <a href="https://github.com/EEVA-inc/chatterino7/commit/%1">%1</a>)")
             .arg(this->commitHash());
     if (this->isModified())
     {
@@ -210,7 +184,6 @@ void Version::generateBuildString()
     }
 
     s += " with " + this->buildTags().join(", ");
-    s += " [internal " + this->internalVersion() + "]";
 
     this->buildString_ = s;
 }
@@ -219,11 +192,6 @@ void Version::generateRunningString()
 {
     auto s = QString("Running on %1, kernel: %2")
                  .arg(QSysInfo::prettyProductName(), QSysInfo::kernelVersion());
-
-    if (!this->internalVersion().isEmpty())
-    {
-        s += ", build: " + this->internalVersion();
-    }
 
     if (!this->isSupportedOS())
     {
@@ -236,7 +204,7 @@ void Version::generateRunningString()
 void Version::generateExtraString()
 {
     this->extraString_ =
-        QStringLiteral(STRINGIFY2(CHATTERINO_EXTRA_BUILD_STRING)).trimmed();
+        QString::fromUtf8("" STRINGIFY2(CHATTERINO_EXTRA_BUILD_STRING)).trimmed();
 }
 
 #undef STRINGIFY2

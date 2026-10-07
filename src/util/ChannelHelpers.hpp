@@ -76,8 +76,11 @@ void addOrReplaceChannelTimeout(const Buf &buffer, MessagePtr message,
             if (!message->flags.has(MessageFlag::PubSub) &&
                 s->flags.has(MessageFlag::PubSub))
             {
-                shouldAddMessage =
-                    timeoutStackStyle == TimeoutStackStyle::DontStack;
+                shouldAddMessage = false;
+                break;
+            }
+            if (timeoutStackStyle == TimeoutStackStyle::DontStack)
+            {
                 break;
             }
 

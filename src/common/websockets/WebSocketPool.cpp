@@ -4,6 +4,7 @@
 
 #include "common/websockets/WebSocketPool.hpp"
 
+#include "common/DiagnosticPrivacy.hpp"
 #include "common/QLogging.hpp"
 #include "common/websockets/detail/WebSocketConnectionImpl.hpp"
 #include "common/websockets/detail/WebSocketPoolImpl.hpp"
@@ -70,7 +71,10 @@ WebSocketHandle WebSocketPool::createSocket(
     }
     else
     {
-        qCWarning(chatterinoWebsocket) << "Invalid scheme:" << options.url;
+        if (diagnostics::mayLogUrl(options.url))
+        {
+            qCWarning(chatterinoWebsocket) << "Invalid scheme:" << options.url;
+        }
         return {{}};
     }
 
@@ -106,13 +110,20 @@ void WebSocketHandle::close()
     }
 }
 
-void WebSocketHandle::sendText(const QByteArray &data)
+bool WebSocketHandle::isValid() const
+{
+    return !this->conn.expired();
+}
+
+bool WebSocketHandle::sendText(const QByteArray &data)
 {
     auto strong = this->conn.lock();
     if (strong)
     {
         strong->sendText(data);
+        return true;
     }
+    return false;
 }
 
 void WebSocketHandle::sendBinary(const QByteArray &data)

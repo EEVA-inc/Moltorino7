@@ -15,6 +15,8 @@ namespace chatterino {
 
 class Paths;
 
+std::optional<QString> validatedMigrationReadyFilePath(const QString &path);
+
 class Args
 {
 public:
@@ -30,6 +32,7 @@ public:
 
     bool crashRecovery{};
     bool remoteRestart{};
+    std::optional<QString> migrationReadyFile{};
 
     std::optional<uint32_t> exceptionCode{};
 
@@ -47,6 +50,8 @@ public:
     std::optional<QString> initialLogin;
     bool verbose{};
     bool safeMode{};
+
+    bool useOldScaling = false;
 
 #ifndef NDEBUG
 

@@ -3,16 +3,19 @@
 #include "widgets/BaseWidget.hpp"
 #include "widgets/TooltipWidget.hpp"
 
-#include <boost/signals2.hpp>
 #include <pajlada/settings/setting.hpp>
 #include <pajlada/signals/connection.hpp>
 #include <pajlada/signals/signalholder.hpp>
 #include <QElapsedTimer>
+#include <QHash>
 #include <QMenu>
 #include <QPoint>
+#include <QSet>
 
 #include <memory>
 #include <vector>
+
+class QSpacerItem;
 
 namespace chatterino {
 
@@ -21,6 +24,9 @@ class DrawnButton;
 class LabelButton;
 class Label;
 class Split;
+class AutoModReviewBar;
+struct Message;
+struct TwitchUser;
 
 class SplitHeader final : public BaseWidget
 {
@@ -28,8 +34,10 @@ class SplitHeader final : public BaseWidget
 
 public:
     explicit SplitHeader(Split *split);
+    ~SplitHeader() override;
 
     void setAddButtonVisible(bool value);
+    void setAutoModReviewBar(AutoModReviewBar *bar);
 
     void updateChannelText();
     void updateIcons();
@@ -39,6 +47,8 @@ public:
 protected:
     void scaleChangedEvent(float scale) override;
     void themeChangedEvent() override;
+    void resizeEvent(QResizeEvent *event) override;
+    void hideEvent(QHideEvent *event) override;
 
     void paintEvent(QPaintEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
@@ -53,6 +63,15 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent *event) override;
 
 private:
+    TooltipWidget *ensureTooltipWidget();
+    void hideTooltip();
+    void releaseTooltip();
+    void updateAutoModLayout();
+    void resetSharedChatFilter();
+    void recordSharedChatSource(const std::shared_ptr<const Message> &message);
+    void updateSharedChatButton();
+    void applySharedChatFilter();
+    std::unique_ptr<QMenu> createSharedChatMenu();
     void initializeLayout();
     std::unique_ptr<QMenu> createMainMenu();
     std::unique_ptr<QMenu> createChatModeMenu();
@@ -64,17 +83,21 @@ private:
 
     Split *const split_{};
     QString tooltipText_{};
-    TooltipWidget *const tooltipWidget_{};
+    TooltipWidget *tooltipWidget_{};
     bool isLive_{false};
     QString thumbnail_;
+    QString thumbnailSource_;
     QElapsedTimer lastThumbnail_;
     std::chrono::steady_clock::time_point lastReloadedChannelEmotes_;
     std::chrono::steady_clock::time_point lastReloadedSubEmotes_;
 
     DrawnButton *dropdownButton_{};
     Label *titleLabel_{};
+    QSpacerItem *autoModHeaderBalance_{};
 
     LabelButton *modeButton_{};
+    SvgButton *recordingButton_{};
+    LabelButton *sharedChatButton_{};
     QAction *modeActionSetEmote{};
     QAction *modeActionSetSub{};
     QAction *modeActionSetSlow{};
@@ -82,9 +105,14 @@ private:
     QAction *modeActionSetFollowers{};
 
     SvgButton *followButton_{};
+    SvgButton *manageChannelButton_{};
     SvgButton *moderationButton_{};
     SvgButton *chattersButton_{};
     DrawnButton *addButton_{};
+    AutoModReviewBar *autoModReviewBar_{};
+    QHash<QString, std::shared_ptr<TwitchUser>> sharedChatSources_;
+    QSet<QString> hiddenSharedChatSources_;
+    bool sharedChatFilterActive_ = false;
 
     QPoint dragStart_{};
     bool dragging_{false};
@@ -93,7 +121,6 @@ private:
 
     pajlada::Signals::SignalHolder managedConnections_;
     pajlada::Signals::SignalHolder channelConnections_;
-    std::vector<boost::signals2::scoped_connection> bSignals_;
 
 public Q_SLOTS:
     void reloadChannelEmotes();

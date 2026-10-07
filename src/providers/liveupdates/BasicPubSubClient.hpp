@@ -63,6 +63,18 @@ public:
     }
 
 protected:
+    void subscribeImpl(const Subscription &subscription)
+    {
+        this->ws_.sendText(
+            static_cast<Derived *>(this)->encodeSubscription(subscription));
+    }
+
+    void unsubscribeImpl(const Subscription &subscription)
+    {
+        this->ws_.sendText(
+            static_cast<Derived *>(this)->encodeUnsubscription(subscription));
+    }
+
     bool isSubscribed(const Subscription &subscription) const
     {
         return this->subscriptions_.contains(subscription);
@@ -86,9 +98,7 @@ protected:
         qCDebug(chatterinoLiveupdates) << "Subscribing to" << subscription;
         DebugCount::increase(DebugObject::LiveUpdatesSubscription);
 
-        QByteArray encoded =
-            static_cast<Derived *>(this)->encodeSubscription(subscription);
-        this->ws_.sendText(encoded);
+        static_cast<Derived *>(this)->subscribeImpl(subscription);
 
         return true;
     }
@@ -103,9 +113,7 @@ protected:
         qCDebug(chatterinoLiveupdates) << "Unsubscribing from" << subscription;
         DebugCount::decrease(DebugObject::LiveUpdatesSubscription);
 
-        QByteArray encoded =
-            static_cast<Derived *>(this)->encodeUnsubscription(subscription);
-        this->ws_.sendText(encoded);
+        static_cast<Derived *>(this)->unsubscribeImpl(subscription);
 
         return true;
     }

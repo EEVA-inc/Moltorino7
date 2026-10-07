@@ -9,6 +9,7 @@
 #include "common/Modes.hpp"
 #include "common/network/NetworkManager.hpp"
 #include "common/QLogging.hpp"
+#include "common/Version.hpp"
 #include "singletons/CrashHandler.hpp"
 #include "singletons/Paths.hpp"
 #include "singletons/Resources.hpp"
@@ -22,12 +23,15 @@
 
 #include <QApplication>
 #include <QCryptographicHash>
+#include <QDir>
 #include <QFile>
 #include <QGuiApplication>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QPalette>
+#include <QSaveFile>
 #include <QSessionManager>
+#include <QStyle>
 #include <QStyleFactory>
 #include <Qt>
 #include <QtConcurrent>
@@ -54,10 +58,47 @@ namespace chatterino {
 namespace {
 QString guiActivationServerName(const Paths &paths)
 {
-    const auto hash = QCryptographicHash::hash(
-        paths.rootAppDataDirectory.toUtf8(), QCryptographicHash::Sha256);
+    auto identity = paths.rootAppDataDirectory.toUtf8();
+#ifdef Q_OS_WIN
+
+    identity += '\n';
+    identity +=
+        QString::fromStdWString(Version::instance().appUserModelID()).toUtf8();
+#else
+
+    identity += '\n';
+    identity += Version::instance().updateChannel().toUtf8();
+#endif
+    const auto hash =
+        QCryptographicHash::hash(identity, QCryptographicHash::Sha256);
     return QStringLiteral("moltorino-gui-activate-%1")
         .arg(QString::fromLatin1(hash.toHex().left(24)));
+}
+
+void writeMigrationReadyMarker(const Args &args)
+{
+    if (!args.migrationReadyFile.has_value())
+    {
+        return;
+    }
+
+    const auto markerPath =
+        validatedMigrationReadyFilePath(*args.migrationReadyFile);
+    if (!markerPath.has_value())
+    {
+        qCWarning(chatterinoApp)
+            << "Refusing an invalid migration readiness marker path"
+            << *args.migrationReadyFile;
+        return;
+    }
+
+    QSaveFile marker(*markerPath);
+    if (!marker.open(QIODevice::WriteOnly) || marker.write("ready\n") != 6 ||
+        !marker.commit())
+    {
+        qCWarning(chatterinoApp)
+            << "Could not write migration readiness marker" << *markerPath;
+    }
 }
 
 void restoreGuiInstance()
@@ -152,17 +193,39 @@ void installCustomPalette()
     QApplication::setPalette(dark);
 }
 
-void initQt()
+void initQt(const Args &args, [[maybe_unused]] const Settings &settings)
 {
 
-    QApplication::setAttribute(Qt::AA_Use96Dpi, true);
+    if (args.useOldScaling)
+    {
+        qCWarning(chatterinoApp) << "Using old scaling";
+        QApplication::setAttribute(Qt::AA_Use96Dpi, true);
+    }
 
 #ifdef Q_OS_WIN32
 
     QApplication::setAttribute(Qt::AA_DontCreateNativeWidgetSiblings);
 #endif
 
-    QApplication::setStyle(QStyleFactory::create("Fusion"));
+#ifdef Q_OS_LINUX
+    const bool useQtSystemStyle = settings.useQtSystemStyle.getValue();
+#else
+    constexpr bool useQtSystemStyle = false;
+#endif
+
+    if (useQtSystemStyle)
+    {
+        qCInfo(chatterinoApp)
+            << "Using the Linux desktop Qt style for application controls:"
+            << (QApplication::style() != nullptr
+                    ? QApplication::style()->objectName()
+                    : QStringLiteral("unknown"));
+    }
+    else
+    {
+        QApplication::setStyle(QStyleFactory::create("Fusion"));
+        installCustomPalette();
+    }
 
 #ifndef Q_OS_MAC
     QApplication::setWindowIcon(QIcon(":/icon.ico"));
@@ -175,7 +238,6 @@ void initQt()
     qt_set_sequence_auto_mnemonic(true);
 #endif
 
-    installCustomPalette();
 }
 
 void showLastCrashDialog(const Args &args, const Paths &paths)
@@ -234,12 +296,12 @@ void initSignalHandler()
     auto *sigintHandler = new UnixSignalHandler(SIGINT);
     QObject::connect(sigintHandler, &UnixSignalHandler::signalFired, [] {
         qCInfo(chatterinoApp) << "Received SIGINT, request application quit";
-        QApplication::quit();
+        requestApplicationQuit();
     });
     auto *sigtermHandler = new UnixSignalHandler(SIGTERM);
     QObject::connect(sigtermHandler, &UnixSignalHandler::signalFired, [] {
         qCInfo(chatterinoApp) << "Received SIGTERM, request application quit";
-        QApplication::quit();
+        requestApplicationQuit();
     });
 #endif
 }
@@ -323,12 +385,20 @@ bool activateExistingGuiInstance(const Paths &paths)
     return true;
 }
 
-void runGui(QApplication &a, const Paths &paths, Settings &settings,
-            const Args &args, Updates &updates)
+void runGui(QApplication &a, const Modes &modes, const Paths &paths,
+            Settings &settings, const Args &args, Updates &updates)
 {
-    initQt();
+    initQt(args, settings);
     initResources();
     initSignalHandler();
+
+#ifdef Q_OS_MACOS
+
+    if (!args.isFramelessEmbed && !args.dontLoadMainWindow)
+    {
+        a.setQuitOnLastWindowClosed(false);
+    }
+#endif
 
 #ifdef Q_OS_WIN
     if (args.crashRecovery)
@@ -367,7 +437,32 @@ void runGui(QApplication &a, const Paths &paths, Settings &settings,
     });
 
     Application app(settings, paths, args, updates);
-    app.initialize(settings, paths);
+    app.initialize(settings, modes, paths);
+
+#ifdef Q_OS_MACOS
+    QObject macReopenContext;
+    if (!args.isFramelessEmbed && !args.dontLoadMainWindow)
+    {
+        QObject::connect(
+            &a, &QGuiApplication::applicationStateChanged, &macReopenContext,
+            [&app](Qt::ApplicationState state) {
+                if (state != Qt::ApplicationActive || isAppAboutToQuit())
+                {
+                    return;
+                }
+
+                for (auto *widget : QApplication::topLevelWidgets())
+                {
+                    if (widget != nullptr && widget->isVisible())
+                    {
+                        return;
+                    }
+                }
+
+                app.getWindows()->showMainWindow();
+            });
+    }
+#endif
 
 #ifndef QT_NO_SESSIONMANAGER
     QObject::connect(qApp, &QGuiApplication::commitDataRequest, qApp,
@@ -385,6 +480,10 @@ void runGui(QApplication &a, const Paths &paths, Settings &settings,
     {
         activationServer = createGuiActivationServer(paths);
     }
+
+    QTimer::singleShot(0, qApp, [&args] {
+        writeMigrationReadyMarker(args);
+    });
     app.run();
 
     chatterino::NetworkManager::deinit();

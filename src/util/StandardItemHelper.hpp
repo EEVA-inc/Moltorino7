@@ -38,7 +38,9 @@ inline void setFilePathItem(QStandardItem *item, const QUrl &value,
                             bool selectable = true)
 {
     item->setData(value, Qt::UserRole);
-    item->setData(value.fileName(), Qt::DisplayRole);
+    const auto fileName = value.fileName();
+    item->setData(fileName, Qt::DisplayRole);
+    item->setData(fileName, Qt::ToolTipRole);
     item->setFlags(
         Qt::ItemFlags(defaultItemFlags(selectable) |
                       (selectable ? Qt::ItemIsSelectable : Qt::NoItemFlags)));

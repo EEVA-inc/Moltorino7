@@ -15,6 +15,7 @@
 #include <ctime>
 #include <memory>
 #include <utility>
+#include <vector>
 
 namespace chatterino {
 
@@ -35,6 +36,7 @@ struct HelixVip;
 using HelixModerator = HelixVip;
 struct ChannelPointReward;
 struct TwitchEmoteOccurrence;
+struct TwitchGifOccurrence;
 class ChannelChatters;
 
 namespace linkparser {
@@ -73,10 +75,10 @@ struct MessageParseArgs {
     bool isReceivedWhisper = false;
     bool isSentWhisper = false;
     bool trimSubscriberUsername = false;
-    bool isStaffOrBroadcaster = false;
     bool isSubscriptionMessage = false;
     bool allowIgnore = true;
     bool isAction = false;
+    bool isGigantifiedEmote = false;
     QString channelPointRewardId = "";
 };
 
@@ -152,7 +154,8 @@ public:
                                             QString &toUpdate);
 
     void addWordFromUserMessage(QStringView string,
-                                ChannelChatters *chatters = nullptr);
+                                ChannelChatters *chatters = nullptr,
+                                bool allowYouTubeHandle = false);
 
     void appendEmote(const EmotePtr &emote);
 
@@ -200,10 +203,9 @@ public:
     static MessagePtrMut makeSystemMessageWithUser(
         const QString &text, const QString &loginName,
         const QString &displayName, const MessageColor &userColor,
-        const QTime &time);
+        const QTime &time, const Communi::IrcMessage &ircMessage);
 
-    static MessagePtrMut makeSubgiftMessage(const QString &text,
-                                            const QVariantMap &tags,
+    static MessagePtrMut makeSubgiftMessage(const QVariantMap &tags,
                                             const QTime &time,
                                             TwitchChannel *channel);
 
@@ -228,6 +230,10 @@ private:
     Outcome tryAppendEmote(TwitchChannel *twitchChannel, const QString &userID,
                            const EmoteName &name);
 
+    void appendParsedEmote(const EmotePtr &emote, bool gigantified = false);
+    bool appendModifier(const EmotePtr &modifier);
+    void flushPendingModifiers();
+
     bool isEmpty() const;
     MessageElement &back();
     std::unique_ptr<MessageElement> releaseBack();
@@ -238,6 +244,7 @@ private:
                        TwitchChannel *twitchChannel,
                        bool trimSubscriberUsername);
     void parseMessageID(const QVariantMap &tags);
+    void parseMessageTags(const QVariantMap &tags);
 
     static QString parseRoomID(const QVariantMap &tags,
                                TwitchChannel *twitchChannel);
@@ -245,8 +252,7 @@ private:
     TwitchChannel *parseSharedChatInfo(const QVariantMap &tags,
                                        TwitchChannel *twitchChannel);
 
-    void parseThread(const QString &messageContent, const QVariantMap &tags,
-                     const Channel *channel,
+    void parseThread(const QVariantMap &tags, const Channel *channel,
                      const std::shared_ptr<MessageThread> &thread,
                      const MessagePtr &parent);
 
@@ -255,20 +261,25 @@ private:
                                    const MessageParseArgs &args);
 
     void appendChannelName(const Channel *channel);
+    void appendPronoun(Channel *channel, bool historical);
     void appendUsername(const QVariantMap &tags, const MessageParseArgs &args);
 
     void addWords(const QStringList &words,
                   const std::vector<TwitchEmoteOccurrence> &twitchEmotes,
-                  TextState &state);
+                  const std::vector<TwitchGifOccurrence> &twitchGifs,
+                  TextState &state, int gigantifiedEmoteStart = -1);
 
     void appendTwitchBadges(const QVariantMap &tags,
                             TwitchChannel *twitchChannel);
     void appendChatterinoBadges(const QString &userID);
     void appendFfzBadges(TwitchChannel *twitchChannel, const QString &userID);
+    void appendFfzApBadge(const QString &userID);
+    void appendBluzyrinoBadges(const QString &userID);
     void appendBttvBadges(const QString &userID);
     void appendSeventvBadges(const QString &userID);
-    void appendHomiesBadges(const QString &userID);
+    void appendHomiesBadges(const QString &userID, bool senderIsCurrentUser);
     void appendMoltorinoBadges(const QString &userID);
+    void applyVanityBadgeLayout(const QString &userID, size_t firstBadge);
 
     [[nodiscard]] static bool isIgnored(const QString &originalMessage,
                                         const QString &userID,
@@ -278,6 +289,7 @@ private:
     MessageColor textColor_ = MessageColor::Text;
 
     QColor usernameColor_ = {153, 153, 153};
+    std::vector<EmotePtr> pendingPrefixModifiers_;
 };
 
 }

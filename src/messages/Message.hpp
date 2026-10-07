@@ -1,6 +1,8 @@
 #pragma once
 
+#include "controllers/highlights/HighlightResult.hpp"
 #include "messages/MessageFlag.hpp"
+#include "providers/twitch/api/HelixEnums.hpp"
 #include "providers/twitch/ChannelPointReward.hpp"
 #include "util/DebugCount.hpp"
 #include "util/QStringHash.hpp"
@@ -11,7 +13,7 @@
 #include <cinttypes>
 #include <functional>
 #include <memory>
-#include <unordered_map>
+#include <utility>
 #include <vector>
 
 class QJsonObject;
@@ -21,10 +23,15 @@ class MessageElement;
 class MessageThread;
 class TwitchBadge;
 class ScrollbarHighlight;
+namespace automod {
+struct ReviewItem;
+}
 
 enum class MessagePlatform : uint8_t {
     AnyOrTwitch,
     Kick,
+    YouTube,
+    TikTok,
 };
 
 struct Message;
@@ -57,11 +64,15 @@ struct Message {
 
     std::vector<TwitchBadge> twitchBadges;
 
-    std::unordered_map<QString, QString> twitchBadgeInfos;
+    std::unique_ptr<const std::vector<TwitchBadge>> sharedChatSourceBadges;
+
+    std::vector<std::pair<QString, QString>> twitchBadgeInfos;
 
     QStringList externalBadges;
 
     std::shared_ptr<QColor> highlightColor;
+    std::shared_ptr<const std::vector<HighlightMatch>> highlightMatches;
+    std::shared_ptr<const automod::ReviewItem> autoModReview;
 
     std::shared_ptr<MessageThread> replyThread;
     MessagePtr replyParent;
@@ -88,6 +99,7 @@ struct Message {
     };
     static QString clientDetectionStatusToString(
         ClientDetectionStatus status);
+    static ClientDetectionStatus classifyClientNonce(const QString &nonce);
 
     uint32_t count = 1;
 
@@ -99,9 +111,16 @@ struct Message {
     ClientDetectionStatus clientDetection =
         ClientDetectionStatus::Unknown;
 
+    bool emoteOnly = false;
+
     ScrollbarHighlight getScrollBarHighlight() const;
+    bool isHiddenByClientNonce() const;
+    bool usesTwitchGigantifyPresentation() const;
 
     std::shared_ptr<ChannelPointReward> reward = nullptr;
+    QString sharedChatSourceId;
+    uint32_t bits{0};
+    HelixAnnouncementColor announcementColor{HelixAnnouncementColor::Primary};
 
     std::shared_ptr<Message> clone() const;
 

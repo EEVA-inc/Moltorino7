@@ -14,6 +14,7 @@
 #include "singletons/Settings.hpp"
 #include "util/IpcQueue.hpp"
 #include "util/PostToThread.hpp"
+#include "util/XDGDirectory.hpp"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -24,6 +25,8 @@
 #include <QJsonValue>
 #include <QSettings>
 #include <QStringBuilder>
+
+#include <iostream>
 
 #ifdef Q_OS_WIN
 #    include "widgets/AttachedWindow.hpp"
@@ -93,6 +96,79 @@ void registerNmManifest([[maybe_unused]] const Paths &paths,
 #endif
 }
 
+QJsonObject buildBaseDocument()
+{
+    return QJsonObject{
+        {u"name"_s, "com.chatterino.chatterino"_L1},
+        {u"description"_s, "Browser interaction with chatterino."_L1},
+        {u"path"_s, QCoreApplication::applicationFilePath()},
+        {u"type"_s, "stdio"_L1},
+    };
+}
+
+QJsonDocument buildChromeManifest(const QStringList &extensionIDs)
+{
+    auto obj = buildBaseDocument();
+    QJsonArray allowedOriginsArr = {
+        u"chrome-extension://%1/"_s.arg(EXTENSION_ID)};
+
+    for (const auto &id : extensionIDs)
+    {
+        QString trimmedID = id.trimmed();
+        if (!trimmedID.isEmpty())
+        {
+            allowedOriginsArr.append(
+                u"chrome-extension://%1/"_s.arg(trimmedID));
+        }
+    }
+
+    obj.insert("allowed_origins", allowedOriginsArr);
+
+    return QJsonDocument{obj};
+}
+
+QJsonDocument buildFirefoxManifest(const QStringList &extensionIDs)
+{
+    auto obj = buildBaseDocument();
+    QJsonArray allowedExtensions = {"chatterino_native@chatterino.com"};
+
+    for (const auto &id : extensionIDs)
+    {
+        QString trimmedID = id.trimmed();
+        if (!trimmedID.isEmpty())
+        {
+            allowedExtensions.append(trimmedID);
+        }
+    }
+
+    obj.insert("allowed_extensions", allowedExtensions);
+
+    return QJsonDocument{obj};
+}
+
+#ifndef Q_OS_WIN
+void writeManifestToCustomPath(const QJsonDocument &manifest)
+{
+    auto customPath = parseCustomPath(
+        getSettings()->customNativeMessagingManifestPath.getValue());
+    if (!customPath.has_value())
+    {
+        return;
+    }
+
+    QFile file(customPath.value());
+    if (!file.open(QFile::WriteOnly | QFile::Truncate))
+    {
+        qCWarning(chatterinoNativeMessage)
+            << "Failed to open" << customPath.value();
+    }
+    else
+    {
+        file.write(manifest.toJson());
+    }
+}
+#endif
+
 }
 
 namespace chatterino::nm::detail {
@@ -128,6 +204,35 @@ Expected<void, WriteManifestError> writeManifestTo(QString directory,
     return {};
 }
 
+#ifndef Q_OS_WIN
+std::optional<QString> parseCustomPath(QString path)
+{
+    if (path.isEmpty())
+    {
+        return {};
+    }
+
+#    ifdef Q_OS_LINUX
+    path = path.replace("$XDG_CONFIG_HOME",
+                        getXDGUserDirectories(XDGDirectoryType::Config).at(0))
+               .replace("$XDG_DATA_HOME",
+                        getXDGUserDirectories(XDGDirectoryType::Data).at(0));
+#    endif
+
+    if (path.startsWith('~'))
+    {
+        path = QDir::homePath() % QStringView{path}.sliced(1);
+    }
+
+    if (!path.startsWith('/'))
+    {
+        return {};
+    }
+
+    return path;
+}
+#endif
+
 }
 
 namespace chatterino {
@@ -135,63 +240,34 @@ namespace chatterino {
 using namespace chatterino::nm::detail;
 using namespace literals;
 
-void registerNmHost(const Paths &paths)
+void registerNmHost(const Modes &modes, const Paths &paths)
 {
-    if (Modes::instance().isPortable)
+    if (modes.isPortable)
     {
         return;
     }
-
-    auto getBaseDocument = [] {
-        return QJsonObject{
-            {u"name"_s, "com.chatterino.chatterino"_L1},
-            {u"description"_s, "Browser interaction with chatterino."_L1},
-            {u"path"_s, QCoreApplication::applicationFilePath()},
-            {u"type"_s, "stdio"_L1},
-        };
-    };
 
     QStringList extensionIDs =
         getSettings()->additionalExtensionIDs.getValue().split(
             ';', Qt::SkipEmptyParts);
 
+    QJsonDocument chromeManifest = buildChromeManifest(extensionIDs);
+    QJsonDocument firefoxManifest = buildFirefoxManifest(extensionIDs);
+
+    registerNmManifest(paths, CHROME, chromeManifest);
+    registerNmManifest(paths, FIREFOX, firefoxManifest);
+
+#ifndef Q_OS_WIN
+    switch (getSettings()->customNativeMessagingManifestFormat.getEnum())
     {
-        auto obj = getBaseDocument();
-        QJsonArray allowedOriginsArr = {
-            u"chrome-extension://%1/"_s.arg(EXTENSION_ID)};
-
-        for (const auto &id : extensionIDs)
-        {
-            QString trimmedID = id.trimmed();
-            if (!trimmedID.isEmpty())
-            {
-                allowedOriginsArr.append(
-                    u"chrome-extension://%1/"_s.arg(trimmedID));
-            }
-        }
-
-        obj.insert("allowed_origins", allowedOriginsArr);
-
-        registerNmManifest(paths, CHROME, QJsonDocument{obj});
+        case BrowserManifestFormat::Chrome:
+            writeManifestToCustomPath(chromeManifest);
+            break;
+        case BrowserManifestFormat::Firefox:
+            writeManifestToCustomPath(firefoxManifest);
+            break;
     }
-
-    {
-        auto obj = getBaseDocument();
-        QJsonArray allowedExtensions = {"chatterino_native@chatterino.com"};
-
-        for (const auto &id : extensionIDs)
-        {
-            QString trimmedID = id.trimmed();
-            if (!trimmedID.isEmpty())
-            {
-                allowedExtensions.append(trimmedID);
-            }
-        }
-
-        obj.insert("allowed_extensions", allowedExtensions);
-
-        registerNmManifest(paths, FIREFOX, QJsonDocument{obj});
-    }
+#endif
 }
 
 std::string &getNmQueueName(const Paths &paths)
@@ -228,22 +304,12 @@ NativeMessagingServer::NativeMessagingServer()
 
 NativeMessagingServer::~NativeMessagingServer()
 {
+    this->thread->requestInterruption();
+    this->thread->wait();
+    delete this->thread;
     if (!ipc::IpcQueue::remove("chatterino_gui"))
     {
         qCWarning(chatterinoNativeMessage) << "Failed to remove message queue";
-    }
-    this->thread->requestInterruption();
-    this->thread->quit();
-
-    if (!this->thread->wait(100))
-    {
-        this->thread->terminate();
-
-        if (!this->thread->wait(100))
-        {
-            qCWarning(chatterinoNativeMessage)
-                << "Failed to terminate thread cleanly";
-        }
     }
 }
 
@@ -274,8 +340,8 @@ void NativeMessagingServer::ReceiverThread::run()
 
     while (!this->isInterruptionRequested())
     {
-        auto buf = messageQueue->receive();
-        if (buf.isEmpty())
+        auto buf = messageQueue->receive(std::chrono::milliseconds{100});
+        if (buf.isEmpty() || this->isInterruptionRequested())
         {
             continue;
         }
@@ -346,6 +412,10 @@ void NativeMessagingServer::ReceiverThread::handleSelect(
     }
 
     postToThread([=] {
+        if (isAppAboutToQuit())
+        {
+            return;
+        }
         if (!name.isEmpty())
         {
             auto channel = getApp()->getTwitch()->getOrAddChannel(name);
@@ -382,6 +452,10 @@ void NativeMessagingServer::ReceiverThread::handleDetach(
 
 #ifdef USEWINSDK
     postToThread([winId] {
+        if (isAppAboutToQuit())
+        {
+            return;
+        }
         qCDebug(chatterinoNativeMessage) << "NW detach";
         AttachedWindow::detach(winId);
     });
@@ -390,11 +464,15 @@ void NativeMessagingServer::ReceiverThread::handleDetach(
 
 void NativeMessagingServer::ReceiverThread::handleSync(const QJsonObject &root)
 {
-
-    postToThread([&parent = this->parent_,
-                  twitch = root["twitchChannels"_L1].toArray()] {
-        parent.syncChannels(twitch);
-    });
+    postToThread(
+        [&parent = this->parent_,
+         twitch = root["twitchChannels"_L1].toArray()] {
+            if (!isAppAboutToQuit())
+            {
+                parent.syncChannels(twitch);
+            }
+        },
+        &this->parent_.callbackContext_);
 }
 
 void NativeMessagingServer::syncChannels(const QJsonArray &twitchChannels)

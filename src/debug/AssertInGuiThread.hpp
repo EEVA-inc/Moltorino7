@@ -13,7 +13,8 @@ namespace chatterino {
 
 inline bool isGuiThread()
 {
-    return QCoreApplication::instance()->thread() == QThread::currentThread();
+    const auto *app = QCoreApplication::instance();
+    return app != nullptr && app->thread() == QThread::currentThread();
 }
 
 inline void assertInGuiThread()

@@ -7,6 +7,7 @@
 #include "debug/AssertInGuiThread.hpp"
 
 #include <QString>
+#include <algorithm>
 
 namespace chatterino {
 
@@ -105,6 +106,28 @@ void LinkInfo::setThumbnail(ImagePtr thumbnail)
 {
     assertInGuiThread();
     this->thumbnail_ = std::move(thumbnail);
+}
+
+int LinkInfo::thumbnailSize(int preferredSize) const
+{
+    if (preferredSize <= 0)
+    {
+        return 0;
+    }
+    if (this->maximumThumbnailSize_ > 0)
+    {
+        return std::clamp(preferredSize, this->minimumThumbnailSize_,
+                          this->maximumThumbnailSize_);
+    }
+    return preferredSize;
+}
+
+void LinkInfo::setThumbnailSizeRange(int minimum, int maximum)
+{
+    assertInGuiThread();
+    assert(minimum > 0 && maximum >= minimum);
+    this->minimumThumbnailSize_ = minimum;
+    this->maximumThumbnailSize_ = maximum;
 }
 
 }

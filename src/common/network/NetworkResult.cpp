@@ -14,8 +14,10 @@
 namespace chatterino {
 
 NetworkResult::NetworkResult(NetworkError error, const QVariant &httpStatusCode,
-                             QByteArray data)
+                             QByteArray data, QByteArray etag, QUrl url)
     : data_(std::move(data))
+    , etag_(std::move(etag))
+    , url_(std::move(url))
     , error_(error)
 {
     if (httpStatusCode.isValid())
@@ -86,6 +88,16 @@ rapidjson::Document NetworkResult::parseRapidJson() const
 const QByteArray &NetworkResult::getData() const
 {
     return this->data_;
+}
+
+const QByteArray &NetworkResult::etag() const
+{
+    return this->etag_;
+}
+
+const QUrl &NetworkResult::url() const
+{
+    return this->url_;
 }
 
 QString NetworkResult::formatError() const

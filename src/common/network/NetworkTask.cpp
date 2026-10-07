@@ -5,6 +5,7 @@
 #include "common/network/NetworkTask.hpp"
 
 #include "Application.hpp"
+#include "common/DiagnosticPrivacy.hpp"
 #include "common/network/NetworkManager.hpp"
 #include "common/network/NetworkPrivate.hpp"
 #include "common/network/NetworkResult.hpp"
@@ -13,8 +14,8 @@
 #include "util/AbandonObject.hpp"
 #include "util/DebugCount.hpp"
 
-#include <QFile>
 #include <QNetworkReply>
+#include <QSaveFile>
 #include <QtConcurrent>
 
 #ifndef signals
@@ -47,6 +48,7 @@ NetworkTask::NetworkTask(std::shared_ptr<NetworkData> &&data)
 
 NetworkTask::~NetworkTask()
 {
+    this->cancellation_.reset();
     if (this->reply_)
     {
         this->reply_->deleteLater();
@@ -55,6 +57,11 @@ NetworkTask::~NetworkTask()
 
 void NetworkTask::run()
 {
+    if (this->data_->cancellation.stop_requested())
+    {
+        this->deleteLater();
+        return;
+    }
     this->reply_ = this->createReply();
     if (!this->reply_)
     {
@@ -87,6 +94,32 @@ void NetworkTask::run()
     QObject::connect(this->reply_, &QNetworkReply::finished, this,
                      &NetworkTask::finished);
 
+    if (this->data_->cancellation.stop_possible())
+    {
+        this->cancellation_.emplace(this->data_->cancellation, [this] {
+            QMetaObject::invokeMethod(
+                this,
+                [this] {
+                    if (!this->reply_->isFinished())
+                    {
+                        this->reply_->abort();
+                    }
+                },
+                Qt::QueuedConnection);
+        });
+    }
+
+    if (this->data_->maximumResponseSize.has_value())
+    {
+        QObject::connect(this->reply_, &QNetworkReply::readyRead, this, [this] {
+            if (this->reply_->bytesAvailable() >
+                *this->data_->maximumResponseSize)
+            {
+                this->responseTooLarge();
+            }
+        });
+    }
+
 #ifndef NDEBUG
     if (this->data_->ignoreSslErrors)
     {
@@ -107,6 +140,9 @@ QNetworkReply *NetworkTask::createReply()
     {
         case NetworkRequestType::Get:
             return accessManager->get(request);
+
+        case NetworkRequestType::Head:
+            return accessManager->head(request);
 
         case NetworkRequestType::Delete: {
             if (data->payload.isEmpty())
@@ -175,10 +211,15 @@ QNetworkReply *NetworkTask::createReply()
 
 void NetworkTask::logReply()
 {
+    if (!diagnostics::mayLogUrl(this->data_->request.url()))
+    {
+        return;
+    }
     auto status =
         this->reply_->attribute(QNetworkRequest::HttpStatusCodeAttribute)
             .toInt();
-    if (this->data_->requestType == NetworkRequestType::Get)
+    if (this->data_->requestType == NetworkRequestType::Get ||
+        this->data_->requestType == NetworkRequestType::Head)
     {
         qCDebug(chatterinoHTTP).noquote()
             << this->data_->typeString() << status
@@ -187,7 +228,7 @@ void NetworkTask::logReply()
     else
     {
         QUtf8StringView payload = this->data_->payload;
-#ifdef NDEBUG
+#if defined(NDEBUG) || QT_VERSION < QT_VERSION_CHECK(6, 10, 0)
         if (this->data_->hideRequestBody)
 #else
         static bool alwaysShowRequestBodies =
@@ -210,27 +251,39 @@ void NetworkTask::writeToCache(const QByteArray &bytes) const
     std::ignore = QtConcurrent::run([data = this->data_, bytes] {
         if (isAppAboutToQuit())
         {
-            qCDebug(chatterinoHTTP)
-                << "Skipping cache write for" << data->request.url()
-                << "because app is about to quit";
+            if (diagnostics::mayLogUrl(data->request.url()))
+            {
+                qCDebug(chatterinoHTTP)
+                    << "Skipping cache write for" << data->request.url()
+                    << "because app is about to quit";
+            }
+            return;
+        }
+
+        if (data->cacheValidator && !data->cacheValidator(bytes))
+        {
             return;
         }
 
         auto *app = tryGetApp();
         if (!app)
         {
-            qCDebug(chatterinoHTTP)
-                << "Skipping cache write for" << data->request.url()
-                << "because app is null";
+            if (diagnostics::mayLogUrl(data->request.url()))
+            {
+                qCDebug(chatterinoHTTP)
+                    << "Skipping cache write for" << data->request.url()
+                    << "because app is null";
+            }
             return;
         }
 
-        QFile cachedFile(app->getPaths().cacheDirectory() + "/" +
-                         data->getHash());
+        QSaveFile cachedFile(app->getPaths().cacheDirectory() + "/" +
+                             data->getHash());
 
-        if (cachedFile.open(QIODevice::WriteOnly))
+        if (cachedFile.open(QIODevice::WriteOnly) &&
+            cachedFile.write(bytes) == bytes.size())
         {
-            cachedFile.write(bytes);
+            cachedFile.commit();
         }
     });
 }
@@ -243,16 +296,53 @@ void NetworkTask::timeout()
                         &NetworkTask::finished);
     this->reply_->abort();
 
-    qCDebug(chatterinoHTTP).noquote()
-        << this->data_->typeString() << "[timed out]"
-        << this->data_->request.url().toString();
+    if (diagnostics::mayLogUrl(this->data_->request.url()))
+    {
+        qCDebug(chatterinoHTTP).noquote()
+            << this->data_->typeString() << "[timed out]"
+            << this->data_->request.url().toString();
+    }
 
     this->data_->emitError({NetworkResult::NetworkError::TimeoutError, {}, {}});
     this->data_->emitFinally();
 }
 
+void NetworkTask::responseTooLarge()
+{
+    AbandonObject guard(this);
+
+    if (this->timer_)
+    {
+        this->timer_->stop();
+    }
+
+    QObject::disconnect(this->reply_, &QNetworkReply::finished, this,
+                        &NetworkTask::finished);
+    this->reply_->abort();
+
+    if (diagnostics::mayLogUrl(this->data_->request.url()))
+    {
+        qCDebug(chatterinoHTTP).noquote()
+            << this->data_->typeString() << "[response too large]"
+            << this->data_->request.url().toString();
+    }
+
+    const auto status =
+        this->reply_->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+    this->data_->emitError(
+        {NetworkResult::NetworkError::ProtocolFailure, status, {}});
+    this->data_->emitFinally();
+}
+
 void NetworkTask::finished()
 {
+    if (this->data_->maximumResponseSize &&
+        this->reply_->bytesAvailable() > *this->data_->maximumResponseSize)
+    {
+        this->responseTooLarge();
+        return;
+    }
+
     AbandonObject guard(this);
 
     if (this->timer_)
@@ -262,20 +352,25 @@ void NetworkTask::finished()
 
     auto *reply = this->reply_;
     auto status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+    auto etag = reply->rawHeader("ETag");
 
     if (reply->error() == QNetworkReply::OperationCanceledError)
     {
 
-        qCDebug(chatterinoHTTP).noquote()
-            << this->data_->typeString() << "[cancelled]"
-            << this->data_->request.url().toString();
+        if (diagnostics::mayLogUrl(this->data_->request.url()))
+        {
+            qCDebug(chatterinoHTTP).noquote()
+                << this->data_->typeString() << "[cancelled]"
+                << this->data_->request.url().toString();
+        }
         return;
     }
 
     if (reply->error() != QNetworkReply::NoError)
     {
         this->logReply();
-        this->data_->emitError({reply->error(), status, reply->readAll()});
+        this->data_->emitError({reply->error(), status, reply->readAll(),
+                                std::move(etag), reply->url()});
         this->data_->emitFinally();
 
         return;
@@ -290,7 +385,8 @@ void NetworkTask::finished()
 
     DebugCount::increase(DebugObject::HTTPRequestSuccess);
     this->logReply();
-    this->data_->emitSuccess({reply->error(), status, bytes});
+    this->data_->emitSuccess(
+        {reply->error(), status, bytes, std::move(etag), reply->url()});
     this->data_->emitFinally();
 }
 

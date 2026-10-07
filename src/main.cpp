@@ -13,11 +13,13 @@
 #include "providers/twitch/api/Helix.hpp"
 #include "RunGui.hpp"
 #include "singletons/CrashHandler.hpp"
+#include "singletons/FileLogger.hpp"
 #include "singletons/Paths.hpp"
 #include "singletons/Settings.hpp"
 #include "singletons/Updates.hpp"
 #include "util/AttachToConsole.hpp"
 #include "util/IpcQueue.hpp"
+#include "util/SettingsTransfer.hpp"
 
 #ifdef Q_OS_MACOS
 #    include "util/MacOsHelpers.h"
@@ -25,14 +27,24 @@
 
 #include <QApplication>
 #include <QCommandLineParser>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMessageBox>
+#include <QSaveFile>
 #include <QSslSocket>
 #include <QStringList>
+#include <QSysInfo>
 #include <QtCore/QtPlugin>
 #ifdef Q_OS_WIN
 #    include <shobjidl_core.h>
 #endif
 
+#ifdef MOLTORINO_VELOPACK_ENABLED
+#    include <Velopack.hpp>
+#endif
+
+#include <exception>
+#include <iostream>
 #include <memory>
 
 #ifdef CHATTERINO_WITH_AVIF_PLUGIN
@@ -43,26 +55,108 @@ using namespace chatterino;
 
 int main(int argc, char **argv)
 {
+#ifdef MOLTORINO_VELOPACK_ENABLED
+    try
+    {
+        Velopack::VelopackApp::Build().SetAutoApplyOnStartup(false).Run();
+    }
+    catch (const std::exception &error)
+    {
+        std::cerr << "Velopack startup failed: " << error.what() << '\n';
+    }
+#endif
+
+    bool releaseIdentityRequested = false;
+    for (int i = 1; i < argc; ++i)
+    {
+        if (QString::fromLocal8Bit(argv[i]) ==
+            QStringLiteral("--moltorino-release-identity"))
+        {
+            releaseIdentityRequested = true;
+            break;
+        }
+    }
+    if (releaseIdentityRequested)
+    {
+        QCoreApplication identityApp(argc, argv);
+        const auto &version = Version::instance();
+        QJsonObject identity{
+            {"schemaVersion", 1},
+            {"publicVersion", version.version()},
+            {"buildId", version.internalVersion()},
+            {"channel", version.updateChannel()},
+#if defined(Q_OS_WIN)
+            {"platform", "windows"},
+            {"appUserModelId", QString::fromStdWString(version.appUserModelID())},
+#elif defined(Q_OS_MACOS)
+            {"platform", "macos"},
+#elif defined(Q_OS_LINUX)
+            {"platform", "linux"},
+#else
+            {"platform", QSysInfo::productType()},
+#endif
+#if defined(Q_OS_WIN) && defined(Q_PROCESSOR_X86_64)
+            {"architecture", "win-x64"},
+#elif defined(Q_OS_MACOS)
+            {"architecture", "osx-universal"},
+#elif defined(Q_OS_LINUX) && defined(Q_PROCESSOR_X86_64)
+            {"architecture", "linux-x64"},
+#else
+            {"architecture", QSysInfo::buildCpuArchitecture()},
+#endif
+            {"sourceCommit", version.fullCommit()},
+            {"sourceDirty", version.isModified()},
+            {"qtVersion", QString::fromLatin1(qVersion())},
+        };
+        QSaveFile output(QCoreApplication::applicationDirPath() +
+                         "/.moltorino-release-identity-probe.json");
+        if (!output.open(QIODevice::WriteOnly) ||
+            output.write(
+                QJsonDocument(identity).toJson(QJsonDocument::Compact)) < 0 ||
+            !output.commit())
+        {
+            return 1;
+        }
+        return 0;
+    }
+
+#ifdef Q_OS_LINUX
+
+    const auto platformPreference = qgetenv("QT_QPA_PLATFORM");
+    if ((platformPreference.isEmpty() || platformPreference == "wayland;xcb") &&
+        !qEnvironmentVariableIsEmpty("DISPLAY"))
+    {
+        qputenv("QT_QPA_PLATFORM", "xcb;wayland");
+    }
+#endif
+
     QApplication a(argc, argv);
 
     QCoreApplication::setApplicationName("chatterino");
-    QCoreApplication::setApplicationVersion(CHATTERINO_VERSION);
+    QCoreApplication::setApplicationVersion(Version::instance().version());
     QCoreApplication::setOrganizationDomain("chatterino.com");
+#if defined(Q_OS_LINUX) || defined(Q_OS_FREEBSD)
+
+    QGuiApplication::setDesktopFileName("com.moltobenne.moltorino");
+#endif
 #ifdef Q_OS_WIN
     SetCurrentProcessExplicitAppUserModelID(
         Version::instance().appUserModelID().c_str());
 #endif
 
+    const Modes modes;
     std::unique_ptr<Paths> paths;
+
+    FileLogger logger;
 
     try
     {
-        paths = std::make_unique<Paths>();
+        paths = std::make_unique<Paths>(modes);
     }
     catch (std::runtime_error &error)
     {
         QMessageBox box;
-        if (Modes::instance().isPortable)
+        if (modes.isPortable)
         {
             auto errorMessage =
                 error.what() +
@@ -136,9 +230,24 @@ int main(int argc, char **argv)
                               << QSslSocket::supportedProtocols();
 #endif
 
-        Settings settings(args, paths->settingsDirectory);
+        QString pendingRestoreError;
+        if (!settingsbackup::applyPendingRestore(paths->settingsDirectory,
+                                                 &pendingRestoreError))
+        {
+            qCCritical(chatterinoSettings)
+                << "Could not apply pending settings restore:"
+                << pendingRestoreError;
+            QMessageBox::warning(
+                nullptr, QStringLiteral("Settings restore failed"),
+                QStringLiteral("Moltorino could not finish the pending "
+                               "restore safely.\n\n%1")
+                    .arg(pendingRestoreError));
+        }
+
+        Settings settings(modes, args, paths->settingsDirectory);
 #ifndef Q_OS_MACOS
         if (!args.remoteRestart && !args.isFramelessEmbed &&
+            !args.migrationReadyFile.has_value() &&
             settings.trayHideOnClose.getValue() &&
             activateExistingGuiInstance(*paths))
         {
@@ -153,7 +262,7 @@ int main(int argc, char **argv)
         IvrApi::initialize();
         Helix::initialize();
 
-        runGui(a, *paths, settings, args, updates);
+        runGui(a, modes, *paths, settings, args, updates);
     }
     return 0;
 }

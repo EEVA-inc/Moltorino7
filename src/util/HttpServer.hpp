@@ -4,6 +4,8 @@
 
 #include <functional>
 
+class QTcpServer;
+
 namespace chatterino {
 
 class HttpServer : public QObject
@@ -13,12 +15,25 @@ public:
 
     using HandlerCb =
         std::function<std::pair<unsigned, QByteArray>(const QString &)>;
+    struct Request {
+        QString method;
+        QString target;
+    };
+    using RequestHandlerCb =
+        std::function<std::pair<unsigned, QByteArray>(const Request &)>;
 
     void setHandler(HandlerCb handler);
-    const HandlerCb &handler() const;
+    void setRequestHandler(RequestHandlerCb handler);
+    const RequestHandlerCb &requestHandler() const;
+
+    bool isListening() const;
+    uint16_t serverPort() const;
+    QString errorString() const;
+    void close();
 
 private:
-    HandlerCb handler_;
+    QTcpServer *server_ = nullptr;
+    RequestHandlerCb handler_;
 };
 
 }

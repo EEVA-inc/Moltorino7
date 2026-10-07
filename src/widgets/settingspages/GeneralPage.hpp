@@ -13,8 +13,6 @@ class QComboBox;
 namespace chatterino {
 
 class GeneralPageView;
-class DescriptionLabel;
-struct DropdownArgs;
 
 class GeneralPage : public SettingsPage
 {
@@ -24,14 +22,11 @@ public:
     GeneralPage();
 
     bool filterElements(const QString &query) override;
+    void onShow() override;
 
 private:
     void initLayout(GeneralPageView &layout);
-    void initExtra();
 
-    QString getFont(const DropdownArgs &args) const;
-
-    DescriptionLabel *cachePath_{};
     GeneralPageView *view_{};
 };
 

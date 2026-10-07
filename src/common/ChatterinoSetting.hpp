@@ -5,18 +5,65 @@
 #pragma once
 
 #include "util/QMagicEnum.hpp"
+#include "util/RapidJsonSerializeQSize.hpp"
+#include "util/RapidJsonSerializeQString.hpp"
 
 #include <pajlada/settings.hpp>
 #include <QSize>
 #include <QString>
 
+#include <cmath>
+#include <functional>
+#include <limits>
 #include <memory>
 #include <string>
 #include <type_traits>
 
 namespace chatterino {
 
-void _registerSetting(std::weak_ptr<pajlada::Settings::SettingData> setting);
+using SettingResetter = std::function<void(const std::string &)>;
+using SettingValidator = bool (*)(const rapidjson::Value &);
+
+bool validStructuredSettingNumbers(const rapidjson::Value &value);
+
+template <typename Type>
+bool validateSettingValue(const rapidjson::Value &value)
+{
+    if constexpr (std::is_floating_point_v<Type>)
+    {
+        return value.IsNumber() && std::isfinite(value.GetDouble()) &&
+               std::abs(value.GetDouble()) <= std::numeric_limits<Type>::max();
+    }
+    else
+    {
+        if (!validStructuredSettingNumbers(value))
+        {
+            return false;
+        }
+        bool error = false;
+        const auto decoded = pajlada::Deserialize<Type>::get(value, &error);
+        if (error)
+        {
+            return false;
+        }
+        rapidjson::Document document;
+        return pajlada::Serialize<Type>::get(decoded,
+                                             document.GetAllocator()) == value;
+    }
+}
+
+void _registerSetting(std::weak_ptr<pajlada::Settings::SettingData> setting,
+                      SettingResetter resetToDefault,
+                      SettingValidator validate);
+
+template <typename Type>
+SettingResetter settingResetter(Type defaultValue)
+{
+    return [defaultValue = std::move(defaultValue)](const std::string &path) {
+        pajlada::Settings::Setting<Type> setting(path, defaultValue);
+        setting.resetToDefaultValue();
+    };
+}
 
 template <typename Type>
 class ChatterinoSetting : public pajlada::Settings::Setting<Type>
@@ -26,7 +73,8 @@ public:
         : pajlada::Settings::Setting<Type>(
               path, pajlada::Settings::SettingOption::CompareBeforeSet)
     {
-        _registerSetting(this->getData());
+        _registerSetting(this->getData(), settingResetter(Type{}),
+                         validateSettingValue<Type>);
     }
 
     ChatterinoSetting(const std::string &path, const Type &defaultValue)
@@ -34,7 +82,8 @@ public:
               path, defaultValue,
               pajlada::Settings::SettingOption::CompareBeforeSet)
     {
-        _registerSetting(this->getData());
+        _registerSetting(this->getData(), settingResetter(defaultValue),
+                         validateSettingValue<Type>);
     }
 
     template <typename T2>
@@ -78,7 +127,6 @@ public:
     EnumSetting(const std::string &path, const Enum &defaultValue)
         : ChatterinoSetting<Underlying>(path, Underlying(defaultValue))
     {
-        _registerSetting(this->getData());
     }
 
     EnumSetting<Enum> &operator=(Enum newValue)
@@ -107,7 +155,8 @@ public:
         : pajlada::Settings::Setting<QString>(path)
         , defaultValue(defaultValue_)
     {
-        _registerSetting(this->getData());
+        _registerSetting(this->getData(), settingResetter(QString{}),
+                         validateSettingValue<QString>);
     }
 
     template <typename T2>

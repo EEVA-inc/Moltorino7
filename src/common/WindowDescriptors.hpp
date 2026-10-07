@@ -33,6 +33,8 @@ namespace chatterino {
  *    This container node would then contain a list of nodes on its own, which could be split nodes or further container nodes
  **/
 
+class IndirectChannel;
+
 // from widgets/Window.hpp
 enum class WindowType;
 
@@ -60,6 +62,8 @@ struct SplitDescriptor {
     // Whether "Moderation Mode" (the sword icon) is enabled in this split or not
     bool moderationMode_{false};
 
+    QString autoModChannelFilter_;
+
     std::optional<bool> spellCheckOverride;
 
     QList<QUuid> filters_;
@@ -75,11 +79,14 @@ struct SplitDescriptor {
 
     static void loadFromJSON(SplitDescriptor &descriptor,
                              const QJsonObject &root, const QJsonObject &data);
+
+    IndirectChannel decodeChannel() const;
 };
 
 struct SplitNodeDescriptor : SplitDescriptor {
     qreal flexH_ = 1;
     qreal flexV_ = 1;
+    static SplitNodeDescriptor loadFromJSON(const QJsonObject &root);
 };
 
 struct ContainerNodeDescriptor;
@@ -94,6 +101,8 @@ struct ContainerNodeDescriptor {
     bool vertical_ = false;
 
     std::vector<NodeDescriptor> items_;
+    static ContainerNodeDescriptor loadFromJSON(const QJsonObject &root,
+                                                unsigned depth = 0);
 };
 
 struct TabDescriptor {
@@ -101,10 +110,25 @@ struct TabDescriptor {
 
     QString customTitle_;
     QString customTabColor_;
+    QString groupId_;
+    int ungroupedIndex_ = -1;
     bool selected_{false};
     bool highlightsEnabled_{true};
+    bool alwaysVisible_{false};
 
     std::optional<NodeDescriptor> rootNode_;
+};
+
+struct TabGroupDescriptor {
+    QString id_;
+    QString name_;
+    QString colorMode_;
+    QString color_;
+    QString icon_;
+    QString customIconPath_;
+    bool collapsed_{false};
+    bool muted_{false};
+    bool openMenuOnClick_{false};
 };
 
 struct WindowDescriptor {
@@ -119,6 +143,7 @@ struct WindowDescriptor {
 
     QRect geometry_;
 
+    std::vector<TabGroupDescriptor> tabGroups_;
     std::vector<TabDescriptor> tabs_;
 };
 

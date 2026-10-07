@@ -10,7 +10,9 @@
 #include <QString>
 #include <QVariantMap>
 
+#include <tuple>
 #include <unordered_map>
+#include <vector>
 
 namespace chatterino {
 
@@ -27,6 +29,23 @@ struct TwitchEmoteOccurrence {
     }
 };
 
+struct TwitchGifOccurrence {
+    int start;
+    int end;
+    EmotePtr ptr;
+    EmoteName name;
+    QString gifId;
+    QString gifUrl;
+
+    bool operator==(const TwitchGifOccurrence &other) const
+    {
+        return std::tie(this->start, this->end, this->ptr, this->name,
+                        this->gifId, this->gifUrl) ==
+               std::tie(other.start, other.end, other.ptr, other.name,
+                        other.gifId, other.gifUrl);
+    }
+};
+
 std::unordered_map<QString, QString> parseBadgeInfoTag(const QVariantMap &tags);
 
 std::vector<TwitchBadge> parseBadgeTag(const QVariantMap &tags,
@@ -35,5 +54,9 @@ std::vector<TwitchBadge> parseBadgeTag(const QVariantMap &tags,
 std::vector<TwitchEmoteOccurrence> parseTwitchEmotes(const QVariantMap &tags,
                                                      const QString &content,
                                                      int messageOffset);
+
+std::vector<TwitchGifOccurrence> parseTwitchGifs(const QVariantMap &tags,
+                                                 const QString &content,
+                                                 int messageOffset);
 
 }

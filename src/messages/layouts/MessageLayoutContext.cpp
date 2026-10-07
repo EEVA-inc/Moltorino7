@@ -4,12 +4,60 @@
 
 #include "messages/layouts/MessageLayoutContext.hpp"
 
+#include "messages/Message.hpp"
 #include "singletons/Settings.hpp"
 #include "singletons/Theme.hpp"
 
 #include <algorithm>
 
 namespace chatterino {
+
+namespace {
+
+QString effectiveClientDetectionDisplayMode(const QString &value,
+                                            bool legacyHighlights)
+{
+    const auto mode = value.trimmed().toLower();
+    if (mode == QLatin1String("highlight") || mode == QLatin1String("icon") ||
+        mode == QLatin1String("both") || mode == QLatin1String("off"))
+    {
+        return mode;
+    }
+
+    return legacyHighlights ? QStringLiteral("highlight")
+                            : QStringLiteral("off");
+}
+
+}
+
+void MessageLayoutContext::resetMessageTextCursor() const
+{
+    this->messageTextCursor_ = 0;
+}
+
+std::optional<MessageLayoutContext::MessageTextRange>
+    MessageLayoutContext::claimMessageTextRange(QStringView renderedText) const
+{
+    if (renderedText.isEmpty() || this->message.messageText.isEmpty())
+    {
+        return std::nullopt;
+    }
+
+    auto start = this->message.messageText.indexOf(
+        renderedText, this->messageTextCursor_, Qt::CaseSensitive);
+    if (start < 0)
+    {
+        start = this->message.messageText.indexOf(
+            renderedText, this->messageTextCursor_, Qt::CaseInsensitive);
+    }
+    if (start < 0)
+    {
+        return std::nullopt;
+    }
+
+    this->messageTextCursor_ = start + renderedText.size();
+    return MessageTextRange{start, renderedText.size()};
+}
 
 void MessageColors::applyTheme(Theme *theme, bool isOverlay,
                                int backgroundOpacity)
@@ -24,6 +72,9 @@ void MessageColors::applyTheme(Theme *theme, bool isOverlay,
         this->regularText = src.textColors.regular;
         this->linkText = src.textColors.link;
         this->systemText = src.textColors.system;
+        this->timestampText = src.textColors.timestamp.isValid()
+                                  ? src.textColors.timestamp
+                                  : this->systemText;
     };
 
     if (isOverlay)
@@ -86,9 +137,33 @@ void MessagePreferences::connectSettings(Settings *settings,
         },
         holder);
 
+    const auto applyClientDetectionMode = [this,
+                                           settings](const QString &value) {
+        const auto mode = effectiveClientDetectionDisplayMode(
+            value, settings->showClientDetectionHighlights.getValue());
+        this->enableClientDetectionHighlight =
+            mode == QLatin1String("highlight") || mode == QLatin1String("both");
+        this->enableClientDetectionIcon =
+            mode == QLatin1String("icon") || mode == QLatin1String("both");
+    };
+
+    settings->clientDetectionDisplayMode.connect(
+        [applyClientDetectionMode](const auto &newValue) {
+            applyClientDetectionMode(newValue);
+        },
+        holder);
+
     settings->showClientDetectionHighlights.connect(
+        [settings, applyClientDetectionMode](const auto &) {
+            applyClientDetectionMode(
+                settings->clientDetectionDisplayMode.getValue());
+        },
+        holder);
+    applyClientDetectionMode(settings->clientDetectionDisplayMode.getValue());
+
+    settings->showAbnormalClientDetectionHighlights.connect(
         [this](const auto &newValue) {
-            this->enableClientDetectionHighlight = newValue;
+            this->enableAbnormalClientDetectionHighlight = newValue;
         },
         holder);
 
@@ -107,6 +182,23 @@ void MessagePreferences::connectSettings(Settings *settings,
     settings->clientDetectionIosColor.connect(
         [this](const auto &newValue) {
             this->clientDetectionIosColor = QColor(newValue);
+        },
+        holder);
+
+    settings->clientDetectionAbnormalColor.connect(
+        [this](const auto &newValue) {
+            this->clientDetectionAbnormalColor = QColor(newValue);
+        },
+        holder);
+
+    settings->enableAnnouncementHighlight.connect(
+        [this](const auto &newValue) {
+            this->enableAnnouncementHighlight = newValue;
+        },
+        holder);
+    settings->enableColoredAnnouncementHighlight.connect(
+        [this](const auto &newValue) {
+            this->enableColoredAnnouncementHighlight = newValue;
         },
         holder);
 

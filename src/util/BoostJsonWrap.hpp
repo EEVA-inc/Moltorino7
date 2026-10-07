@@ -33,6 +33,11 @@ public:
         return this->v != nullptr && this->v->is_object();
     }
 
+    constexpr bool isNull() const
+    {
+        return this->v != nullptr && this->v->is_null();
+    }
+
     constexpr bool isArray() const
     {
         return this->v != nullptr && this->v->is_array();

@@ -56,6 +56,9 @@ public:
 
     [[nodiscard]] ImagePtr thumbnail() const;
 
+    int thumbnailSize(int preferredSize) const;
+    void setThumbnailSizeRange(int minimum, int maximum);
+
     void setState(State state);
 
     void setResolvedUrl(QString resolvedUrl);
@@ -76,6 +79,8 @@ private:
     ImagePtr thumbnail_;
 
     State state_ = State::Created;
+    int minimumThumbnailSize_ = 0;
+    int maximumThumbnailSize_ = 0;
 };
 
 }

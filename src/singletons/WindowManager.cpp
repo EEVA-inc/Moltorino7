@@ -130,8 +130,8 @@ void WindowManager::showSettingsDialog(QWidget *parent,
     }
     else
     {
-        QTimer::singleShot(80, [parent, preference] {
-            SettingsDialog::showDialog(parent, preference);
+        QTimer::singleShot(80, this, [preference] {
+            SettingsDialog::showDialog(preference);
         });
     }
 }
@@ -177,6 +177,13 @@ WindowManager::WindowManager(const Args &appArgs_, const Paths &paths,
 {
     qCDebug(chatterinoWindowmanager) << "init WindowManager";
 
+    this->twitchGifRepaintTimer_.setSingleShot(true);
+    this->twitchGifRepaintTimer_.setInterval(16);
+    QObject::connect(&this->twitchGifRepaintTimer_, &QTimer::timeout, this,
+                     [this] {
+                         this->twitchGifRepaintRequested.invoke();
+                     });
+
     this->updateWordTypeMaskListener.add(settings.showTimestamps);
     this->updateWordTypeMaskListener.add(settings.showBadgesGlobalAuthority);
     this->updateWordTypeMaskListener.add(settings.showBadgesPredictions);
@@ -185,6 +192,8 @@ WindowManager::WindowManager(const Args &appArgs_, const Paths &paths,
     this->updateWordTypeMaskListener.add(settings.showBadgesVanity);
     this->updateWordTypeMaskListener.add(settings.showBadgesChatterino);
     this->updateWordTypeMaskListener.add(settings.showBadgesFfz);
+    this->updateWordTypeMaskListener.add(settings.showBadgesFfzAp);
+    this->updateWordTypeMaskListener.add(settings.showBadgesBluzyrino);
     this->updateWordTypeMaskListener.add(settings.showBadgesBttv);
     this->updateWordTypeMaskListener.add(settings.showBadgesSevenTV);
     this->updateWordTypeMaskListener.add(settings.showBadgesHomiesSupporter);
@@ -193,6 +202,9 @@ WindowManager::WindowManager(const Args &appArgs_, const Paths &paths,
     this->updateWordTypeMaskListener.add(settings.enableEmoteImages);
     this->updateWordTypeMaskListener.add(settings.lowercaseDomains);
     this->updateWordTypeMaskListener.add(settings.showReplyButton);
+    this->updateWordTypeMaskListener.add(
+        settings.showAbnormalClientDetectionHighlights);
+    this->updateWordTypeMaskListener.add(settings.showPronounsInChat);
 
     this->forceLayoutChannelViewsListener.add(
         settings.moderationActions.delayedItemsChanged);
@@ -202,15 +214,42 @@ WindowManager::WindowManager(const Args &appArgs_, const Paths &paths,
         settings.highlightedUsers.delayedItemsChanged);
     this->forceLayoutChannelViewsListener.add(
         settings.highlightedBadges.delayedItemsChanged);
+
+    this->forceLayoutChannelViewsListener.add(
+        settings.highlightMatchedFragments);
     this->forceLayoutChannelViewsListener.add(
         settings.removeSpacesBetweenEmotes);
+    this->forceLayoutChannelViewsListener.add(settings.enableEmoteModifiers);
+    this->forceLayoutChannelViewsListener.add(settings.disabledEmoteModifiers);
     this->forceLayoutChannelViewsListener.add(settings.emoteScale);
+    this->forceLayoutChannelViewsListener.add(settings.badgeScale);
+    this->forceLayoutChannelViewsListener.add(settings.badgeAlignment);
+    this->forceLayoutChannelViewsListener.add(settings.enableGigantifyEmotes);
+    this->forceLayoutChannelViewsListener.add(settings.wrapAsciiArt);
+    this->forceLayoutChannelViewsListener.add(settings.enableTwitchGifs);
+    this->forceLayoutChannelViewsListener.add(settings.twitchGifsAsEmotes);
+    this->forceLayoutChannelViewsListener.add(settings.highQualityTwitchGifs);
+    this->forceLayoutChannelViewsListener.add(settings.twitchGifScale);
+    this->forceLayoutChannelViewsListener.add(
+        settings.hideMessageTimestampsWhenLive);
     this->forceLayoutChannelViewsListener.add(settings.timestampFormat);
+    this->forceLayoutChannelViewsListener.add(
+        settings.clientDetectionDisplayMode);
+    this->forceLayoutChannelViewsListener.add(
+        settings.showAbnormalClientDetectionHighlights);
+    this->forceLayoutChannelViewsListener.add(settings.clientDetectionWebColor);
+    this->forceLayoutChannelViewsListener.add(
+        settings.clientDetectionAndroidColor);
+    this->forceLayoutChannelViewsListener.add(settings.clientDetectionIosColor);
+    this->forceLayoutChannelViewsListener.add(
+        settings.clientDetectionAbnormalColor);
     this->forceLayoutChannelViewsListener.add(settings.collpseMessagesMinLines);
     this->forceLayoutChannelViewsListener.add(settings.enableRedeemedHighlight);
     this->forceLayoutChannelViewsListener.add(
         settings.showPinButtonOnModeratorsMode);
     this->forceLayoutChannelViewsListener.add(settings.showSelfDeleteButton);
+    this->forceLayoutChannelViewsListener.add(
+        settings.showModerationButtonsWithoutPermission);
     this->forceLayoutChannelViewsListener.add(
         settings.enableRepeatedMessageDetector);
     this->forceLayoutChannelViewsListener.add(
@@ -223,11 +262,15 @@ WindowManager::WindowManager(const Args &appArgs_, const Paths &paths,
         settings.showBlockedTermAutomodMessages);
     this->forceLayoutChannelViewsListener.add(settings.hideModerated);
     this->forceLayoutChannelViewsListener.add(
+        settings.extendedClientNonceParsing);
+    this->forceLayoutChannelViewsListener.add(
         settings.streamerModeHideModActions);
     this->forceLayoutChannelViewsListener.add(
         settings.streamerModeHideRestrictedUsers);
     this->forceLayoutChannelViewsListener.add(fonts.fontChanged);
 
+    this->layoutChannelViewsListener.add(
+        settings.hideMessageTimestampsWhenLive);
     this->layoutChannelViewsListener.add(settings.timestampFormat);
 
     this->invalidateChannelViewBuffersListener.add(settings.alternateMessages);
@@ -236,22 +279,26 @@ WindowManager::WindowManager(const Args &appArgs_, const Paths &paths,
     this->invalidateChannelViewBuffersListener.add(
         settings.showClientDetectionHighlights);
     this->invalidateChannelViewBuffersListener.add(
+        settings.clientDetectionDisplayMode);
+    this->invalidateChannelViewBuffersListener.add(
+        settings.showAbnormalClientDetectionHighlights);
+    this->invalidateChannelViewBuffersListener.add(
         settings.clientDetectionWebColor);
     this->invalidateChannelViewBuffersListener.add(
         settings.clientDetectionAndroidColor);
     this->invalidateChannelViewBuffersListener.add(
         settings.clientDetectionIosColor);
-
+    this->invalidateChannelViewBuffersListener.add(
+        settings.clientDetectionAbnormalColor);
     this->repaintVisibleChatWidgetsListener.add(
         this->themes.repaintVisibleChatWidgets_);
 
-    this->saveTimer = new QTimer;
+    this->saveTimer = new QTimer(this);
 
     this->saveTimer->setSingleShot(true);
 
-    QObject::connect(this->saveTimer, &QTimer::timeout, [] {
-        getApp()->getWindows()->save();
-    });
+    QObject::connect(this->saveTimer, &QTimer::timeout, this,
+                     &WindowManager::save);
 
 #ifndef Q_OS_MACOS
     this->trayController_ = std::make_unique<TrayController>(*this);
@@ -307,6 +354,8 @@ void WindowManager::updateWordTypeMask()
     flags.set(settings->showBadgesChatterino ? MEF::BadgeChatterino
                                              : MEF::None);
     flags.set(settings->showBadgesFfz ? MEF::BadgeFfz : MEF::None);
+    flags.set(settings->showBadgesFfzAp ? MEF::BadgeFfzAp : MEF::None);
+    flags.set(settings->showBadgesBluzyrino ? MEF::BadgeBluzyrino : MEF::None);
     flags.set(settings->showBadgesBttv ? MEF::BadgeBttv : MEF::None);
     flags.set(settings->showBadgesSevenTV ? MEF::BadgeSevenTV : MEF::None);
     flags.set(settings->showBadgesHomiesSupporter.getValue()
@@ -320,6 +369,7 @@ void WindowManager::updateWordTypeMask()
 
     // username
     flags.set(MEF::Username);
+    flags.set(settings->showPronounsInChat ? MEF::Pronouns : MEF::None);
 
     // replies
     flags.set(MEF::RepliedMessage);
@@ -330,6 +380,8 @@ void WindowManager::updateWordTypeMask()
     flags.set(MEF::Collapsed);
     flags.set(MEF::LowercaseLinks, settings->lowercaseDomains);
     flags.set(MEF::ChannelPointReward);
+    flags.set(MEF::AbnormalClientNonce,
+              settings->showAbnormalClientDetectionHighlights);
 
     // update flags
     MessageElementFlags newFlags = static_cast<MessageElementFlags>(flags);
@@ -374,6 +426,85 @@ void WindowManager::repaintGifEmotes()
 //        this->mainWindow->update();
 //    }
 //}
+
+void WindowManager::repaintTwitchGifs()
+{
+    if (!this->twitchGifRepaintTimer_.isActive())
+    {
+        this->twitchGifRepaintTimer_.start();
+    }
+}
+
+bool WindowManager::shouldSuppressTabGroupAlerts(const Channel *channel) const
+{
+    assertInGuiThread();
+
+    if (channel == nullptr)
+    {
+        return false;
+    }
+
+    bool foundMatchingTab = false;
+
+    for (auto *window : this->windows_)
+    {
+        if (window == nullptr)
+        {
+            continue;
+        }
+
+        auto &notebook = window->getNotebook();
+        for (int i = 0; i < notebook.getPageCount(); ++i)
+        {
+            auto *page = dynamic_cast<SplitContainer *>(notebook.getPageAt(i));
+            if (page == nullptr)
+            {
+                continue;
+            }
+
+            const auto pageShowsChannel = std::ranges::any_of(
+                page->getSplits(), [channel](const Split *split) {
+                    if (split == nullptr)
+                    {
+                        return false;
+                    }
+
+                    const auto displayedChannel = split->getChannel();
+                    if (displayedChannel.get() == channel)
+                    {
+                        return true;
+                    }
+
+                    const auto *multi = dynamic_cast<const MultiChannel *>(
+                        displayedChannel.get());
+                    return multi != nullptr &&
+                           std::ranges::any_of(
+                               multi->channels(), [channel](const auto &child) {
+                                   return child.channel.get() == channel;
+                               });
+                });
+            if (!pageShowsChannel)
+            {
+                continue;
+            }
+
+            foundMatchingTab = true;
+            const auto *tab = page->getTab();
+            if (tab == nullptr || !tab->isGroupMuted())
+            {
+
+                return false;
+            }
+        }
+    }
+
+    return foundMatchingTab;
+}
+
+std::span<Window *const> WindowManager::windows() const
+{
+    return this->windows_;
+}
 
 Window &WindowManager::getMainWindow()
 {
@@ -479,7 +610,8 @@ void WindowManager::scrollToMessage(const MessagePtr &message)
 }
 
 void WindowManager::openChannelOrMessageFromTray(const QString &channelName,
-                                                 const QString &messageId)
+                                                 const QString &messageId,
+                                                 bool newTab)
 {
     assertInGuiThread();
 
@@ -535,8 +667,27 @@ void WindowManager::openChannelOrMessageFromTray(const QString &channelName,
                     continue;
                 }
 
-                if (split->getChannel()->getName().compare(
-                        normalizedChannel, Qt::CaseInsensitive) == 0)
+                const auto matches = [&](const ChannelPtr &candidate) {
+                    return candidate && candidate->isTwitchChannel() &&
+                           candidate->getName().compare(
+                               normalizedChannel, Qt::CaseInsensitive) == 0;
+                };
+                bool found = matches(split->getChannel());
+                if (auto *multi =
+                        dynamic_cast<MultiChannel *>(split->getChannel().get()))
+                {
+                    const auto &children = multi->channels();
+                    for (size_t index = 0; index < children.size(); ++index)
+                    {
+                        if (matches(children[index].channel))
+                        {
+                            multi->setActiveChannelIndex(index);
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if (found)
                 {
                     if (window->isMinimized())
                     {
@@ -560,7 +711,8 @@ void WindowManager::openChannelOrMessageFromTray(const QString &channelName,
     }
 
     auto &mainWindow = this->getMainWindow();
-    auto *page = mainWindow.getNotebook().getOrAddSelectedPage();
+    auto *page = newTab ? mainWindow.getNotebook().addPage(true)
+                        : mainWindow.getNotebook().getOrAddSelectedPage();
     if (page == nullptr)
     {
         scrollToTargetMessage();
@@ -752,6 +904,13 @@ void WindowManager::initialize()
             this->mainWindow_->hide();
         }
     }
+    else if (this->mainWindow_->getNotebook().getPageCount() == 0)
+    {
+
+        qCWarning(chatterinoWindowmanager)
+            << "Loaded a main window without tabs; creating an empty tab";
+        this->mainWindow_->getNotebook().addPage(true);
+    }
 }
 
 void WindowManager::save()
@@ -825,6 +984,32 @@ void WindowManager::save()
 
         // window tabs
         QJsonArray tabsArr;
+
+        QJsonArray tabGroupsArr;
+        for (const auto &group : window->getNotebook().tabGroups())
+        {
+            QJsonObject groupObj{
+                {"id", group.id},
+                {"colorMode", group.colorMode},
+                {"icon", group.icon},
+                {"collapsed", group.collapsed},
+                {"muted", group.muted},
+                {"openMenuOnClick", group.openMenuOnClick},
+            };
+            if (!group.name.isEmpty())
+            {
+                groupObj.insert("name", group.name);
+            }
+            if (group.colorMode == "custom" && group.color.isValid())
+            {
+                groupObj.insert("color", group.color.name(QColor::HexArgb));
+            }
+            tabGroupsArr.append(groupObj);
+        }
+        if (!tabGroupsArr.isEmpty())
+        {
+            windowObj.insert("tabGroups", tabGroupsArr);
+        }
 
         for (int tabIndex = 0; tabIndex < window->getNotebook().getPageCount();
              tabIndex++)
@@ -938,70 +1123,23 @@ std::set<QString> WindowManager::getVisibleChannelNames() const
 
         for (auto *split : page->getSplits())
         {
-            visible.emplace(split->getChannel()->getName());
+            const auto channel = split->getChannel();
+            if (const auto *multi =
+                    dynamic_cast<const MultiChannel *>(channel.get()))
+            {
+                for (const auto &child : multi->channels())
+                {
+                    visible.emplace(child.channel->getName());
+                }
+            }
+            else
+            {
+                visible.emplace(channel->getName());
+            }
         }
     }
 
     return visible;
-}
-
-QJsonArray WindowManager::getOpenTabSnapshot() const
-{
-    QJsonArray windowsArray;
-
-    for (auto *window : this->windows_)
-    {
-        QJsonObject windowObj;
-        windowObj["windowType"] = static_cast<int>(window->getType());
-        windowObj["activeWindow"] = window->isActiveWindow();
-
-        QJsonArray tabsArray;
-        auto &notebook = window->getNotebook();
-        auto *selectedPage = notebook.getSelectedPage();
-
-        for (int tabIndex = 0; tabIndex < notebook.getPageCount(); ++tabIndex)
-        {
-            auto *page =
-                dynamic_cast<SplitContainer *>(notebook.getPageAt(tabIndex));
-            if (page == nullptr)
-            {
-                continue;
-            }
-
-            QJsonObject tabObj;
-            tabObj["index"] = tabIndex;
-            tabObj["selected"] = selectedPage == page;
-            if (auto *tab = page->getTab(); tab != nullptr && tab->hasCustomTitle())
-            {
-                tabObj["customTitle"] = tab->getCustomTitle();
-            }
-
-            QJsonArray channelsArray;
-            for (auto *split : page->getSplits())
-            {
-                if (auto channel = split->getChannel())
-                {
-                    channelsArray.append(channel->getName());
-                }
-            }
-            tabObj["channels"] = channelsArray;
-
-            if (auto *selectedSplit = page->getSelectedSplit())
-            {
-                if (auto selectedChannel = selectedSplit->getChannel())
-                {
-                    tabObj["selectedChannel"] = selectedChannel->getName();
-                }
-            }
-
-            tabsArray.append(tabObj);
-        }
-
-        windowObj["tabs"] = tabsArray;
-        windowsArray.append(windowObj);
-    }
-
-    return windowsArray;
 }
 
 void WindowManager::encodeTab(SplitContainer *tab, bool isSelected,
@@ -1019,6 +1157,15 @@ void WindowManager::encodeTab(SplitContainer *tab, bool isSelected,
                    tab->getTab()->getCustomTabColor().name(QColor::HexArgb));
     }
 
+    if (!tab->getTab()->groupId().isEmpty())
+    {
+        obj.insert("groupId", tab->getTab()->groupId());
+    }
+    if (tab->getTab()->ungroupedIndex() >= 0)
+    {
+        obj.insert("ungroupedIndex", tab->getTab()->ungroupedIndex());
+    }
+
     // selected
     if (isSelected)
     {
@@ -1027,6 +1174,11 @@ void WindowManager::encodeTab(SplitContainer *tab, bool isSelected,
 
     // highlighting on new messages
     obj.insert("highlightsEnabled", tab->getTab()->hasHighlightsEnabled());
+
+    if (tab->getTab()->isAlwaysVisible())
+    {
+        obj.insert("alwaysVisible", true);
+    }
 
     // splits
     QJsonObject splits;
@@ -1047,6 +1199,13 @@ void WindowManager::encodeNodeRecursively(SplitNode *node, QJsonObject &obj)
             QJsonObject split;
             WindowManager::encodeChannel(node->getSplit()->getIndirectChannel(),
                                          split);
+            if (node->getSplit()->getIndirectChannel().getType() ==
+                    Channel::Type::TwitchAutomod &&
+                !node->getSplit()->getAutoModChannelFilter().isEmpty())
+            {
+                split.insert("autoModChannel",
+                             node->getSplit()->getAutoModChannelFilter());
+            }
             obj.insert("data", split);
 
             QJsonArray filters;
@@ -1090,10 +1249,10 @@ void WindowManager::encodeChannel(IndirectChannel channel, QJsonObject &obj)
 {
     assertInGuiThread();
 
+    obj.insert("type", qmagicenum::enumNameString(channel.getType()));
     switch (channel.getType())
     {
         case Channel::Type::Twitch: {
-            obj.insert("type", "twitch");
             obj.insert("name", channel.get()->getName());
             if (auto *twitchChannel =
                     dynamic_cast<TwitchChannel *>(channel.get().get()))
@@ -1105,33 +1264,11 @@ void WindowManager::encodeChannel(IndirectChannel channel, QJsonObject &obj)
             }
         }
         break;
-        case Channel::Type::TwitchAutomod: {
-            obj.insert("type", "automod");
-        }
-        break;
-        case Channel::Type::TwitchMentions: {
-            obj.insert("type", "mentions");
-        }
-        break;
-        case Channel::Type::TwitchWatching: {
-            obj.insert("type", "watching");
-        }
-        break;
-        case Channel::Type::TwitchWhispers: {
-            obj.insert("type", "whispers");
-        }
-        break;
-        case Channel::Type::TwitchLive: {
-            obj.insert("type", "live");
-        }
-        break;
         case Channel::Type::Misc: {
-            obj.insert("type", "misc");
             obj.insert("name", channel.get()->getName());
         }
         break;
         case Channel::Type::Kick: {
-            obj.insert("type", "kick");
             obj.insert("name", channel.get()->getName());
             auto *kc = dynamic_cast<KickChannel *>(channel.get().get());
             if (kc)
@@ -1142,8 +1279,12 @@ void WindowManager::encodeChannel(IndirectChannel channel, QJsonObject &obj)
             }
         }
         break;
+        case Channel::Type::YouTube:
+        case Channel::Type::TikTok: {
+            obj.insert("name", channel.get()->getName());
+        }
+        break;
         case Channel::Type::Multi: {
-            obj.insert("type", "multi");
             auto *mc = dynamic_cast<MultiChannel *>(channel.get().get());
             if (mc)
             {
@@ -1161,7 +1302,15 @@ void WindowManager::encodeChannel(IndirectChannel channel, QJsonObject &obj)
         }
         break;
 
-        default:
+        case Channel::Type::TwitchWhispers:
+        case Channel::Type::TwitchWatching:
+        case Channel::Type::TwitchMentions:
+        case Channel::Type::TwitchLive:
+        case Channel::Type::TwitchAutomod:
+
+        case Channel::Type::None:
+        case Channel::Type::Direct:
+        case Channel::Type::TwitchEnd:
             break;
     }
 }
@@ -1179,70 +1328,7 @@ void WindowManager::encodeFilters(Split *split, QJsonArray &arr)
 
 IndirectChannel WindowManager::decodeChannel(const SplitDescriptor &descriptor)
 {
-    assertInGuiThread();
-
-    if (descriptor.type_ == "twitch")
-    {
-        if (descriptor.anonymous_)
-        {
-            return getApp()->getTwitch()->getOrAddAnonymousChannel(
-                descriptor.channelName_);
-        }
-
-        return getApp()->getTwitch()->getOrAddChannel(descriptor.channelName_);
-    }
-    else if (descriptor.type_ == "mentions")
-    {
-        return getApp()->getTwitch()->getMentionsChannel();
-    }
-    else if (descriptor.type_ == "watching")
-    {
-        return getApp()->getTwitch()->getWatchingChannel();
-    }
-    else if (descriptor.type_ == "whispers")
-    {
-        return getApp()->getTwitch()->getWhispersChannel();
-    }
-    else if (descriptor.type_ == "live")
-    {
-        return getApp()->getTwitch()->getLiveChannel();
-    }
-    else if (descriptor.type_ == "automod")
-    {
-        return getApp()->getTwitch()->getAutomodChannel();
-    }
-    else if (descriptor.type_ == "misc")
-    {
-        return getApp()->getTwitch()->getChannelOrEmpty(
-            descriptor.channelName_);
-    }
-    else if (descriptor.type_ == "kick")
-    {
-        return getApp()->getKickChatServer()->getOrCreate(
-            descriptor.channelName_, KickChannel::UserInit{
-                                         .roomID = descriptor.kickRoomID,
-                                         .userID = descriptor.kickUserID,
-                                         .channelID = descriptor.kickChannelID,
-                                     });
-    }
-    else if (descriptor.type_ == u"multi")
-    {
-        QVarLengthArray<MultiChannel::Spec, 4> specs;
-        for (const auto &child : descriptor.children)
-        {
-            auto spec = MultiChannel::Spec::fromDescriptor(child);
-            if (spec)
-            {
-                specs.emplace_back(*std::move(spec));
-            }
-        }
-        auto ptr =
-            std::make_shared<MultiChannel>(specs, descriptor.mcIndicator);
-        ptr->setActiveChannelIndex(descriptor.mcIndex);
-        return {std::move(ptr)};
-    }
-
-    return Channel::getEmpty();
+    return descriptor.decodeChannel();
 }
 
 void WindowManager::closeAll()
@@ -1297,6 +1383,7 @@ void WindowManager::applyWindowLayout(const WindowLayout &layout)
         }
 
         // get geometry
+        if (windowData.geometry_.isValid())
         {
             // out of bounds windows
             auto screens = QApplication::screens();
@@ -1321,25 +1408,39 @@ void WindowManager::applyWindowLayout(const WindowLayout &layout)
                         .exec() == QMessageBox::Yes;
             }
 
-            if ((!outOfBounds || !should.value()) &&
-                windowData.geometry_.x() != -1 &&
-                windowData.geometry_.y() != -1 &&
-                windowData.geometry_.width() != -1 &&
-                windowData.geometry_.height() != -1)
+            if (!outOfBounds || !should.value())
             {
                 // Have to offset x by one because qt moves the window 1px too
                 // far to the left:w
 
-                window.setInitialBounds(
-                    {
-                        windowData.geometry_.x(),
-                        windowData.geometry_.y(),
-                        windowData.geometry_.width(),
-                        windowData.geometry_.height(),
-                    },
-                    widgets::BoundsChecking::Off);
+                window.setInitialBounds(windowData.geometry_,
+                                        widgets::BoundsChecking::Off);
             }
         }
+
+        for (const auto &group : windowData.tabGroups_)
+        {
+            QColor color(group.color_);
+            window.getNotebook().restoreTabGroup({
+                .id = group.id_,
+                .name = group.name_,
+                .colorMode = group.colorMode_,
+                .color = color,
+                .icon = group.icon_,
+                .customIconPath = group.customIconPath_,
+                .collapsed = group.collapsed_,
+                .muted = group.muted_,
+                .openMenuOnClick = group.openMenuOnClick_,
+            });
+        }
+
+        struct RestoredTabPlacement {
+            SplitContainer *page{};
+            QString groupId;
+            int ungroupedIndex = -1;
+        };
+        std::vector<RestoredTabPlacement> restoredTabPlacements;
+        restoredTabPlacements.reserve(windowData.tabs_.size());
 
         // open tabs
         for (const auto &tab : windowData.tabs_)
@@ -1369,12 +1470,30 @@ void WindowManager::applyWindowLayout(const WindowLayout &layout)
 
             // highlighting on new messages
             page->getTab()->setHighlightsEnabled(tab.highlightsEnabled_);
+            page->getTab()->setAlwaysVisible(tab.alwaysVisible_);
+            restoredTabPlacements.push_back({
+                .page = page,
+                .groupId = tab.groupId_,
+                .ungroupedIndex = tab.ungroupedIndex_,
+            });
 
             if (tab.rootNode_)
             {
                 page->applyFromDescriptor(*tab.rootNode_);
             }
         }
+        for (const auto &placement : restoredTabPlacements)
+        {
+            placement.page->getTab()->setUngroupedIndex(
+                placement.ungroupedIndex);
+            if (!placement.groupId.isEmpty())
+            {
+                window.getNotebook().restorePageTabGroup(
+                    placement.page, placement.groupId,
+                    placement.ungroupedIndex);
+            }
+        }
+        window.getNotebook().finishRestoringTabGroups();
         window.show();
 
         // Set window state

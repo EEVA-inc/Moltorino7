@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "providers/twitch/api/HelixEnums.hpp"
+
 #include <QColor>
 
 #include <memory>
@@ -24,7 +26,15 @@ enum class ColorType {
 
     SelfMessageHighlight,
     AutomodHighlight,
+    AnnouncementHighlight,
+    AnnouncementBlue,
+    AnnouncementGreen,
+    AnnouncementOrange,
+    AnnouncementPurple,
 };
+
+ColorType colorTypeFromHelixAnnouncementColor(
+    HelixAnnouncementColor color, bool enableColoredAnnouncements);
 
 class ColorProvider
 {

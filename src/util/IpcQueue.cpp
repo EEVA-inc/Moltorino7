@@ -110,7 +110,7 @@ bool IpcQueue::remove(const char *name)
     return boost_ipc::message_queue::remove(name);
 }
 
-QByteArray IpcQueue::receive()
+QByteArray IpcQueue::receive(std::chrono::milliseconds timeout)
 {
     try
     {
@@ -122,7 +122,12 @@ QByteArray IpcQueue::receive()
 
         size_t messageSize = 0;
         unsigned int priority = 0;
-        d->queue.receive(buf.data(), buf.size(), messageSize, priority);
+        if (!d->queue.timed_receive(buf.data(), buf.size(), messageSize,
+                                    priority,
+                                    std::chrono::steady_clock::now() + timeout))
+        {
+            return {};
+        }
 
         buf.truncate(static_cast<qsizetype>(messageSize));
         return buf;

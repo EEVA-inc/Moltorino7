@@ -25,6 +25,10 @@ Expected<void, WriteManifestError> writeManifestTo(QString directory,
                                                    const QString &filename,
                                                    const QJsonDocument &json);
 
+#ifndef Q_OS_WIN
+std::optional<QString> parseCustomPath(QString path);
+#endif
+
 }
 
 namespace chatterino {
@@ -32,10 +36,11 @@ namespace chatterino {
 class Application;
 class Paths;
 class Channel;
+class Modes;
 
 using ChannelPtr = std::shared_ptr<Channel>;
 
-void registerNmHost(const Paths &paths);
+void registerNmHost(const Modes &modes, const Paths &paths);
 std::string &getNmQueueName(const Paths &paths);
 
 Atomic<std::optional<QString>> &nmIpcError();
@@ -82,7 +87,14 @@ private:
 
     std::vector<ChannelPtr> channelWarmer_;
 
+    QObject callbackContext_;
+
     friend ReceiverThread;
+};
+
+enum class BrowserManifestFormat {
+    Chrome,
+    Firefox,
 };
 
 }

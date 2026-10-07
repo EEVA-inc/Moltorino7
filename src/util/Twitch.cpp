@@ -10,6 +10,7 @@
 #include <QUrl>
 
 #include <unordered_map>
+#include <utility>
 
 namespace chatterino {
 
@@ -33,10 +34,36 @@ extern const QStringList VALID_HELIX_COLORS{
     "orange_red",  "red",         "sea_green",  "spring_green", "yellow_green",
 };
 
+QUrl twitchUsercardUrl(QString channel, QString username)
+{
+    channel = channel.trimmed();
+    username = username.trimmed();
+
+    if (!twitchUserNameRegexp().match(username).hasMatch())
+    {
+        return {};
+    }
+
+    if (!twitchUserNameRegexp().match(channel).hasMatch())
+    {
+        channel = username;
+    }
+
+    QUrl url;
+    url.setScheme(QStringLiteral("https"));
+    url.setHost(QStringLiteral("www.twitch.tv"));
+    url.setPath(QStringLiteral("/popout/") + channel +
+                QStringLiteral("/viewercard/") + username);
+    return url;
+}
+
 void openTwitchUsercard(QString channel, QString username)
 {
-    QDesktopServices::openUrl("https://www.twitch.tv/popout/" + channel +
-                              "/viewercard/" + username);
+    const auto url = twitchUsercardUrl(std::move(channel), std::move(username));
+    if (!url.isEmpty())
+    {
+        QDesktopServices::openUrl(url);
+    }
 }
 
 void stripUserName(QString &userName)

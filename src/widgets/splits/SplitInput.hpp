@@ -4,12 +4,14 @@
 
 #pragma once
 
+#include "controllers/completion/sources/CommandSource.hpp"
 #include "messages/Message.hpp"
 #include "providers/moltorino/MoltorinoFeatureFlags.hpp"
 #include "widgets/BaseWidget.hpp"
 
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPaintEvent>
 #include <QPointer>
 #include <QPropertyAnimation>
@@ -23,14 +25,18 @@
 #    include <functional>
 #endif
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <vector>
+
+class QMenu;
 
 namespace chatterino {
 
 class Split;
 class EmotePopup;
 class InputCompletionPopup;
+class EmoteTabCompletionCarousel;
 class InputHighlighter;
 class MessageView;
 class LabelButton;
@@ -58,6 +64,7 @@ public:
     bool isEditFirstWord() const;
     QString getInputText() const;
     void insertText(const QString &text);
+    void focusEditor(Qt::FocusReason reason);
 
     void setReply(MessagePtr target, std::weak_ptr<Channel> channel);
     void setPlaceholderText(const QString &text);
@@ -84,6 +91,7 @@ public:
      * as if the widget is visible
      **/
     bool isHidden() const;
+    bool isInHistorySearch() const;
 
     /**
      * @brief Sets the text of this input
@@ -113,6 +121,7 @@ public:
 
     pajlada::Signals::Signal<const QString &> textChanged;
     pajlada::Signals::NoArgSignal selectionChanged;
+    pajlada::Signals::NoArgSignal historySearchStateChanged;
 
 protected:
     QSize minimumSizeHint() const override;
@@ -156,6 +165,9 @@ protected:
     void clearChannelPointsDisplay();
     void updateChannelPointsDisplay(TwitchChannel *channel);
     void updateActionRowCompactness();
+    void addMultiChannelDestinationActions(QMenu *menu, bool createSubmenu);
+    void openMultiChannelDestinationMenu();
+    void updateMultiChannelDestinationButton();
     void updateCompletionPopup();
     void updateOutgoingTranslationPreview();
     void scheduleOutgoingTranslationPreview(const QString &text);
@@ -172,11 +184,15 @@ protected:
         const QString &message, const std::vector<QString> &arguments,
         const ChannelPtr &channel);
     void postTranslatedMessageSend(const QString &message,
-                                   const std::vector<QString> &arguments);
+                                   const std::vector<QString> &arguments,
+                                   uint64_t draftRevision);
     bool updateCommandCompletion(const QString &query, int start, int end);
+    void updateCommandArgumentHint(const QString &text, int cursorPosition);
+    void showCommandCompletionStatus(const QString &text);
     void renderCommandCompletion();
     void hideCommandCompletion();
-    bool moveCommandCompletionSelection(int offset);
+    bool moveCommandCompletionSelection(int offset,
+                                        bool previewInserted = true);
     void showCompletionPopup(const QString &text, CompletionKind kind);
     void hideCompletionPopup();
     void insertCompletionText(const QString &input_);
@@ -233,6 +249,7 @@ protected:
         std::array<QLabel *, 3> commandCompletionRows{};
         QWidget *translationPreviewWidget;
         QLabel *translationPreviewLabel;
+        EmoteTabCompletionCarousel *emoteTabCompletionCarousel;
 #if MOLTORINO_ENABLE_CHANNEL_POINT_REWARDS
         QWidget *channelPointRewardPromptWidget;
         QLabel *channelPointRewardPromptTitle;
@@ -241,6 +258,7 @@ protected:
         // input widgets
         QWidget *inputWrapper;
         QHBoxLayout *inputHbox;
+        LabelButton *multiChannelDestinationButton;
         ResizingTextEdit *textEdit;
         QLabel *textEditLength;
         LabelButton *sendButton;
@@ -250,7 +268,11 @@ protected:
         SvgButton *predictionButton;
         SvgButton *pollButton;
         SvgButton *outgoingTranslateButton;
+        SvgButton *vanityButton;
         SvgButton *emoteButton;
+        QWidget *historySearchWrap;
+        QLineEdit *historySearchInput;
+        QLabel *historySearchLabel;
     } ui_{};
 
     MessagePtr replyTarget_ = nullptr;
@@ -282,6 +304,12 @@ protected:
     std::vector<CommandCompletionSuggestion> commandCompletionSuggestions_;
     int commandCompletionSelectedIndex_ = 0;
     bool updatingCommandCompletionText_ = false;
+    bool commandAssistanceDismissed_ = false;
+    QString dismissedCommandText_;
+    int dismissedCommandCursor_ = -1;
+    QString commandHintKey_;
+    std::weak_ptr<Channel> commandHintChannel_;
+    std::optional<completion::CommandItem> resolvedCommandHint_;
     QTimer nukePreviewTimer_;
     QTimer outgoingTranslationPreviewTimer_;
     QString pendingNukePreviewText_;
@@ -291,6 +319,7 @@ protected:
     QString outgoingTranslationPreviewText_;
     int outgoingTranslationGeneration_ = 0;
     bool outgoingTranslationSendInFlight_ = false;
+    uint64_t draftRevision_ = 0;
     bool nukePreviewCommandActive_ = false;
     pajlada::Signals::ScopedConnection nukePreviewMessageConnection_;
     pajlada::Signals::ScopedConnection nukePreviewReplaceConnection_;
@@ -338,6 +367,27 @@ protected:
     InputHighlighter *inputHighlighter = nullptr;
 
     void updateFonts();
+
+    bool inHistorySearch_ = false;
+    void startHistorySearch(bool backwards, bool loop);
+    void stopHistorySearchIfNecessary();
+    void refreshHistorySearch(bool backwards, bool loop);
+    void cycleHistorySearch(bool backwards, bool loop);
+    void loopHistorySearchIfNeeded(bool backwards);
+    void updateSelectedHistorySearchMatch();
+    void updateHistorySearchStatus(bool failed, const QString &message);
+
+    QString historySearchQuery_;
+    struct HistorySearchResult {
+        qsizetype messageIdx = 0;
+        QString message;
+    };
+    std::vector<HistorySearchResult> historySearchResults_;
+    qsizetype historySearchResultIndex_ = -1;
+    bool historySearchFailed_ = false;
+    bool lastHistorySearchBackwards_ = false;
+    bool lastHistorySearchLoop_ = false;
+    int prevIndexBeforeSearch_ = 0;
 
 private Q_SLOTS:
     void editTextChanged();

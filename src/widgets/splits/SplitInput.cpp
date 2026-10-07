@@ -5,27 +5,36 @@
 #include "widgets/splits/SplitInput.hpp"
 
 #include "Application.hpp"
+#include "common/Channel.hpp"
 #include "common/enums/MessageOverflow.hpp"
 #include "common/QLogging.hpp"
 #include "controllers/accounts/AccountController.hpp"
 #include "controllers/commands/builtin/twitch/Nuke.hpp"
 #include "controllers/commands/CommandController.hpp"
 #include "controllers/completion/sources/CommandSource.hpp"
+#include "controllers/completion/sources/EmoteSource.hpp"
 #include "controllers/completion/strategies/CommandStrategy.hpp"
+#include "controllers/completion/TabCompletionModel.hpp"
 #include "controllers/hotkeys/HotkeyController.hpp"
 #include "controllers/spellcheck/SpellChecker.hpp"
+#include "messages/Image.hpp"
 #include "messages/Link.hpp"
 #include "messages/Message.hpp"
 #include "providers/kick/KickChannel.hpp"
+#include "providers/potat/PotatCommands.hpp"
+#include "providers/tiktok/TikTokText.hpp"
+#include "providers/tiktok/TikTokTypes.hpp"
 #include "providers/twitch/api/Helix.hpp"
 #include "providers/twitch/TwitchAccount.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
 #include "providers/twitch/TwitchCommon.hpp"
 #include "providers/twitch/TwitchIrcServer.hpp"
 #include "providers/translation/Translator.hpp"
+#include "providers/youtube/YouTubeTypes.hpp"
 #include "singletons/Fonts.hpp"
 #include "singletons/Settings.hpp"
 #include "singletons/Theme.hpp"
+#include "singletons/ThemeCustomization.hpp"
 #include "singletons/WindowManager.hpp"
 #include "util/Helpers.hpp"
 #include "util/LayoutCreator.hpp"
@@ -36,6 +45,7 @@
 #include "widgets/dialogs/PollDialog.hpp"
 #include "widgets/dialogs/PredictionDialog.hpp"
 #include "widgets/dialogs/UserInfoPopup.hpp"
+#include "widgets/dialogs/VanityDialog.hpp"
 #if MOLTORINO_ENABLE_CHANNEL_POINT_REWARDS
 #    include "widgets/dialogs/ChannelPointsDialog.hpp"
 #endif
@@ -53,16 +63,21 @@
 #include <QActionGroup>
 #include <QCompleter>
 #include <QDateTime>
+#include <QFontMetricsF>
+#include <QHideEvent>
 #include <QKeyEvent>
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPaintEvent>
 #include <QProgressBar>
+#include <QShowEvent>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <limits>
 #include <ranges>
@@ -70,6 +85,487 @@
 using namespace Qt::Literals::StringLiterals;
 
 namespace chatterino {
+
+class CommandCompletionLabel final : public QLabel
+{
+public:
+    explicit CommandCompletionLabel(QWidget *parent = nullptr)
+        : QLabel(parent)
+    {
+        this->setTextFormat(Qt::PlainText);
+    }
+
+    void setStatusText(QString text, QColor color)
+    {
+        this->completion_ = std::move(text);
+        this->usage_.clear();
+        this->commandColor_ = color;
+        this->usageColor_ = color;
+        this->commandIsBold_ = false;
+        this->update();
+    }
+
+    void setSuggestion(QString completion, QString usage, QColor commandColor,
+                       QColor usageColor)
+    {
+        this->completion_ = std::move(completion);
+        this->usage_ = std::move(usage);
+        this->commandColor_ = commandColor;
+        this->usageColor_ = usageColor;
+        this->commandIsBold_ = true;
+        this->update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::TextAntialiasing, true);
+
+        if (!this->fontsResolved_ || this->resolvedFor_ != this->font())
+        {
+            this->resolvedFor_ = this->font();
+            this->normalFont_ =
+                makeResolvedFont(this->resolvedFor_, QFont::Normal);
+            this->commandFont_ =
+                makeResolvedFont(this->resolvedFor_, QFont::Bold);
+            this->fontsResolved_ = true;
+        }
+        const auto &normalFont = this->normalFont_;
+        const auto &commandFont = this->commandFont_;
+        const auto normalMetrics = QFontMetricsF(normalFont);
+        const auto commandMetrics = QFontMetricsF(commandFont);
+        const auto margins = this->contentsMargins();
+        const QRectF content =
+            QRectF(this->rect())
+                .adjusted(margins.left(), margins.top(), -margins.right(),
+                          -margins.bottom());
+        const qreal baseline =
+            content.top() +
+            (content.height() -
+             std::max(normalMetrics.height(), commandMetrics.height())) /
+                2.0 +
+            std::max(normalMetrics.ascent(), commandMetrics.ascent());
+
+        painter.setFont(this->commandIsBold_ ? commandFont : normalFont);
+        painter.setPen(this->commandColor_);
+        const auto commandText =
+            QFontMetricsF(painter.font())
+                .elidedText(this->completion_, Qt::ElideRight,
+                            qRound(std::max<qreal>(0, content.width())));
+        painter.drawText(QPointF(content.left(), baseline), commandText);
+
+        if (this->usage_.isEmpty())
+        {
+            return;
+        }
+
+        const qreal commandWidth =
+            QFontMetricsF(painter.font()).horizontalAdvance(commandText);
+        const qreal usageLeft = content.left() + commandWidth;
+        const qreal available = content.right() - usageLeft;
+        if (available <= 0)
+        {
+            return;
+        }
+        painter.setFont(normalFont);
+        painter.setPen(this->usageColor_);
+        const auto usageText = normalMetrics.elidedText(
+            this->usage_, Qt::ElideRight, qRound(available));
+        painter.drawText(QPointF(usageLeft, baseline), usageText);
+    }
+
+private:
+    QString completion_;
+    QString usage_;
+    QColor commandColor_;
+    QColor usageColor_;
+    bool commandIsBold_ = false;
+    QFont resolvedFor_;
+    QFont normalFont_;
+    QFont commandFont_;
+    bool fontsResolved_ = false;
+};
+
+class EmoteTabCompletionCarousel final : public BaseWidget
+{
+public:
+    explicit EmoteTabCompletionCarousel(QWidget *parent = nullptr)
+        : BaseWidget(parent)
+    {
+        this->setMouseTracking(true);
+        this->setFocusPolicy(Qt::NoFocus);
+        this->setCursor(Qt::PointingHandCursor);
+        this->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        this->hide();
+
+        this->signalHolder_.managedConnect(
+            getApp()->getWindows()->layoutRequested, [this](Channel *) {
+                if (this->isVisible())
+                {
+                    this->update();
+                }
+            });
+    }
+
+    void setSelectionCallback(std::function<void(int)> callback)
+    {
+        this->selectionCallback_ = std::move(callback);
+    }
+
+    void setVisibilityCallback(std::function<void()> callback)
+    {
+        this->visibilityCallback_ = std::move(callback);
+    }
+
+    void refreshAppearance()
+    {
+        const int previousHeight = this->height();
+        this->setFixedHeight(this->carouselHeight());
+        this->update();
+
+        if (this->isVisible() && previousHeight != this->height() &&
+            this->visibilityCallback_)
+        {
+            this->visibilityCallback_();
+        }
+    }
+
+    void setCompletion(TabCompletionModel *model, int selectedRow)
+    {
+        this->model_ = model;
+        this->selectedRow_ = selectedRow;
+
+        this->emoteRows_.clear();
+        if (model != nullptr)
+        {
+            this->emoteRows_.reserve(static_cast<size_t>(model->rowCount()));
+            for (int row = 0; row < model->rowCount(); ++row)
+            {
+                const auto *item = model->emoteAt(row);
+                if (item != nullptr && item->hasRenderableEmote())
+                {
+                    this->emoteRows_.push_back(row);
+                }
+            }
+        }
+
+        const auto *selectedItem =
+            model == nullptr ? nullptr : model->emoteAt(selectedRow);
+        if (selectedItem == nullptr || !selectedItem->hasRenderableEmote() ||
+            this->emoteRows_.empty())
+        {
+            this->clear();
+            return;
+        }
+
+        const bool changedVisibility = this->isHidden();
+        this->setFixedHeight(this->carouselHeight());
+        this->show();
+        this->update();
+        if (changedVisibility && this->visibilityCallback_)
+        {
+            this->visibilityCallback_();
+        }
+    }
+
+    void clear()
+    {
+        this->gifRepaintConnection_ = pajlada::Signals::ScopedConnection{};
+        this->model_.clear();
+        this->selectedRow_ = -1;
+        this->emoteRows_.clear();
+        this->cells_.clear();
+        if (this->isHidden())
+        {
+            return;
+        }
+
+        this->hide();
+        if (this->visibilityCallback_)
+        {
+            this->visibilityCallback_();
+        }
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.fillRect(this->rect(), this->theme->splits.input.background);
+
+        auto *model = this->model_.data();
+        if (model == nullptr || this->emoteRows_.empty())
+        {
+            return;
+        }
+
+        const int outerMargin = std::max(8, int(std::round(9 * this->scale())));
+        const int availableWidth = std::max(1, this->width() - outerMargin * 2);
+        const int minimumCellWidth = std::max(
+            46, int(std::round(this->minimumCellWidth() * this->scale())));
+        const int visibleCount =
+            std::clamp(availableWidth / minimumCellWidth, 1,
+                       std::min(7, static_cast<int>(this->emoteRows_.size())));
+        const int selectedIndex = this->selectedEmoteIndex();
+        const int maxStart = std::max(
+            0, static_cast<int>(this->emoteRows_.size()) - visibleCount);
+        const int first =
+            std::clamp(selectedIndex - visibleCount / 2, 0, maxStart);
+        const int cellWidth = availableWidth / visibleCount;
+
+        this->cells_.clear();
+        this->cells_.reserve(static_cast<size_t>(visibleCount));
+
+        const bool showNames = getSettings()->showEmoteTabCarouselNames;
+        QFont nameFont = this->font();
+        nameFont.setPointSizeF(std::max(7.0, nameFont.pointSizeF() * 0.80));
+        const QFontMetrics nameMetrics(nameFont);
+
+        for (int slot = 0; slot < visibleCount; ++slot)
+        {
+            const int emoteIndex = first + slot;
+            const int row = this->emoteRows_[static_cast<size_t>(emoteIndex)];
+            const auto *item = model->emoteAt(row);
+            if (item == nullptr || !item->hasRenderableEmote())
+            {
+                continue;
+            }
+
+            const auto emote = item->getEmote();
+            if (!emote)
+            {
+                continue;
+            }
+
+            const int left = outerMargin + slot * cellWidth;
+            const int width = slot == visibleCount - 1
+                                  ? availableWidth - slot * cellWidth
+                                  : cellWidth;
+            QRect cellRect(left, 2, width, this->height() - 4);
+            this->cells_.push_back({cellRect, row});
+
+            const bool selected = row == this->selectedRow_;
+            QColor cellColor = this->theme->tabs.regular.backgrounds.regular;
+            cellColor.setAlpha(selected ? 185 : 70);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(cellColor);
+            painter.drawRoundedRect(cellRect.adjusted(1, 0, -1, 0),
+                                    std::max(2.0, 3.0 * this->scale()),
+                                    std::max(2.0, 3.0 * this->scale()));
+
+            if (selected)
+            {
+                QPen accentPen(this->theme->accent,
+                               std::max(1.0, 1.5 * this->scale()));
+                painter.setPen(accentPen);
+                painter.setBrush(Qt::NoBrush);
+                painter.drawRoundedRect(cellRect.adjusted(1, 0, -2, -1),
+                                        std::max(2.0, 3.0 * this->scale()),
+                                        std::max(2.0, 3.0 * this->scale()));
+            }
+
+            const int nameHeight = showNames ? nameMetrics.height() : 0;
+            const int imageMargin =
+                std::max(2, int(std::round(3 * this->scale())));
+            QRect imageArea =
+                cellRect.adjusted(imageMargin, imageMargin, -imageMargin,
+                                  -(nameHeight + imageMargin));
+            const auto &image = emote->images.getImageOrLoaded(
+                this->scale(), ImageSet::ScaleMode::Exact);
+            if (image != nullptr)
+            {
+                if (auto pixmap = image->pixmapOrLoad())
+                {
+                    const auto imageSize =
+                        QSize(image->width(), image->height());
+                    const auto drawn =
+                        imageSize.scaled(imageArea.size(), Qt::KeepAspectRatio);
+                    QRect imageRect(QPoint{}, drawn);
+                    imageRect.moveCenter(imageArea.center());
+                    painter.setRenderHint(QPainter::SmoothPixmapTransform);
+                    painter.drawPixmap(imageRect, *pixmap);
+                }
+            }
+
+            if (showNames)
+            {
+                painter.setFont(nameFont);
+                auto textColor = this->theme->splits.input.text;
+                if (!selected)
+                {
+                    textColor.setAlphaF(0.78F);
+                }
+                painter.setPen(textColor);
+                const auto name = nameMetrics.elidedText(
+                    item->displayName, Qt::ElideRight,
+                    std::max(1, cellRect.width() - imageMargin * 2));
+                QRect nameRect(cellRect.left() + imageMargin,
+                               cellRect.bottom() - nameHeight - 1,
+                               cellRect.width() - imageMargin * 2, nameHeight);
+                painter.drawText(nameRect, Qt::AlignHCenter | Qt::AlignVCenter,
+                                 name);
+            }
+        }
+
+        painter.setPen(this->theme->splits.input.text);
+        if (first > 0)
+        {
+            painter.drawText(QRect(0, 0, outerMargin, this->height()),
+                             Qt::AlignCenter, u"‹"_s);
+        }
+        if (first + visibleCount < static_cast<int>(this->emoteRows_.size()))
+        {
+            painter.drawText(QRect(this->width() - outerMargin, 0, outerMargin,
+                                   this->height()),
+                             Qt::AlignCenter, u"›"_s);
+        }
+    }
+
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        if (event->button() == Qt::LeftButton)
+        {
+            for (const auto &[rect, row] : this->cells_)
+            {
+                if (rect.contains(event->pos()))
+                {
+                    this->selectRow(row);
+                    event->accept();
+                    return;
+                }
+            }
+        }
+        BaseWidget::mouseReleaseEvent(event);
+    }
+
+    void mouseMoveEvent(QMouseEvent *event) override
+    {
+        auto *model = this->model_.data();
+        for (const auto &[rect, row] : this->cells_)
+        {
+            if (rect.contains(event->pos()) && model != nullptr)
+            {
+                if (const auto *item = model->emoteAt(row))
+                {
+                    this->setToolTip(item->displayName + u" · "_s +
+                                     item->providerName);
+                    BaseWidget::mouseMoveEvent(event);
+                    return;
+                }
+            }
+        }
+        this->setToolTip({});
+        BaseWidget::mouseMoveEvent(event);
+    }
+
+    void wheelEvent(QWheelEvent *event) override
+    {
+        if (this->emoteRows_.empty())
+        {
+            return;
+        }
+
+        const auto angleDelta = event->angleDelta();
+        const auto pixelDelta = event->pixelDelta();
+        const int amount = angleDelta.y() != 0   ? angleDelta.y()
+                           : angleDelta.x() != 0 ? angleDelta.x()
+                           : pixelDelta.y() != 0 ? pixelDelta.y()
+                                                 : pixelDelta.x();
+        if (amount == 0)
+        {
+            event->ignore();
+            return;
+        }
+
+        const int direction = amount < 0 ? 1 : -1;
+        const int current = this->selectedEmoteIndex();
+        const int next =
+            std::clamp(current + direction, 0,
+                       static_cast<int>(this->emoteRows_.size()) - 1);
+        this->selectRow(this->emoteRows_[static_cast<size_t>(next)]);
+        event->accept();
+    }
+
+    void scaleChangedEvent(float) override
+    {
+        this->refreshAppearance();
+    }
+
+    void themeChangedEvent() override
+    {
+        this->update();
+    }
+
+    void showEvent(QShowEvent *event) override
+    {
+        BaseWidget::showEvent(event);
+        if (!this->gifRepaintConnection_.isConnected())
+        {
+            this->gifRepaintConnection_ =
+                getApp()->getWindows()->gifRepaintRequested.connect([this] {
+                    if (this->isVisible())
+                    {
+                        this->update();
+                    }
+                });
+        }
+    }
+
+    void hideEvent(QHideEvent *event) override
+    {
+        this->gifRepaintConnection_ = pajlada::Signals::ScopedConnection{};
+        QWidget::hideEvent(event);
+    }
+
+private:
+    int carouselHeight() const
+    {
+        const auto size = getSettings()->emoteTabCarouselSize.getValue();
+
+        const int logicalHeight = size == "extra-large" ? 74
+                                  : size == "large"     ? 59
+                                  : size == "standard"  ? 44
+                                                        : 29;
+        return std::max(28, int(std::round(logicalHeight * this->scale())));
+    }
+
+    int minimumCellWidth() const
+    {
+        const auto size = getSettings()->emoteTabCarouselSize.getValue();
+        return size == "extra-large" ? 84
+               : size == "large"     ? 72
+               : size == "standard"  ? 60
+                                     : 48;
+    }
+
+    int selectedEmoteIndex() const
+    {
+        const auto it = std::ranges::find(this->emoteRows_, this->selectedRow_);
+        if (it == this->emoteRows_.end())
+        {
+            return 0;
+        }
+        return static_cast<int>(std::distance(this->emoteRows_.begin(), it));
+    }
+
+    void selectRow(int row)
+    {
+        if (this->selectionCallback_)
+        {
+            this->selectionCallback_(row);
+        }
+    }
+
+    QPointer<TabCompletionModel> model_;
+    int selectedRow_ = -1;
+    std::vector<int> emoteRows_;
+    std::vector<std::pair<QRect, int>> cells_;
+    std::function<void(int)> selectionCallback_;
+    std::function<void()> visibilityCallback_;
+    pajlada::Signals::ScopedConnection gifRepaintConnection_;
+};
 
 namespace {
 
@@ -82,6 +578,48 @@ constexpr auto OUTGOING_TRANSLATION_OFF = "off";
 constexpr auto OUTGOING_TRANSLATION_PREVIEW = "preview";
 constexpr auto OUTGOING_TRANSLATION_SEND = "send";
 
+int messageLimitForChannel(const ChannelPtr &channel)
+{
+    if (channel && channel->isTikTokChannel())
+    {
+        return TIKTOK_MESSAGE_LIMIT;
+    }
+    return channel != nullptr && channel->isYouTubeChannel()
+               ? YOUTUBE_MESSAGE_LIMIT
+               : TWITCH_MESSAGE_LIMIT;
+}
+
+QString translatedMessageLimitError(const ChannelPtr &channel)
+{
+    if (channel && channel->isTikTokChannel())
+    {
+        return QStringLiteral("The translated message is too long for TikTok.");
+    }
+    return channel != nullptr && channel->isYouTubeChannel()
+               ? QStringLiteral(
+                     "The translated message is too long for YouTube.")
+               : QStringLiteral(
+                     "The translated message is too long for Twitch.");
+}
+
+bool makeMorseMessageCommandSafe(QString &message, const ChannelPtr &channel)
+{
+    if (dynamic_cast<TwitchChannel *>(channel.get()) != nullptr &&
+        message.startsWith(QLatin1Char('.')) && isMorseText(message))
+    {
+        if (message.size() + 2 > TWITCH_MESSAGE_LIMIT)
+        {
+            channel->addSystemMessage(QStringLiteral(
+                "The Morse message is too long for Twitch after escaping its "
+                "leading dot."));
+            return false;
+        }
+
+        message.prepend(QStringLiteral(". "));
+    }
+    return true;
+}
+
 // Current function: https://www.desmos.com/calculator/vdyamchjwh
 qreal highlightEasingFunction(qreal progress)
 {
@@ -91,6 +629,41 @@ qreal highlightEasingFunction(qreal progress)
     }
     return 1.0 + pow((20.0 / 9.0) * (0.5 * progress - 0.5), 3.0);
 }
+
+class BackwardsSearchLineEdit : public QLineEdit
+{
+    Q_OBJECT
+
+public:
+    explicit BackwardsSearchLineEdit(QWidget *parent = nullptr)
+        : QLineEdit(parent)
+    {
+    }
+
+Q_SIGNALS:
+    void focusLost();
+
+protected:
+    void focusOutEvent(QFocusEvent *event) override
+    {
+        QLineEdit::focusOutEvent(event);
+        this->focusLost();
+    }
+
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        const auto key = event->key();
+        const bool endsSearch = key == Qt::Key_Escape || key == Qt::Key_Enter ||
+                                key == Qt::Key_Return || key == Qt::Key_Tab ||
+                                key == Qt::Key_Backtab;
+        if (!event->modifiers().testFlag(Qt::ControlModifier) && endsSearch)
+        {
+            this->clearFocus();
+            return;
+        }
+        QLineEdit::keyPressEvent(event);
+    }
+};
 
 int compactWidgetWidth(QWidget *widget)
 {
@@ -375,6 +948,29 @@ SplitInput::SplitInput(QWidget *parent, Split *_chatWidget,
 {
     this->installEventFilter(this);
     this->initLayout();
+    this->ui_.emoteTabCompletionCarousel->setSelectionCallback([this](int row) {
+        this->ui_.textEdit->selectCompletionRow(row);
+    });
+    this->ui_.emoteTabCompletionCarousel->setVisibilityCallback([this] {
+        this->setMaximumHeight(this->scaledMaxHeight());
+        this->relayoutParentWidgets();
+    });
+    this->managedConnections_.managedConnect(
+        this->ui_.textEdit->tabCompletionChanged,
+        [this](TabCompletionModel *model, int row) {
+            if (getSettings()->showEmoteTabCarousel)
+            {
+                this->ui_.emoteTabCompletionCarousel->setCompletion(model, row);
+            }
+            else
+            {
+                this->ui_.emoteTabCompletionCarousel->clear();
+            }
+        });
+    this->managedConnections_.managedConnect(
+        this->ui_.textEdit->tabCompletionHidden, [this] {
+            this->ui_.emoteTabCompletionCarousel->clear();
+        });
     this->raidStatusProgressAnimation_.setTargetObject(
         this->ui_.raidStatusProgress);
     this->raidStatusProgressAnimation_.setPropertyName("value"_ba);
@@ -496,12 +1092,67 @@ SplitInput::SplitInput(QWidget *parent, Split *_chatWidget,
             }
         },
         this->managedConnections_);
+    getSettings()->showCommandArgumentHints.connect(
+        [this](const bool enabled, auto) {
+            if (enabled)
+            {
+                this->updateCompletionPopup();
+            }
+            else
+            {
+                this->ui_.textEdit->setGhostText({});
+            }
+        },
+        this->managedConnections_);
+    const auto refreshCommandHints = [this] {
+        this->commandHintKey_.clear();
+        this->resolvedCommandHint_.reset();
+        this->updateCompletionPopup();
+    };
+    getSettings()->includePotatCommands.connect(refreshCommandHints,
+                                               this->managedConnections_);
+    getSettings()->showEmoteTabCarousel.connect(
+        [this](const bool enabled, auto) {
+            if (!enabled)
+            {
+                this->ui_.emoteTabCompletionCarousel->clear();
+            }
+        },
+        this->managedConnections_);
+    getSettings()->emoteTabCarouselSize.connect(
+        [this](const QString &, auto) {
+            this->ui_.emoteTabCompletionCarousel->refreshAppearance();
+        },
+        this->managedConnections_);
+    getSettings()->showEmoteTabCarouselNames.connect(
+        [this](const bool, auto) {
+            this->ui_.emoteTabCompletionCarousel->refreshAppearance();
+        },
+        this->managedConnections_);
+    getSettings()->showPotatCommandAliases.connect(
+        refreshCommandHints, this->managedConnections_);
+    if (auto *potat = getApp()->getPotatCommands())
+    {
+        this->managedConnections_.managedConnect(potat->commandsUpdated,
+                                                 refreshCommandHints);
+    }
+    this->managedConnections_.managedConnect(
+        getApp()->getCommands()->items.delayedItemsChanged, refreshCommandHints);
     getSettings()->showOutgoingTranslationButton.connect(
         [this](const bool &, auto) {
             this->updateOutgoingTranslationButton();
             this->updateActionRowCompactness();
         },
         this->managedConnections_);
+    getSettings()->showVanityButton.connect(
+        [this](const bool &, auto) {
+            this->updateActionRowCompactness();
+        },
+        this->managedConnections_);
+    this->managedConnections_.managedConnect(
+        getApp()->getAccounts()->twitch.currentUserChanged, [this] {
+            this->updateActionRowCompactness();
+        });
     getSettings()->outgoingTranslationMode.connect(
         [this](const QString &, auto) {
             this->updateOutgoingTranslationButton();
@@ -517,6 +1168,11 @@ SplitInput::SplitInput(QWidget *parent, Split *_chatWidget,
         this->managedConnections_);
 
     getSettings()->enableSpellChecking.connect(
+        [this] {
+            this->checkSpellingChanged();
+        },
+        this->signalHolder_);
+    getSettings()->spellCheckingDefaultDictionary.connect(
         [this] {
             this->checkSpellingChanged();
         },
@@ -544,6 +1200,401 @@ SplitInput::SplitInput(QWidget *parent, Split *_chatWidget,
     this->backgroundColorAnimation.setEasingCurve(curve);
 }
 
+void SplitInput::focusEditor(Qt::FocusReason reason)
+{
+    this->giveFocus(reason);
+}
+
+bool SplitInput::isInHistorySearch() const
+{
+    return this->inHistorySearch_;
+}
+
+void SplitInput::updateCommandArgumentHint(const QString &text,
+                                           int cursorPosition)
+{
+    auto clear = [this] {
+        this->ui_.textEdit->setGhostText({});
+    };
+    if (this->commandAssistanceDismissed_ &&
+        text == this->dismissedCommandText_ &&
+        cursorPosition == this->dismissedCommandCursor_)
+    {
+        clear();
+        return;
+    }
+    if (!getSettings()->showCommandArgumentHints || cursorPosition < 0 ||
+        cursorPosition != text.size() ||
+        this->ui_.textEdit->textCursor().hasSelection())
+    {
+        clear();
+        return;
+    }
+
+    auto start = 0;
+    while (start < text.size() && text.at(start).isSpace() &&
+           text.at(start) != QChar('\n'))
+    {
+        ++start;
+    }
+    if (start >= text.size() ||
+        (text.at(start) != QChar('/') && text.at(start) != QChar('.') &&
+         text.at(start) != QChar('#')))
+    {
+        clear();
+        return;
+    }
+
+    auto commandEnd = start;
+    while (commandEnd < text.size() && !text.at(commandEnd).isSpace())
+    {
+        ++commandEnd;
+    }
+    const auto command = text.mid(start, commandEnd - start);
+    if (command.size() < 2 || text.mid(commandEnd).contains(QChar('\n')))
+    {
+        clear();
+        return;
+    }
+
+    const auto channel = this->split_->getSelectedChannel();
+    if (this->commandHintKey_.compare(command, Qt::CaseInsensitive) != 0 ||
+        this->commandHintChannel_.lock() != channel)
+    {
+        this->commandHintKey_ = command;
+        this->commandHintChannel_ = channel;
+        this->resolvedCommandHint_.reset();
+
+        completion::CommandSource source(
+            std::make_unique<completion::CommandStrategy>(false), nullptr,
+            channel.get());
+        source.update(command);
+        const auto exact =
+            std::ranges::find_if(source.output(), [&](const auto &item) {
+                const auto prefix =
+                    item.prefix.isEmpty() ? QStringLiteral("/") : item.prefix;
+                return (prefix + item.name)
+                           .compare(command, Qt::CaseInsensitive) == 0;
+            });
+        if (exact != source.output().end())
+        {
+            this->resolvedCommandHint_ = *exact;
+        }
+    }
+
+    if (!this->resolvedCommandHint_)
+    {
+        clear();
+        return;
+    }
+    const auto arguments = text.mid(commandEnd);
+    bool appendDirectly = false;
+    const auto remaining = completion::remainingCommandUsage(
+        *this->resolvedCommandHint_, arguments, &appendDirectly);
+    if (remaining.isEmpty())
+    {
+        clear();
+        return;
+    }
+    const auto separator =
+        appendDirectly || (!text.isEmpty() && text.back().isSpace())
+            ? QString{}
+            : QStringLiteral(" ");
+    this->ui_.textEdit->setGhostText(separator + remaining);
+}
+
+void SplitInput::showCommandCompletionStatus(const QString &text)
+{
+    this->commandCompletionSession_ = {};
+    this->commandCompletionSuggestions_.clear();
+    this->commandCompletionSelectedIndex_ = 0;
+    for (size_t index = 0; index < this->ui_.commandCompletionRows.size();
+         ++index)
+    {
+        auto *row = this->ui_.commandCompletionRows[index];
+        row->setProperty("commandCompletionIndex", -1);
+        if (index == 0)
+        {
+            row->setStyleSheet(
+                "QLabel#commandCompletionRow { background: transparent; "
+                "border: 0; }");
+            if (auto *completionRow =
+                    dynamic_cast<CommandCompletionLabel *>(row))
+            {
+                completionRow->setStatusText(text,
+                                             this->theme->splits.input.text);
+            }
+            row->setToolTip({});
+            row->setCursor(Qt::ArrowCursor);
+            row->show();
+        }
+        else
+        {
+            row->hide();
+        }
+    }
+    this->ui_.commandCompletionWidget->show();
+}
+
+void SplitInput::stopHistorySearchIfNecessary()
+{
+    if (!this->inHistorySearch_ || isAppAboutToQuit())
+    {
+        return;
+    }
+
+    this->inHistorySearch_ = false;
+    this->historySearchStateChanged.invoke();
+    this->ui_.historySearchWrap->hide();
+    this->split_->setFocusProxy(this->ui_.textEdit);
+    this->ui_.textEdit->setFocus();
+    this->ui_.textEdit->moveCursor(QTextCursor::End);
+    this->editTextChanged();
+}
+
+void SplitInput::startHistorySearch(bool backwards, bool loop)
+{
+    this->lastHistorySearchBackwards_ = backwards;
+    this->lastHistorySearchLoop_ = loop;
+    if (this->inHistorySearch_)
+    {
+        this->cycleHistorySearch(backwards, loop);
+        return;
+    }
+
+    this->ui_.historySearchInput->clear();
+    this->ui_.historySearchWrap->setVisible(true);
+    this->split_->setFocusProxy(this->ui_.historySearchInput);
+    this->ui_.historySearchInput->setFocus(Qt::ShortcutFocusReason);
+    this->historySearchQuery_.clear();
+    this->inHistorySearch_ = true;
+    this->historySearchStateChanged.invoke();
+    this->prevIndexBeforeSearch_ = this->prevIndex_;
+    this->refreshHistorySearch(backwards, loop);
+}
+
+void SplitInput::refreshHistorySearch(bool backwards, bool loop)
+{
+    if (!this->inHistorySearch_)
+    {
+        return;
+    }
+
+    this->historySearchResults_.clear();
+    if (this->historySearchQuery_.isEmpty())
+    {
+        this->updateHistorySearchStatus(false, {});
+        this->editTextChanged();
+        return;
+    }
+
+    this->prevIndex_ = this->prevIndexBeforeSearch_;
+    qsizetype closestMatch = -1;
+    for (qsizetype i = 0; i < this->prevMsg_.size(); ++i)
+    {
+        const auto &message = this->prevMsg_.at(i);
+        if (message.contains(this->historySearchQuery_, Qt::CaseInsensitive))
+        {
+            this->historySearchResults_.push_back({i, message});
+        }
+
+        if (i == this->prevIndex_)
+        {
+            closestMatch =
+                static_cast<qsizetype>(this->historySearchResults_.size()) - 1;
+        }
+    }
+    if (this->prevIndex_ >= this->prevMsg_.size())
+    {
+        closestMatch =
+            static_cast<qsizetype>(this->historySearchResults_.size()) - 1;
+    }
+
+    if (!backwards && closestMatch >= 0 &&
+        static_cast<size_t>(closestMatch) <
+            this->historySearchResults_.size() &&
+        this->historySearchResults_[closestMatch].messageIdx !=
+            this->prevIndex_)
+    {
+        ++closestMatch;
+    }
+
+    this->historySearchResultIndex_ = closestMatch;
+    if (loop)
+    {
+        this->loopHistorySearchIfNeeded(backwards);
+    }
+    this->updateSelectedHistorySearchMatch();
+}
+
+void SplitInput::cycleHistorySearch(bool backwards, bool loop)
+{
+    this->historySearchResultIndex_ += backwards ? -1 : 1;
+    if (loop)
+    {
+        this->loopHistorySearchIfNeeded(backwards);
+    }
+
+    this->historySearchResultIndex_ =
+        std::clamp(this->historySearchResultIndex_, qsizetype{-1},
+                   static_cast<qsizetype>(this->historySearchResults_.size()));
+    this->updateSelectedHistorySearchMatch();
+}
+
+void SplitInput::loopHistorySearchIfNeeded(bool backwards)
+{
+    if (backwards && this->historySearchResultIndex_ < 0)
+    {
+        this->historySearchResultIndex_ =
+            static_cast<qsizetype>(this->historySearchResults_.size()) - 1;
+    }
+    else if (!backwards &&
+             this->historySearchResultIndex_ >=
+                 static_cast<qsizetype>(this->historySearchResults_.size()))
+    {
+        this->historySearchResultIndex_ = 0;
+    }
+}
+
+void SplitInput::updateSelectedHistorySearchMatch()
+{
+    if (this->historySearchResultIndex_ < 0 ||
+        this->historySearchResultIndex_ >=
+            static_cast<qsizetype>(this->historySearchResults_.size()))
+    {
+        this->updateHistorySearchStatus(true, "no match");
+        this->editTextChanged();
+        return;
+    }
+
+    const auto &current = this->historySearchResults_[static_cast<size_t>(
+        this->historySearchResultIndex_)];
+    this->prevIndex_ = static_cast<int>(current.messageIdx);
+    this->ui_.textEdit->setPlainText(current.message);
+    this->updateHistorySearchStatus(
+        false, QString::number(this->historySearchResults_.size() -
+                               this->historySearchResultIndex_) %
+                   '/' % QString::number(this->historySearchResults_.size()));
+    this->editTextChanged();
+}
+
+void SplitInput::updateHistorySearchStatus(bool failed, const QString &message)
+{
+    this->historySearchFailed_ = failed;
+    QPalette palette = this->ui_.historySearchWrap->palette();
+    const auto color = failed ? getTheme()->splits.input.searchFailText
+                              : getTheme()->splits.input.text;
+    palette.setColor(QPalette::Text, color);
+    palette.setColor(QPalette::WindowText, color);
+    this->ui_.historySearchWrap->setPalette(palette);
+    this->ui_.historySearchLabel->setText(message);
+}
+
+void SplitInput::addMultiChannelDestinationActions(QMenu *menu,
+                                                   bool createSubmenu)
+{
+    const auto root = this->split_->getChannel();
+    auto *multiChannel = dynamic_cast<MultiChannel *>(root.get());
+    if (multiChannel == nullptr || multiChannel->channels().size() < 2)
+    {
+        return;
+    }
+
+    auto *destinationMenu = createSubmenu ? menu->addMenu("Send to") : menu;
+    auto *group = new QActionGroup(destinationMenu);
+    group->setExclusive(true);
+    const auto channels = multiChannel->channels();
+    const auto currentIndex = multiChannel->activeChannelIndex();
+    for (size_t i = 0; i < channels.size(); ++i)
+    {
+        const QString platform =
+            qmagicenum::enumNameString(channels[i].platform);
+        const auto label =
+            platform % u": " % channels[i].channel->getDisplayName();
+        auto *action = destinationMenu->addAction(label);
+        action->setActionGroup(group);
+        action->setCheckable(true);
+        action->setChecked(i == currentIndex);
+        QObject::connect(
+            action, &QAction::triggered, this,
+            [this, i, original = std::weak_ptr<Channel>(root)] {
+                const auto root = original.lock();
+                if (!root || this->split_->getChannel() != root)
+                {
+                    return;
+                }
+                auto *current = dynamic_cast<MultiChannel *>(root.get());
+                if (current == nullptr || i >= current->channels().size())
+                {
+                    return;
+                }
+                current->setActiveChannelIndex(i);
+                getApp()->getWindows()->forceLayoutChannelViews();
+            });
+    }
+}
+
+void SplitInput::openMultiChannelDestinationMenu()
+{
+    auto *menu = new QMenu(this);
+    this->addMultiChannelDestinationActions(menu, false);
+    if (menu->isEmpty())
+    {
+        delete menu;
+        return;
+    }
+    QObject::connect(menu, &QMenu::aboutToHide, menu, &QObject::deleteLater);
+    const auto bottomLeft =
+        this->ui_.multiChannelDestinationButton->mapToGlobal(
+            QPoint{0, this->ui_.multiChannelDestinationButton->height()});
+    menu->popup(bottomLeft);
+}
+
+void SplitInput::updateMultiChannelDestinationButton()
+{
+    if (this->ui_.multiChannelDestinationButton == nullptr)
+    {
+        return;
+    }
+
+    auto *multiChannel =
+        dynamic_cast<MultiChannel *>(this->split_->getChannel().get());
+    const auto shouldShow =
+        getSettings()->showMultiChannelDestinationSelector &&
+        multiChannel != nullptr && multiChannel->channels().size() > 1 &&
+        multiChannel->activeChannel() != nullptr;
+    const auto visibilityChanged =
+        this->ui_.multiChannelDestinationButton->isHidden() == shouldShow;
+    this->ui_.multiChannelDestinationButton->setVisible(shouldShow);
+    if (!shouldShow)
+    {
+        if (visibilityChanged)
+        {
+            this->relayoutParentWidgets();
+        }
+        return;
+    }
+
+    const auto *active = multiChannel->activeChannel();
+    const QString platform = qmagicenum::enumNameString(active->platform);
+    const auto channelName = active->channel->getDisplayName();
+    const auto shortPlatform =
+        platform.compare(u"TikTok", Qt::CaseInsensitive) == 0 ? u"TT"_s
+        : platform.compare(u"YouTube", Qt::CaseInsensitive) == 0
+            ? u"Y"_s
+            : platform.left(1).toUpper();
+    const QString label = shortPlatform % u": " % channelName;
+    const auto arrow = u" \u25BE"_s;
+    this->ui_.multiChannelDestinationButton->setText(label + arrow);
+    this->ui_.multiChannelDestinationButton->setToolTip(
+        u"Send to " % active->channel->getDisplayName() % u" on " % platform %
+        u"\nClick to choose another destination");
+    if (visibilityChanged)
+    {
+        this->relayoutParentWidgets();
+    }
+}
+
 void SplitInput::initLayout()
 {
     auto *app = getApp();
@@ -554,6 +1605,47 @@ void SplitInput::initLayout()
             &this->ui_.vbox);
     layout->setSpacing(0);
     this->applyOuterMargin();
+
+    {
+        auto wrapper =
+            layout.emplace<QWidget>().assign(&this->ui_.historySearchWrap);
+        wrapper->setVisible(false);
+        wrapper->setAutoFillBackground(true);
+        auto palette = wrapper->palette();
+        palette.setColor(QPalette::Base, Qt::transparent);
+        palette.setColor(QPalette::Window, getTheme()->splits.input.background);
+        wrapper->setPalette(palette);
+
+        auto searchLayout =
+            wrapper.setLayoutType<QHBoxLayout>().withoutMargin();
+        searchLayout->addSpacing(5);
+        auto input = searchLayout.emplace<BackwardsSearchLineEdit>().assign(
+            &this->ui_.historySearchInput);
+        input->setFrame(false);
+        input->setPlaceholderText("Search input history...");
+        input->setFocusPolicy(Qt::ClickFocus);
+        QObject::connect(input.getElement(), &QLineEdit::textChanged, this,
+                         [this](const QString &text) {
+                             if (!this->inHistorySearch_)
+                             {
+                                 return;
+                             }
+                             this->historySearchQuery_ = text;
+                             this->refreshHistorySearch(
+                                 this->lastHistorySearchBackwards_,
+                                 this->lastHistorySearchLoop_);
+                         });
+        QObject::connect(input.getElement(),
+                         &BackwardsSearchLineEdit::focusLost, this,
+                         &SplitInput::stopHistorySearchIfNecessary);
+        searchLayout->setStretch(0, 1);
+        searchLayout->addSpacing(5);
+
+        auto label = searchLayout.emplace<QLabel>().assign(
+            &this->ui_.historySearchLabel);
+        label->setFrameStyle(QFrame::NoFrame);
+        searchLayout->addSpacing(5);
+    }
 
     // reply label stuff
     auto replyWrapper =
@@ -636,12 +1728,14 @@ void SplitInput::initLayout()
     commandCompletionLayout->setSpacing(0);
     for (size_t i = 0; i < this->ui_.commandCompletionRows.size(); ++i)
     {
-        auto row = commandCompletionLayout.emplace<QLabel>().assign(
-            &this->ui_.commandCompletionRows[i]);
+        auto row =
+            commandCompletionLayout.emplace<CommandCompletionLabel>().assign(
+                &this->ui_.commandCompletionRows[i]);
         row->setObjectName("commandCompletionRow");
-        row->setTextFormat(Qt::RichText);
         row->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
         row->setContentsMargins(6, 1, 6, 1);
+        row->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        row->setMinimumWidth(0);
         row->setCursor(Qt::PointingHandCursor);
         row->setProperty("commandCompletionRow", int(i));
         row->installEventFilter(this);
@@ -686,6 +1780,9 @@ void SplitInput::initLayout()
                                                           Qt::AlignVCenter);
     rewardPromptWidget->hide();
 #endif
+
+    layout.emplace<EmoteTabCompletionCarousel>().assign(
+        &this->ui_.emoteTabCompletionCarousel);
 
     auto inputWrapper =
         layout.emplace<QWidget>().assign(&this->ui_.inputWrapper);
@@ -733,8 +1830,21 @@ void SplitInput::initLayout()
     {
         this->ui_.textEditLength = new QLabel();
         this->ui_.textEditLength->setAlignment(Qt::AlignRight);
-        makeInputActionLabelCompressible(this->ui_.textEditLength);
+        this->ui_.textEditLength->setSizePolicy(QSizePolicy::Fixed,
+                                                QSizePolicy::Fixed);
         this->ui_.textEditLength->hide();
+
+        this->ui_.multiChannelDestinationButton =
+            new LabelButton(QString{}, nullptr, QSize{3, 0});
+        this->ui_.multiChannelDestinationButton->setToolTip(
+            "Choose where this message will be sent");
+        this->ui_.multiChannelDestinationButton->setSizePolicy(
+            QSizePolicy::Fixed, QSizePolicy::Fixed);
+        this->ui_.multiChannelDestinationButton->hide();
+        QObject::connect(this->ui_.multiChannelDestinationButton,
+                         &Button::leftClicked, this, [this] {
+                             this->openMultiChannelDestinationMenu();
+                         });
 
         this->ui_.sendWaitStatus = new QLabel();
         this->ui_.sendWaitStatus->setAlignment(Qt::AlignRight |
@@ -779,6 +1889,15 @@ void SplitInput::initLayout()
             "Outgoing translation");
         this->ui_.outgoingTranslateButton->hide();
 
+        this->ui_.vanityButton = new SvgButton(
+            {
+                .dark = ":/buttons/vanity-darkMode.svg",
+                .light = ":/buttons/vanity-lightMode.svg",
+            },
+            nullptr, QSize{2, 2});
+        this->ui_.vanityButton->setToolTip("Open Vanity");
+        this->ui_.vanityButton->hide();
+
         this->ui_.emoteButton = new SvgButton(
             {
                 .dark = ":/buttons/emote.svg",
@@ -787,7 +1906,15 @@ void SplitInput::initLayout()
             nullptr, QSize{3, 3});
 
         box->addStretch(1);
-        box->addWidget(this->ui_.textEditLength, 0, Qt::AlignRight);
+        auto *statusRow = new QHBoxLayout();
+        statusRow->setContentsMargins(0, 0, 0, 0);
+        statusRow->setSpacing(0);
+        statusRow->addStretch(1);
+        statusRow->addWidget(this->ui_.textEditLength, 0,
+                             Qt::AlignRight | Qt::AlignVCenter);
+        statusRow->addWidget(this->ui_.multiChannelDestinationButton, 0,
+                             Qt::AlignVCenter);
+        box->addLayout(statusRow);
 
         auto *buttonsRow = new QHBoxLayout();
         this->ui_.buttonsRow = buttonsRow;
@@ -801,6 +1928,7 @@ void SplitInput::initLayout()
         buttonsRow->addWidget(this->ui_.pollButton, 0, Qt::AlignBottom);
         buttonsRow->addWidget(this->ui_.outgoingTranslateButton, 0,
                               Qt::AlignBottom);
+        buttonsRow->addWidget(this->ui_.vanityButton, 0, Qt::AlignBottom);
         buttonsRow->addWidget(this->ui_.emoteButton, 0, Qt::AlignBottom);
         box->addLayout(buttonsRow);
     }
@@ -828,6 +1956,16 @@ void SplitInput::initLayout()
                      [this] {
                          this->openOutgoingTranslationMenu();
                      });
+    QObject::connect(this->ui_.vanityButton, &Button::leftClicked, [this] {
+        const auto channel = std::dynamic_pointer_cast<TwitchChannel>(
+            this->split_->getSelectedChannel());
+        if (channel == nullptr ||
+            getApp()->getAccounts()->twitch.getCurrent()->isAnon())
+        {
+            return;
+        }
+        VanityDialog::showDialog(channel, this->split_);
+    });
 
     // open prediction dialog (mod/broadcaster only)
     QObject::connect(this->ui_.predictionButton, &Button::leftClicked, [this] {
@@ -868,6 +2006,12 @@ void SplitInput::initLayout()
         [this](const bool &value, auto) {
             // this->ui_.textEditLength->setHidden(!value);
             this->editTextChanged();
+        },
+        this->managedConnections_);
+
+    getSettings()->showMultiChannelDestinationSelector.connect(
+        [this](bool, const auto &) {
+            this->updateMultiChannelDestinationButton();
         },
         this->managedConnections_);
 
@@ -928,6 +2072,10 @@ void SplitInput::scaleChangedEvent(float scale)
     // update the icon size of the buttons
     this->updateEmoteButton();
     this->updateCancelReplyButton();
+    if (this->ui_.multiChannelDestinationButton != nullptr)
+    {
+        this->updateMultiChannelDestinationButton();
+    }
 
     // set maximum height
     if (!this->hidden)
@@ -978,6 +2126,16 @@ void SplitInput::themeChangedEvent()
     pointsPalette.setColor(QPalette::WindowText, channelPointsColor);
     this->ui_.channelPointsLabel->setPalette(pointsPalette);
     this->ui_.sendWaitStatus->setPalette(pointsPalette);
+
+    QPalette searchPalette = this->ui_.historySearchWrap->palette();
+    searchPalette.setColor(QPalette::Window,
+                           this->theme->splits.input.background);
+    const auto searchTextColor = this->historySearchFailed_
+                                     ? this->theme->splits.input.searchFailText
+                                     : this->theme->splits.input.text;
+    searchPalette.setColor(QPalette::Text, searchTextColor);
+    searchPalette.setColor(QPalette::WindowText, searchTextColor);
+    this->ui_.historySearchWrap->setPalette(searchPalette);
 
     // Theme changed, reset current background color
     this->setBackgroundColor(this->theme->splits.input.background);
@@ -1106,6 +2264,11 @@ void SplitInput::updateEmoteButton()
         this->ui_.textEditLength->setContentsMargins(
             0, 0, int(std::round(2 * scale)), 0);
     }
+    if (this->ui_.multiChannelDestinationButton)
+    {
+        this->ui_.multiChannelDestinationButton->setPadding(
+            QSize{int(std::round(3 * scale)), 0});
+    }
 
     if (this->ui_.channelPointsLabel)
     {
@@ -1126,6 +2289,10 @@ void SplitInput::updateEmoteButton()
         this->ui_.outgoingTranslateButton->setFixedSize(buttonSize,
                                                         buttonSize);
     }
+    if (this->ui_.vanityButton)
+    {
+        this->ui_.vanityButton->setFixedSize(buttonSize, buttonSize);
+    }
 
     this->updateActionRowCompactness();
 }
@@ -1145,8 +2312,18 @@ void SplitInput::updateActionRowCompactness()
         return;
     }
 
-    updateInputActionLabelMinimumWidth(this->ui_.textEditLength);
     updateInputActionLabelMinimumWidth(this->ui_.sendWaitStatus);
+
+    const auto lengthMargins = this->ui_.textEditLength->contentsMargins();
+    const QFontMetricsF lengthMetrics(this->ui_.textEditLength->font());
+    const auto lengthPadding = lengthMargins.left() + lengthMargins.right();
+    const auto reservedLengthWidth = static_cast<int>(
+        std::ceil(lengthMetrics.horizontalAdvance(u"000"_s) + lengthPadding));
+    const auto currentLengthWidth = static_cast<int>(std::ceil(
+        lengthMetrics.horizontalAdvance(this->ui_.textEditLength->text()) +
+        lengthPadding));
+    this->ui_.textEditLength->setFixedWidth(
+        std::max(reservedLengthWidth, currentLengthWidth));
 
     const auto inputWidth = this->ui_.inputWrapper->width();
     const bool hasRealWidth = inputWidth > 0;
@@ -1185,6 +2362,11 @@ void SplitInput::updateActionRowCompactness()
 
     const bool showEmoteButton = !getSettings()->hideEmojiButton;
     const bool showTranslateButton = getSettings()->showOutgoingTranslationButton;
+    const auto selectedChannel = this->split_->getSelectedChannel();
+    const bool showVanityButton =
+        getSettings()->showVanityButton && selectedChannel != nullptr &&
+        std::dynamic_pointer_cast<TwitchChannel>(selectedChannel) != nullptr &&
+        !getApp()->getAccounts()->twitch.getCurrent()->isAnon();
     if (hasRealWidth && this->ui_.sendButton != nullptr &&
         this->ui_.sendButton->isVisible())
     {
@@ -1197,6 +2379,10 @@ void SplitInput::updateActionRowCompactness()
     if (hasRealWidth && showTranslateButton)
     {
         budget -= compactWidgetWidth(this->ui_.outgoingTranslateButton);
+    }
+    if (hasRealWidth && showVanityButton)
+    {
+        budget -= compactWidgetWidth(this->ui_.vanityButton);
     }
 
     auto reserveEvenIfTight = [&](QWidget *widget, bool wanted) {
@@ -1219,12 +2405,14 @@ void SplitInput::updateActionRowCompactness()
         tryFit(this->ui_.pollButton, this->pollButtonWanted_);
     const bool showSendWaitStatus =
         tryFit(this->ui_.sendWaitStatus, this->sendWaitStatusWanted_);
-    const bool showTextLength = !this->ui_.textEditLength->text().isEmpty();
+
+    const bool showTextLength = getSettings()->showMessageLength;
 
     bool changed = false;
     changed |= setExplicitVisible(this->ui_.emoteButton, showEmoteButton);
     changed |= setExplicitVisible(this->ui_.outgoingTranslateButton,
                                   showTranslateButton);
+    changed |= setExplicitVisible(this->ui_.vanityButton, showVanityButton);
     changed |=
         setExplicitVisible(this->ui_.predictionButton, showPredictionButton);
     changed |= setExplicitVisible(this->ui_.pollButton, showPollButton);
@@ -1347,6 +2535,18 @@ QString SplitInput::handleSendMessage(const std::vector<QString> &arguments)
     {
         QString sendMessage =
             getApp()->getCommands()->execCommand(message, c, false);
+        if (!makeMorseMessageCommandSafe(sendMessage, c))
+        {
+            return "";
+        }
+        if (c->isTikTokChannel() && !sendMessage.isEmpty() &&
+            (!c->canSendMessage() ||
+             tiktok::livetext::analyzeEditorText(sendMessage).count >
+                 TIKTOK_MESSAGE_LIMIT))
+        {
+            c->sendMessage(sendMessage);
+            return "";
+        }
         c->sendMessage(sendMessage);
 
         this->postMessageSend(message, arguments);
@@ -1364,6 +2564,10 @@ QString SplitInput::handleSendMessage(const std::vector<QString> &arguments)
 
     QString sendMessage =
         getApp()->getCommands()->execCommand(message, c, false);
+    if (!makeMorseMessageCommandSafe(sendMessage, c))
+    {
+        return "";
+    }
 
     // Reply within TwitchChannel
     if (tc)
@@ -1397,7 +2601,8 @@ void SplitInput::postMessageSend(const QString &message,
 }
 
 void SplitInput::postTranslatedMessageSend(
-    const QString &message, const std::vector<QString> &arguments)
+    const QString &message, const std::vector<QString> &arguments,
+    uint64_t draftRevision)
 {
     if ((this->prevMsg_.isEmpty() || !this->prevMsg_.endsWith(message)) &&
         !message.trimmed().isEmpty())
@@ -1406,6 +2611,7 @@ void SplitInput::postTranslatedMessageSend(
     }
 
     if ((arguments.empty() || arguments.at(0) != "keepInput") &&
+        this->draftRevision_ == draftRevision &&
         this->currentOutgoingMessageBody().trimmed() == message.trimmed())
     {
         this->clearInput();
@@ -1447,6 +2653,48 @@ bool SplitInput::maybeSendTranslatedMessage(
     const auto sourceMessage = message.trimmed();
     const auto replyMessageID =
         this->replyTarget_ == nullptr ? QString{} : this->replyTarget_->id;
+    const auto draftRevision = this->draftRevision_;
+    auto *accounts = getApp()->getAccounts();
+    struct PendingAccount {
+        bool changed = false;
+        pajlada::Signals::ScopedConnection connection;
+    };
+    auto pendingAccount = std::make_shared<PendingAccount>();
+    auto &accountSignal =
+        channel->isTwitchChannel()   ? accounts->twitch.currentUserChanged
+        : channel->isKickChannel()   ? accounts->kick.currentUserChanged
+        : channel->isTikTokChannel() ? accounts->tiktok.currentChanged
+                                     : accounts->youtube.currentChanged;
+    pendingAccount->connection =
+        accountSignal.connect([weak = std::weak_ptr(pendingAccount)] {
+            if (const auto pending = weak.lock())
+            {
+                pending->changed = true;
+            }
+        });
+    auto accountStillCurrent = [accounts, channel, pendingAccount,
+                                twitch = accounts->twitch.getCurrent(),
+                                kick = accounts->kick.current(),
+                                youtube = accounts->youtube.current(),
+                                tiktok = accounts->tiktok.current()] {
+        if (pendingAccount->changed)
+        {
+            return false;
+        }
+        if (channel->isTwitchChannel())
+        {
+            return accounts->twitch.getCurrent() == twitch;
+        }
+        if (channel->isKickChannel())
+        {
+            return accounts->kick.current() == kick;
+        }
+        if (channel->isTikTokChannel())
+        {
+            return accounts->tiktok.current() == tiktok;
+        }
+        return accounts->youtube.current() == youtube;
+    };
     this->outgoingTranslationSendInFlight_ = true;
 
     if (this->ui_.translationPreviewWidget != nullptr)
@@ -1457,50 +2705,83 @@ bool SplitInput::maybeSendTranslatedMessage(
     }
 
     auto sendTranslated = [this, channel, sourceMessage, replyMessageID,
-                           arguments](
-                              QString translatedText) {
+                           arguments, draftRevision,
+                           accountStillCurrent](QString translatedText) {
+        if (!accountStillCurrent())
+        {
+            channel->addSystemMessage(QStringLiteral(
+                "Account changed while translating. Nothing was sent."));
+            return;
+        }
+        const auto messageLimit = messageLimitForChannel(channel);
         translatedText = translatedText.trimmed();
         translatedText.replace('\n', ' ');
         if (translatedText.isEmpty())
         {
-            channel->addSystemMessage(
-                QStringLiteral("Translation failed, so nothing was sent."));
+            channel->addSystemMessage(QStringLiteral(
+                "Translation failed, so nothing was sent. Try switching "
+                "providers in Settings."));
             return;
         }
-        if (translatedText.size() > TWITCH_MESSAGE_LIMIT)
+        const auto translatedLength =
+            channel->isTikTokChannel()
+                ? tiktok::livetext::analyzeEditorText(translatedText).count
+                : translatedText.size();
+        if (translatedLength > messageLimit)
         {
-            channel->addSystemMessage(
-                QStringLiteral("The translated message is too long for Twitch."));
+            channel->addSystemMessage(translatedMessageLimitError(channel));
             return;
         }
 
         if (this->trySendMessageAsWarning(translatedText, channel))
         {
-            this->postTranslatedMessageSend(sourceMessage, arguments);
+            this->postTranslatedMessageSend(sourceMessage, arguments,
+                                            draftRevision);
+            return;
+        }
+
+        auto messageToSend = translatedText;
+        auto *twitchChannel = dynamic_cast<TwitchChannel *>(channel.get());
+        if (twitchChannel != nullptr &&
+            (messageToSend.startsWith(QLatin1Char('.')) ||
+             messageToSend.startsWith(QLatin1Char('/'))))
+        {
+            messageToSend.prepend(QStringLiteral(". "));
+        }
+        if (twitchChannel != nullptr && messageToSend.size() > messageLimit)
+        {
+            channel->addSystemMessage(translatedMessageLimitError(channel));
+            return;
+        }
+
+        if (channel->isTikTokChannel() && !channel->canSendMessage())
+        {
+            channel->sendMessage(messageToSend);
             return;
         }
 
         if (!replyMessageID.isEmpty())
         {
-            if (auto *tc = dynamic_cast<TwitchChannel *>(channel.get()))
+            if (twitchChannel != nullptr)
             {
-                tc->sendReply(translatedText, replyMessageID);
+                twitchChannel->sendReply(messageToSend, replyMessageID);
             }
             else if (auto *kc = dynamic_cast<KickChannel *>(channel.get()))
             {
-                kc->sendReply(translatedText, replyMessageID);
+                kc->sendReply(messageToSend, replyMessageID);
             }
             else
             {
-                channel->sendMessage(translatedText);
+                channel->sendMessage(messageToSend);
             }
         }
         else
         {
-            channel->sendMessage(translatedText);
+            channel->sendMessage(messageToSend);
         }
 
-        this->postTranslatedMessageSend(sourceMessage, arguments);
+        this->postTranslatedMessageSend(sourceMessage, arguments,
+                                        draftRevision);
     };
 
     if (this->outgoingTranslationPreviewSource_ == sourceMessage &&
@@ -1519,8 +2800,9 @@ bool SplitInput::maybeSendTranslatedMessage(
             sendTranslated(result.translatedText);
         },
         [channel](const QString &) {
-            channel->addSystemMessage(
-                QStringLiteral("Translation failed, so nothing was sent."));
+            channel->addSystemMessage(QStringLiteral(
+                "Translation failed, so nothing was sent. Try switching "
+                "providers in Settings."));
         },
         [this] {
             this->outgoingTranslationSendInFlight_ = false;
@@ -1586,14 +2868,19 @@ bool SplitInput::maybeSendMessageAsWarning(
 
 int SplitInput::scaledMaxHeight() const
 {
+    const int carouselHeight =
+        this->ui_.emoteTabCompletionCarousel != nullptr &&
+                this->ui_.emoteTabCompletionCarousel->isVisible()
+            ? this->ui_.emoteTabCompletionCarousel->height()
+            : 0;
     if (this->replyTarget_ != nullptr)
     {
         // give more space for showing the message being replied to
-        return int(250 * this->scale());
+        return int(250 * this->scale()) + carouselHeight;
     }
     else
     {
-        return int(150 * this->scale());
+        return int(150 * this->scale()) + carouselHeight;
     }
 }
 
@@ -1602,6 +2889,8 @@ void SplitInput::addShortcuts()
     HotkeyController::HotkeyMap actions{
         {"cursorToStart",
          [this](const std::vector<QString> &arguments) -> QString {
+             this->stopHistorySearchIfNecessary();
+
              if (arguments.size() != 1)
              {
                  qCWarning(chatterinoHotkeys)
@@ -1637,6 +2926,8 @@ void SplitInput::addShortcuts()
          }},
         {"cursorToEnd",
          [this](const std::vector<QString> &arguments) -> QString {
+             this->stopHistorySearchIfNecessary();
+
              if (arguments.size() != 1)
              {
                  qCWarning(chatterinoHotkeys)
@@ -1679,11 +2970,14 @@ void SplitInput::addShortcuts()
          }},
         {"sendMessage",
          [this](const std::vector<QString> &arguments) -> QString {
+             this->stopHistorySearchIfNecessary();
              return this->handleSendMessage(arguments);
          }},
         {"previousMessage",
          [this](const std::vector<QString> &arguments) -> QString {
              (void)arguments;
+
+             this->stopHistorySearchIfNecessary();
 
              if (this->prevMsg_.isEmpty() || this->prevIndex_ == 0)
              {
@@ -1703,12 +2997,15 @@ void SplitInput::addShortcuts()
              QTextCursor cursor = this->ui_.textEdit->textCursor();
              cursor.movePosition(QTextCursor::End);
              this->ui_.textEdit->setTextCursor(cursor);
+             this->hideCompletionPopup();
 
              return "";
          }},
         {"nextMessage",
          [this](const std::vector<QString> &arguments) -> QString {
              (void)arguments;
+
+             this->stopHistorySearchIfNecessary();
 
              // If user did not write anything before then just do nothing.
              if (this->prevMsg_.isEmpty())
@@ -1754,6 +3051,7 @@ void SplitInput::addShortcuts()
                  QTextCursor cursor = this->ui_.textEdit->textCursor();
                  cursor.movePosition(QTextCursor::End);
                  this->ui_.textEdit->setTextCursor(cursor);
+                 this->hideCompletionPopup();
              }
              return "";
          }},
@@ -1761,12 +3059,16 @@ void SplitInput::addShortcuts()
          [this](const std::vector<QString> &arguments) -> QString {
              (void)arguments;
 
+             this->stopHistorySearchIfNecessary();
+
              this->ui_.textEdit->undo();
              return "";
          }},
         {"redo",
          [this](const std::vector<QString> &arguments) -> QString {
              (void)arguments;
+
+             this->stopHistorySearchIfNecessary();
 
              this->ui_.textEdit->redo();
              return "";
@@ -1815,6 +3117,8 @@ void SplitInput::addShortcuts()
          [this](const std::vector<QString> &arguments) -> QString {
              (void)arguments;
 
+             this->stopHistorySearchIfNecessary();
+
              this->ui_.textEdit->paste();
              return "";
          }},
@@ -1840,6 +3144,18 @@ void SplitInput::addShortcuts()
              cursor.select(QTextCursor::WordUnderCursor);
              this->ui_.textEdit->setTextCursor(cursor);
              return "";
+         }},
+        {"incremental-search-history",
+         [this](const std::vector<QString> &arguments) -> QString {
+             bool backwards = false;
+             bool loop = false;
+             if (arguments.size() >= 2)
+             {
+                 backwards = arguments.at(0) == u"backward"_s;
+                 loop = arguments.at(1) == u"loop"_s;
+             }
+             this->startHistorySearch(backwards, loop);
+             return {};
          }},
     };
 
@@ -1873,7 +3189,7 @@ bool SplitInput::eventFilter(QObject *obj, QEvent *event)
         this->commandCompletionSession_.active &&
         !this->commandCompletionSuggestions_.empty() &&
         this->ui_.commandCompletionWidget != nullptr &&
-        this->ui_.commandCompletionWidget->isVisible())
+        !this->ui_.commandCompletionWidget->isHidden())
     {
         auto *keyEvent = static_cast<QKeyEvent *>(event);
         const auto key = keyEvent->key();
@@ -1899,6 +3215,15 @@ bool SplitInput::eventFilter(QObject *obj, QEvent *event)
                 return false;
             }
         }
+    }
+
+    if (isTextEditObject && event->type() == QEvent::ShortcutOverride &&
+        this->ui_.textEdit->document()->isEmpty() &&
+        this->channelView_->handleAutoModReviewKey(
+            static_cast<QKeyEvent *>(event)))
+    {
+        event->accept();
+        return true;
     }
 
     if (obj == this->ui_.channelPointsLabel &&
@@ -2028,75 +3353,40 @@ void SplitInput::installTextEditEvents()
                 }
             }
 
+            if (this->ui_.textEdit->document()->isEmpty() &&
+                this->channelView_->handleAutoModReviewKey(event))
+            {
+                event->accept();
+                return;
+            }
+
 #if MOLTORINO_ENABLE_CHANNEL_POINT_REWARDS
-        if (this->channelPointRewardPromptSubmit_ &&
-            event->key() == Qt::Key_Escape)
-        {
-            this->hideChannelPointRewardPrompt();
-            event->accept();
-            return;
-        }
+            if (this->channelPointRewardPromptSubmit_ &&
+                event->key() == Qt::Key_Escape)
+            {
+                this->hideChannelPointRewardPrompt();
+                event->accept();
+                return;
+            }
 #endif
 
-        // One of the last remaining of it's kind, the copy shortcut.
-        // For some bizarre reason Qt doesn't want this key be rebound.
-        // TODO(Mm2PL): Revisit in Qt6, maybe something changed?
-        if ((event->key() == Qt::Key_C || event->key() == Qt::Key_Insert) &&
-            event->modifiers() == Qt::ControlModifier)
-        {
-            if (this->channelView_->hasSelection())
+            // One of the last remaining of it's kind, the copy shortcut.
+            // For some bizarre reason Qt doesn't want this key be rebound.
+            // TODO(Mm2PL): Revisit in Qt6, maybe something changed?
+            if ((event->key() == Qt::Key_C || event->key() == Qt::Key_Insert) &&
+                event->modifiers() == Qt::ControlModifier)
             {
-                this->channelView_->copySelectedText();
-                event->accept();
+                if (this->channelView_->hasSelection())
+                {
+                    this->channelView_->copySelectedText();
+                    event->accept();
+                }
             }
-        }
         });
 
     std::ignore = this->ui_.textEdit->contextMenuRequested.connect(
         [this](QMenu *menu, QPoint pos) {
-            auto channel = this->split_->getChannel();
-            if (auto *mc = dynamic_cast<MultiChannel *>(channel.get()))
-            {
-                auto channels = mc->channels();
-                auto currentIdx = mc->activeChannelIndex();
-                if (!channels.empty())
-                {
-                    auto *submenu = menu->addMenu("Set Context");
-                    auto *group = new QActionGroup(submenu);
-
-                    for (size_t i = 0; i < channels.size(); i++)
-                    {
-                        QString name = channels[i].channel->getName() % u" (";
-                        name +=
-                            qmagicenum::enumNameString(channels[i].platform);
-                        name += ')';
-                        auto *action = new QAction(name, submenu);
-                        action->setActionGroup(group);
-                        action->setCheckable(true);
-                        action->setChecked(i == currentIdx);
-                        QObject::connect(
-                            action, &QAction::toggled, this,
-                            [this, i](bool checked) {
-                                if (!checked)
-                                {
-                                    return;
-                                }
-                                auto *mc = dynamic_cast<MultiChannel *>(
-                                    this->split_->getChannel().get());
-                                if (mc == nullptr ||
-                                    i >= mc->channels().size())
-                                {
-                                    return;
-                                }
-                                mc->setActiveChannelIndex(i);
-                                getApp()
-                                    ->getWindows()
-                                    ->forceLayoutChannelViews();
-                            });
-                        submenu->addAction(action);
-                    }
-                }
-            }
+            this->addMultiChannelDestinationActions(menu, true);
 
 #ifdef CHATTERINO_WITH_SPELLCHECK
             menu->addSeparator();
@@ -2426,7 +3716,9 @@ bool SplitInput::shouldTranslateOutgoingMessage(const QString &message) const
     }
 
     auto channel = this->split_->getSelectedChannel();
-    return channel != nullptr && channel->isTwitchOrKickChannel();
+    return channel != nullptr &&
+           (channel->isTwitchOrKickChannel() || channel->isYouTubeChannel() ||
+            channel->isTikTokChannel());
 }
 
 void SplitInput::clearOutgoingTranslationPreview()
@@ -2569,6 +3861,8 @@ void SplitInput::openOutgoingTranslationMenu()
     auto *menu = new QMenu(this);
     menu->setAttribute(Qt::WA_DeleteOnClose);
 
+    const auto translationChannelName = this->outgoingTranslationChannelName();
+
     auto *modeGroup = new QActionGroup(menu);
     modeGroup->setExclusive(true);
     auto addMode = [&](const QString &label, const QString &value) {
@@ -2578,12 +3872,14 @@ void SplitInput::openOutgoingTranslationMenu()
             normalizedOutgoingTranslationMode(this->outgoingTranslationMode()) ==
             value);
         modeGroup->addAction(action);
-        QObject::connect(action, &QAction::triggered, this, [this, value] {
-            getSettings()->setOutgoingTranslationModeForChannel(
-                this->outgoingTranslationChannelName(), value);
-            this->updateOutgoingTranslationButton();
-            this->updateOutgoingTranslationPreview();
-        });
+        QObject::connect(
+            action, &QAction::triggered, this,
+            [this, value, translationChannelName] {
+                getSettings()->setOutgoingTranslationModeForChannel(
+                    translationChannelName, value);
+                this->updateOutgoingTranslationButton();
+                this->updateOutgoingTranslationPreview();
+            });
     };
 
     addMode("Off", QStringLiteral("off"));
@@ -2603,26 +3899,26 @@ void SplitInput::openOutgoingTranslationMenu()
         action->setCheckable(true);
         action->setChecked(language.code == currentTarget);
         languageGroup->addAction(action);
-        QObject::connect(action, &QAction::triggered, this,
-                         [this, code = language.code] {
-                             getSettings()
-                                 ->setOutgoingTranslationTargetLanguageForChannel(
-                                     this->outgoingTranslationChannelName(),
-                                     code);
-                             this->outgoingTranslationPreviewSource_.clear();
-                             this->updateOutgoingTranslationButton();
-                             this->updateOutgoingTranslationPreview();
-                         });
+        QObject::connect(
+            action, &QAction::triggered, this,
+            [this, code = language.code, translationChannelName] {
+                getSettings()->setOutgoingTranslationTargetLanguageForChannel(
+                    translationChannelName, code);
+                this->outgoingTranslationPreviewSource_.clear();
+                this->updateOutgoingTranslationButton();
+                this->updateOutgoingTranslationPreview();
+            });
     };
 
     static const std::vector<QString> commonLanguages{
-        QStringLiteral("en"),    QStringLiteral("es"),
-        QStringLiteral("pt"),    QStringLiteral("fr"),
-        QStringLiteral("de"),    QStringLiteral("it"),
-        QStringLiteral("nl"),    QStringLiteral("pl"),
-        QStringLiteral("tr"),    QStringLiteral("ru"),
-        QStringLiteral("ja"),    QStringLiteral("ko"),
-        QStringLiteral("zh-cn"), QStringLiteral("zh-tw"),
+        QStringLiteral("en"),    QStringLiteral("morse"),
+        QStringLiteral("es"),    QStringLiteral("pt"),
+        QStringLiteral("fr"),    QStringLiteral("de"),
+        QStringLiteral("it"),    QStringLiteral("nl"),
+        QStringLiteral("pl"),    QStringLiteral("tr"),
+        QStringLiteral("ru"),    QStringLiteral("ja"),
+        QStringLiteral("ko"),    QStringLiteral("zh-cn"),
+        QStringLiteral("zh-tw"),
         QStringLiteral("ar"),
     };
     const auto isCommonLanguage = [](const QString &code) {
@@ -2672,6 +3968,34 @@ void SplitInput::openOutgoingTranslationMenu()
         }
     }
 
+    const auto channel = this->split_->getSelectedChannel();
+    const auto channelName = channel ? channel->getName() : QString{};
+    const auto channelType = channel ? channel->getType() : Channel::Type::None;
+    const bool supportsAutoTranslation =
+        channelType == Channel::Type::Twitch ||
+        channelType == Channel::Type::Kick ||
+        channelType == Channel::Type::YouTube ||
+        channelType == Channel::Type::TikTok;
+    if (supportsAutoTranslation && !channelName.isEmpty())
+    {
+        menu->addSeparator();
+        auto *autoTranslate = menu->addAction("Auto translate incoming (!)");
+        autoTranslate->setCheckable(true);
+        autoTranslate->setChecked(
+            getSettings()->isAutoTranslateChannel(channelName));
+        autoTranslate->setToolTip(
+            "Translates incoming messages to the language selected in "
+            "Settings. Fast chats may hit translation rate limits.");
+        autoTranslate->setStatusTip(autoTranslate->toolTip());
+        menu->setToolTipsVisible(true);
+        QObject::connect(
+            autoTranslate, &QAction::triggered, this,
+            [autoTranslate, channelName] {
+                autoTranslate->setChecked(
+                    getSettings()->toggleAutoTranslateChannel(channelName));
+            });
+    }
+
     menu->popup(this->ui_.outgoingTranslateButton->mapToGlobal(
         QPoint(0, this->ui_.outgoingTranslateButton->height())));
 }
@@ -2685,6 +4009,22 @@ void SplitInput::updateCompletionPopup()
 
     auto *channel = this->split_->getSelectedChannel().get();
     auto *tc = dynamic_cast<TwitchChannel *>(channel);
+    auto &edit = *this->ui_.textEdit;
+    const auto text = edit.toPlainText();
+    const auto cursorPosition = edit.textCursor().position();
+    if (edit.textCursor().hasSelection() ||
+        (this->commandAssistanceDismissed_ &&
+         text == this->dismissedCommandText_ &&
+         cursorPosition == this->dismissedCommandCursor_))
+    {
+        this->resetCommandCompletionSession();
+        this->hideCompletionPopup();
+        edit.setGhostText({});
+        return;
+    }
+    this->commandAssistanceDismissed_ = false;
+    this->updateCommandArgumentHint(text, cursorPosition);
+
     bool showEmoteCompletion = getSettings()->emoteCompletionWithColon;
     bool showUsernameCompletion =
         tc != nullptr && getSettings()->showUsernameCompletionMenu;
@@ -2699,10 +4039,6 @@ void SplitInput::updateCompletionPopup()
     }
 
     // check if in completion prefix
-    auto &edit = *this->ui_.textEdit;
-
-    auto text = edit.toPlainText();
-    auto cursorPosition = edit.textCursor().position();
     auto position = cursorPosition - 1;
 
     if (text.length() == 0 || position == -1)
@@ -2725,7 +4061,7 @@ void SplitInput::updateCompletionPopup()
                 this->commandCompletionSuggestions_.begin(),
                 this->commandCompletionSuggestions_.end(),
                 [&](const auto &suggestion) {
-                    return currentCompletion == suggestion.completion + ' ';
+                    return currentCompletion.trimmed() == suggestion.completion;
                 });
             if (stillCycling)
             {
@@ -2746,17 +4082,29 @@ void SplitInput::updateCompletionPopup()
             ++commandStart;
         }
 
-        if (commandStart < beforeCursor.size() &&
-            (beforeCursor.at(commandStart) == '/' ||
-             beforeCursor.at(commandStart) == '.') &&
-            !beforeCursor.mid(commandStart).contains(QChar(' ')) &&
-            beforeCursor.size() - commandStart >= 2)
+        if (commandStart < beforeCursor.size())
         {
-            const auto query = beforeCursor.mid(commandStart);
-            if (this->updateCommandCompletion(query, int(commandStart),
-                                              cursorPosition))
+            const auto prefix = beforeCursor.at(commandStart);
+            const auto isCommandPrefix =
+                prefix == '/' || prefix == '.' || prefix == '#';
+            if (isCommandPrefix && !beforeCursor.contains(QChar('\n')) &&
+                std::none_of(beforeCursor.cbegin() + commandStart,
+                             beforeCursor.cend(), [](QChar c) {
+                                 return c.isSpace();
+                             }))
             {
-                return;
+                const auto query = beforeCursor.mid(commandStart);
+                auto commandEnd = cursorPosition;
+                while (commandEnd < text.size() &&
+                       !text.at(commandEnd).isSpace())
+                {
+                    ++commandEnd;
+                }
+                if (this->updateCommandCompletion(query, int(commandStart),
+                                                  commandEnd))
+                {
+                    return;
+                }
             }
         }
     }
@@ -2813,7 +4161,7 @@ bool SplitInput::updateCommandCompletion(const QString &query, int start,
 
     completion::CommandSource source(
         std::make_unique<completion::CommandStrategy>(false), nullptr,
-        this->split_->getChannel().get());
+        this->split_->getSelectedChannel().get());
     source.update(query);
 
     this->commandCompletionSuggestions_.clear();
@@ -2829,6 +4177,20 @@ bool SplitInput::updateCommandCompletion(const QString &query, int start,
 
     if (this->commandCompletionSuggestions_.empty())
     {
+        const auto selectedChannel = this->split_->getSelectedChannel();
+        if (query.startsWith(QChar('#')) &&
+            getSettings()->includePotatCommands && selectedChannel != nullptr &&
+            selectedChannel->getType() == Channel::Type::Twitch)
+        {
+            if (auto *potat = getApp()->getPotatCommands();
+                potat != nullptr && potat->commands().empty() &&
+                potat->isLoading())
+            {
+                this->showCommandCompletionStatus(
+                    QStringLiteral("Loading Potat commands…"));
+                return true;
+            }
+        }
         this->resetCommandCompletionSession();
         return false;
     }
@@ -2897,6 +4259,7 @@ void SplitInput::renderCommandCompletion()
         const auto selected =
             actualIndex == this->commandCompletionSelectedIndex_;
         row->setProperty("commandCompletionIndex", actualIndex);
+        row->setCursor(Qt::PointingHandCursor);
         row->setStyleSheet(
             selected
                 ? QStringLiteral(
@@ -2905,15 +4268,19 @@ void SplitInput::renderCommandCompletion()
                 : QStringLiteral(
                       "QLabel#commandCompletionRow { background: transparent; "
                       "border: 0; }"));
-        row->setText(
-            QStringLiteral(
-                "<span style=\"font-weight:600; color:%1;\">%2</span>"
-                "<span style=\"color:%3;\">%4%5</span>")
-                .arg(textColor, suggestion.completion.toHtmlEscaped(),
-                     mutedColor, suggestion.usage.isEmpty()
-                                     ? QString()
-                                     : QStringLiteral(" "),
-                     suggestion.usage.toHtmlEscaped()));
+        if (auto *completionRow = dynamic_cast<CommandCompletionLabel *>(row))
+        {
+            completionRow->setSuggestion(
+                suggestion.completion,
+                suggestion.usage.isEmpty()
+                    ? QString()
+                    : QStringLiteral(" ") + suggestion.usage,
+                QColor(textColor), QColor(mutedColor));
+        }
+        row->setToolTip(suggestion.completion +
+                        (suggestion.usage.isEmpty()
+                             ? QString{}
+                             : QStringLiteral(" ") + suggestion.usage));
         row->show();
     }
 
@@ -2936,12 +4303,13 @@ void SplitInput::hideCommandCompletion()
     }
 }
 
-bool SplitInput::moveCommandCompletionSelection(int offset)
+bool SplitInput::moveCommandCompletionSelection(int offset,
+                                                bool previewInserted)
 {
     const auto count = int(this->commandCompletionSuggestions_.size());
     if (!this->commandCompletionSession_.active || count <= 0 ||
         this->ui_.commandCompletionWidget == nullptr ||
-        !this->ui_.commandCompletionWidget->isVisible())
+        this->ui_.commandCompletionWidget->isHidden())
     {
         return false;
     }
@@ -2954,6 +4322,15 @@ bool SplitInput::moveCommandCompletionSelection(int offset)
     }
     this->commandCompletionSession_.selectionChanged = true;
     this->renderCommandCompletion();
+    if (previewInserted && this->commandCompletionSession_.inserted)
+    {
+        const auto completion = this->commandCompletionSuggestions_
+                                    [this->commandCompletionSelectedIndex_]
+                                        .completion;
+        this->insertCommandCompletionText(completion, true);
+
+        this->commandCompletionSession_.selectionChanged = true;
+    }
     return true;
 }
 
@@ -3004,6 +4381,10 @@ void SplitInput::insertCompletionText(const QString &input_)
 
     auto text = edit.toPlainText();
     auto position = edit.textCursor().position() - 1;
+    if (text.isEmpty() || position < 0)
+    {
+        return;
+    }
 
     for (int i = std::clamp(position, 0, (int)text.length() - 1); i >= 0; i--)
     {
@@ -3024,10 +4405,10 @@ void SplitInput::insertCompletionText(const QString &input_)
         if (done)
         {
             auto cursor = edit.textCursor();
-            edit.setPlainText(
-                text.remove(i, position - i + 1).insert(i, input));
+            cursor.setPosition(i);
+            cursor.setPosition(position + 1, QTextCursor::KeepAnchor);
+            cursor.insertText(input);
 
-            cursor.setPosition(i + input.size());
             edit.setTextCursor(cursor);
             break;
         }
@@ -3036,25 +4417,37 @@ void SplitInput::insertCompletionText(const QString &input_)
 
 bool SplitInput::handleCommandCompletionKey(QKeyEvent *event)
 {
-    if (!this->commandCompletionSession_.active ||
-        this->commandCompletionSuggestions_.empty() ||
-        this->ui_.commandCompletionWidget == nullptr ||
-        !this->ui_.commandCompletionWidget->isVisible())
+    const auto key = event->key();
+    const auto modifiers = event->modifiers();
+    if (modifiers != Qt::NoModifier &&
+        !((key == Qt::Key_Tab || key == Qt::Key_Backtab) &&
+          modifiers == Qt::ShiftModifier))
     {
         return false;
     }
-
-    const auto key = event->key();
+    const bool visible = this->commandCompletionSession_.active &&
+                         !this->commandCompletionSuggestions_.empty() &&
+                         this->ui_.commandCompletionWidget != nullptr &&
+                         !this->ui_.commandCompletionWidget->isHidden();
+    if (key == Qt::Key_Escape &&
+        (visible || !this->ui_.textEdit->ghostText().isEmpty()))
+    {
+        this->commandAssistanceDismissed_ = true;
+        this->dismissedCommandText_ = this->ui_.textEdit->toPlainText();
+        this->dismissedCommandCursor_ =
+            this->ui_.textEdit->textCursor().position();
+        this->resetCommandCompletionSession();
+        this->ui_.textEdit->setGhostText({});
+        return true;
+    }
+    if (!visible)
+    {
+        return false;
+    }
     if (key == Qt::Key_Enter || key == Qt::Key_Return)
     {
         this->resetCommandCompletionSession();
         return false;
-    }
-
-    if (key == Qt::Key_Escape)
-    {
-        this->resetCommandCompletionSession();
-        return true;
     }
 
     if (key == Qt::Key_Down)
@@ -3079,11 +4472,11 @@ bool SplitInput::handleCommandCompletionKey(QKeyEvent *event)
     {
         if (isBacktab)
         {
-            this->moveCommandCompletionSelection(-1);
+            this->moveCommandCompletionSelection(-1, false);
         }
         else if (this->commandCompletionSession_.inserted)
         {
-            this->moveCommandCompletionSelection(1);
+            this->moveCommandCompletionSelection(1, false);
         }
     }
 
@@ -3126,11 +4519,32 @@ void SplitInput::insertCommandCompletionText(const QString &completion,
     start = std::clamp(start, 0, textSize);
     end = std::clamp(end, start, textSize);
 
-    const auto input = completion + ' ';
+    QString separator = QStringLiteral(" ");
+    if (this->commandCompletionSession_.inserted && end > start &&
+        text.at(end - 1).isSpace())
+    {
+        separator = text.mid(end - 1, 1);
+    }
+    else
+    {
+        while (end < text.size() && !text.at(end).isSpace())
+        {
+            ++end;
+        }
+        if (end < text.size())
+        {
+            separator = text.mid(end, 1);
+            ++end;
+        }
+    }
+    const auto input = completion + separator;
     auto cursor = edit.textCursor();
     this->updatingCommandCompletionText_ = true;
-    edit.setPlainText(text.remove(start, end - start).insert(start, input));
-    cursor.setPosition(start + input.size());
+    cursor.beginEditBlock();
+    cursor.setPosition(start);
+    cursor.setPosition(end, QTextCursor::KeepAnchor);
+    cursor.insertText(input);
+    cursor.endEditBlock();
     edit.setTextCursor(cursor);
     this->updatingCommandCompletionText_ = false;
 
@@ -3147,6 +4561,8 @@ void SplitInput::insertCommandCompletionText(const QString &completion,
     {
         this->resetCommandCompletionSession();
     }
+    this->updateCommandArgumentHint(edit.toPlainText(),
+                                    edit.textCursor().position());
 }
 
 void SplitInput::resetCommandCompletionSession()
@@ -3228,14 +4644,17 @@ void SplitInput::setInputText(const QString &newInputText)
 
 void SplitInput::editTextChanged()
 {
+    ++this->draftRevision_;
     auto *app = getApp();
+    const auto messageLimit =
+        messageLimitForChannel(this->split_->getSelectedChannel());
 
     // set textLengthLabel value
     QString text = this->ui_.textEdit->toPlainText();
 
     if (this->shouldPreventInput(text))
     {
-        this->ui_.textEdit->setPlainText(text.left(TWITCH_MESSAGE_LIMIT));
+        this->ui_.textEdit->setPlainText(text.left(messageLimit));
         this->ui_.textEdit->moveCursor(QTextCursor::EndOfBlock);
         return;
     }
@@ -3262,38 +4681,69 @@ void SplitInput::editTextChanged()
 
     this->updateOutgoingTranslationPreview();
 
+    auto textLength = text.size();
+    auto overflowOffset = qsizetype(messageLimit);
+    if (this->split_->getSelectedChannel()->isTikTokChannel())
+    {
+        text = this->ui_.textEdit->toPlainText();
+        const auto analysis = tiktok::livetext::analyzeEditorText(text);
+        textLength = analysis.count;
+        overflowOffset =
+            analysis
+                .utf16Boundaries[qMin(analysis.count, qsizetype(messageLimit))];
+    }
+    QList<QTextEdit::ExtraSelection> selections;
     if (text.length() > 0 &&
         getSettings()->messageOverflow.getValue() == MessageOverflow::Highlight)
     {
         QTextCursor cursor = this->ui_.textEdit->textCursor();
         QTextCharFormat format;
-        QList<QTextEdit::ExtraSelection> selections;
 
-        cursor.setPosition(qMin(text.length(), TWITCH_MESSAGE_LIMIT),
+        cursor.setPosition(qMin(text.length(), overflowOffset),
                            QTextCursor::MoveAnchor);
         cursor.movePosition(QTextCursor::Start, QTextCursor::KeepAnchor);
         selections.append({cursor, format});
 
-        if (text.length() > TWITCH_MESSAGE_LIMIT)
+        if (textLength > messageLimit)
         {
-            cursor.setPosition(TWITCH_MESSAGE_LIMIT, QTextCursor::MoveAnchor);
+            cursor.setPosition(overflowOffset, QTextCursor::MoveAnchor);
             cursor.movePosition(QTextCursor::End, QTextCursor::KeepAnchor);
             format.setForeground(Qt::red);
             selections.append({cursor, format});
         }
-        // block reemit of QTextEdit::textChanged()
+    }
+
+    if (!text.isEmpty() && this->inHistorySearch_ &&
+        !this->historySearchFailed_ && !this->historySearchQuery_.isEmpty())
+    {
+        const auto matchIndex =
+            text.indexOf(this->historySearchQuery_, 0, Qt::CaseInsensitive);
+        if (matchIndex >= 0)
         {
-            const QSignalBlocker b(this->ui_.textEdit);
-            this->ui_.textEdit->setExtraSelections(selections);
+            QTextCursor cursor = this->ui_.textEdit->textCursor();
+            QTextCharFormat format;
+            format.setBackground(
+                getTheme()->splits.input.searchHighlightBackground);
+            format.setUnderlineStyle(QTextCharFormat::SingleUnderline);
+            cursor.setPosition(matchIndex, QTextCursor::MoveAnchor);
+            cursor.setPosition(matchIndex + this->historySearchQuery_.size(),
+                               QTextCursor::KeepAnchor);
+            selections.append({cursor, format});
         }
+    }
+
+    // block reemit of QTextEdit::textChanged()
+    {
+        const QSignalBlocker blocker(this->ui_.textEdit);
+        this->ui_.textEdit->setExtraSelections(selections);
     }
 
     QString labelText;
 
     if (text.length() > 0 && getSettings()->showMessageLength)
     {
-        labelText = QString::number(text.length());
-        if (text.length() > TWITCH_MESSAGE_LIMIT)
+        labelText = QString::number(textLength);
+        if (textLength > messageLimit)
         {
             this->ui_.textEditLength->setStyleSheet("color: red");
         }
@@ -3342,28 +4792,43 @@ void SplitInput::paintEvent(QPaintEvent * /*event*/)
 {
     QPainter painter(this);
 
+    const bool polished = this->theme->customization.foundation ==
+                          ThemeFoundation::MoltorinoPolished;
+
     QColor borderColor =
         this->theme->isLightTheme() ? QColor("#ccc") : QColor("#333");
 
-    QRect baseRect = this->rect();
-    baseRect.setWidth(baseRect.width() - 1);
-
     auto *inputWrap = this->ui_.inputWrapper;
     auto inputBoxRect = inputWrap->geometry();
-    inputBoxRect.setSize(inputBoxRect.size() - QSize{1, 1});
 
-    painter.setBrush({this->theme->splits.input.background});
-    painter.setPen(borderColor);
-    painter.drawRect(inputBoxRect);
+    if (polished)
+    {
+        painter.fillRect(inputBoxRect, this->theme->splits.input.background);
+    }
+    else
+    {
+        inputBoxRect.setSize(inputBoxRect.size() - QSize{1, 1});
+        painter.setBrush({this->theme->splits.input.background});
+        painter.setPen(borderColor);
+        painter.drawRect(inputBoxRect);
+    }
 
     if (this->enableInlineReplying_ && this->replyTarget_ != nullptr)
     {
         auto replyRect = this->ui_.replyWrapper->geometry();
-        replyRect.setSize(replyRect.size() - QSize{1, 1});
 
-        painter.setBrush(this->theme->splits.input.background);
-        painter.setPen(borderColor);
-        painter.drawRect(replyRect);
+        if (polished)
+        {
+            painter.fillRect(replyRect, this->theme->splits.input.background);
+            painter.setPen(this->theme->splits.header.border);
+        }
+        else
+        {
+            replyRect.setSize(replyRect.size() - QSize{1, 1});
+            painter.setBrush(this->theme->splits.input.background);
+            painter.setPen(borderColor);
+            painter.drawRect(replyRect);
+        }
 
         QPoint replyLabelBorderStart(
             replyRect.x(),
@@ -3398,6 +4863,7 @@ void SplitInput::giveFocus(Qt::FocusReason reason)
 
 void SplitInput::setReply(MessagePtr target, std::weak_ptr<Channel> channel)
 {
+    ++this->draftRevision_;
     auto oldParent = this->replyTarget_;
     if (this->enableInlineReplying_ && oldParent)
     {
@@ -3485,6 +4951,7 @@ void SplitInput::setPlaceholderText(const QString &text)
 void SplitInput::clearInput()
 {
     this->currMsg_ = "";
+    this->stopHistorySearchIfNecessary();
     this->ui_.textEdit->setText("");
     this->ui_.textEdit->moveCursor(QTextCursor::Start);
     if (this->enableInlineReplying_)
@@ -3495,6 +4962,7 @@ void SplitInput::clearInput()
 
 void SplitInput::clearReplyTarget()
 {
+    ++this->draftRevision_;
     this->replyTarget_.reset();
     this->ui_.replyMessage->clearMessage();
     this->ui_.vbox->setSpacing(0);
@@ -3519,17 +4987,22 @@ bool SplitInput::shouldPreventInput(const QString &text) const
         return false;
     }
 
-    if (!channel->isTwitchChannel())
+    if (!channel->isTwitchChannel() && !channel->isYouTubeChannel())
     {
         // Don't respect this setting for IRC channels as the limits might be server-specific
         return false;
     }
 
-    return text.length() > TWITCH_MESSAGE_LIMIT;
+    return text.length() > messageLimitForChannel(channel);
 }
 
 int SplitInput::marginForTheme() const
 {
+    if (!themeUsesClassicSplitFrame(this->theme->customization.foundation))
+    {
+        return 1;
+    }
+
     if (this->theme->isLightTheme())
     {
         return int(3 * this->scale());
@@ -3560,7 +5033,7 @@ void SplitInput::updateTextEditPalette()
                this->theme->messages.textColors.chatPlaceholder);
 
     // Text color
-    p.setColor(QPalette::Text, this->theme->messages.textColors.regular);
+    p.setColor(QPalette::Text, this->theme->splits.input.text);
 
     // Selection background color
     p.setBrush(QPalette::Highlight,
@@ -3611,6 +5084,7 @@ void SplitInput::checkSpellingChanged()
     QTextDocument *target = nullptr;
     if (this->shouldCheckSpelling())
     {
+        getApp()->getSpellChecker()->ensureLoaded();
         target = this->ui_.textEdit->document();
     }
 
@@ -3826,23 +5300,45 @@ void SplitInput::updateChannelPointsDisplay(TwitchChannel *channel)
 void SplitInput::updateFonts()
 {
     auto *app = getApp();
-    this->ui_.textEdit->setFont(
-        app->getFonts()->getFont(FontStyle::ChatMedium, this->scale()));
+    const auto scale = this->scale();
+    const auto exactlyScaledFont = [app, scale](FontStyle style) {
+        auto font = app->getFonts()->getFont(style, 1.0F);
+        if (font.pointSizeF() > 0)
+        {
+            font.setPointSizeF(font.pointSizeF() * scale);
+        }
 
-    auto channelPointsFont =
-        app->getFonts()->getFont(FontStyle::UiMedium, this->scale());
+        font.setHintingPreference(QFont::PreferNoHinting);
+        font.setStyleStrategy(static_cast<QFont::StyleStrategy>(
+            font.styleStrategy() | QFont::PreferAntialias));
+        return font;
+    };
+
+    this->ui_.textEdit->setFont(exactlyScaledFont(FontStyle::ChatMedium));
+
+    auto inputActionFont = exactlyScaledFont(FontStyle::UiMedium);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
-    channelPointsFont.setFeature(QFont::Tag("tnum"), 1);
+    inputActionFont.setFeature(QFont::Tag("tnum"), 1);
 #endif
-    this->ui_.textEditLength->setFont(channelPointsFont);
-    this->ui_.channelPointsLabel->setFont(channelPointsFont);
-    this->ui_.sendWaitStatus->setFont(channelPointsFont);
+
+    this->ui_.textEditLength->setFont(inputActionFont);
+    this->ui_.channelPointsLabel->setFont(inputActionFont);
+    this->ui_.sendWaitStatus->setFont(inputActionFont);
+    if (this->ui_.multiChannelDestinationButton != nullptr)
+    {
+        this->ui_.multiChannelDestinationButton->setFont(inputActionFont);
+        this->updateMultiChannelDestinationButton();
+    }
+    this->updateActionRowCompactness();
 #if MOLTORINO_ENABLE_CHANNEL_POINT_REWARDS
-    this->ui_.channelPointRewardPromptTitle->setFont(channelPointsFont);
+    this->ui_.channelPointRewardPromptTitle->setFont(
+        app->getFonts()->getFont(FontStyle::UiMedium, scale));
 #endif
 
     this->ui_.replyLabel->setFont(
         app->getFonts()->getFont(FontStyle::ChatMediumBold, this->scale()));
+    this->ui_.historySearchWrap->setFont(
+        app->getFonts()->getFont(FontStyle::ChatMediumSmall, this->scale()));
     this->ui_.raidStatusLabel->setContentsMargins(
         int(std::round(6 * this->scale())), int(std::round(1 * this->scale())),
         int(std::round(6 * this->scale())),
@@ -3889,7 +5385,9 @@ void SplitInput::setSendWaitStatus(const QString &text)
 
 void SplitInput::updateChannel()
 {
+    ++this->draftRevision_;
     this->channelConnections_.clear();
+    this->updateMultiChannelDestinationButton();
 
     auto refreshSelectedChannelState = [this] {
         auto selected = this->split_->getSelectedChannel();
@@ -3898,8 +5396,13 @@ void SplitInput::updateChannel()
             return;
         }
 
+        if (this->replyTarget_ && this->replyChannel_.lock() != selected)
+        {
+            this->setReply(nullptr, {});
+        }
+
         this->ui_.textEdit->setCompleter(
-            new QCompleter(selected->completionModel));
+            new QCompleter(selected->getCompletionModel()));
         this->inputHighlighter->setChannel(selected);
         this->checkSpellingChanged();
         this->bindNukePreviewChannel();
@@ -3907,6 +5410,12 @@ void SplitInput::updateChannel()
         this->bindRaidStatusChannel();
         this->updateRaidStatus();
         this->resetCommandCompletionSession();
+        this->commandHintKey_.clear();
+        this->commandHintChannel_.reset();
+        this->resolvedCommandHint_.reset();
+        this->updateCommandArgumentHint(
+            this->ui_.textEdit->toPlainText(),
+            this->ui_.textEdit->textCursor().position());
         this->clearOutgoingTranslationPreview();
         this->updateOutgoingTranslationButton();
         this->bindChannelPoints(dynamic_cast<TwitchChannel *>(selected.get()));
@@ -3919,9 +5428,15 @@ void SplitInput::updateChannel()
             multiChannel->activeChannelChanged, [this] {
                 this->updateChannel();
             });
+        this->channelConnections_.managedConnect(
+            multiChannel->displayNameChanged, [this] {
+                this->updateMultiChannelDestinationButton();
+            });
     }
 
     refreshSelectedChannelState();
 }
 
 }  // namespace chatterino
+
+#include "SplitInput.moc"

@@ -80,9 +80,20 @@ public:
     }
 
 protected:
+    void resetConnectBackoff()
+    {
+        assertInGuiThread();
+        this->connectBackoff_.reset();
+    }
+
     void unsubscribe(const Subscription &subscription)
     {
         assertInGuiThread();
+
+        const auto removed =
+            std::erase(this->pendingSubscriptions_, subscription);
+        DebugCount::decrease(DebugObject::LiveUpdatesSubscriptionBacklog,
+                             static_cast<int64_t>(removed));
 
         for (auto &client : this->clients_)
         {
@@ -96,6 +107,13 @@ protected:
     void subscribe(const Subscription &subscription)
     {
         assertInGuiThread();
+
+        if (this->stopping_ || this->isSubscribed(subscription) ||
+            std::ranges::find(this->pendingSubscriptions_, subscription) !=
+                this->pendingSubscriptions_.end())
+        {
+            return;
+        }
 
         if (this->trySubscribe(subscription))
         {
@@ -122,6 +140,8 @@ private:
     {
         assertInGuiThread();
 
+        this->addingClient_ = false;
+
         auto *client = this->resolve(id);
         if (client == nullptr)
         {
@@ -130,13 +150,14 @@ private:
             return;
         }
 
-        DebugCount::increase(DebugObject::LiveUpdatesConnection);
-        this->addingClient_ = false;
         this->diag.connectionsOpened.fetch_add(1, std::memory_order_acq_rel);
 
-        this->connectBackoff_.reset();
-
         client->onOpen();
+
+        if (client->isOpen())
+        {
+            this->connectBackoff_.reset();
+        }
         auto pendingSubsToTake = std::min(this->pendingSubscriptions_.size(),
                                           client->maxSubscriptions);
 
@@ -151,6 +172,10 @@ private:
             if (this->isSubscribed(last))
             {
 
+                qCDebug(chatterinoLiveupdates)
+                    << "Already subscribed to" << last << "in the meantime";
+                DebugCount::decrease(
+                    DebugObject::LiveUpdatesSubscriptionBacklog);
                 continue;
             }
 
@@ -178,6 +203,8 @@ private:
     {
         assertInGuiThread();
 
+        this->addingClient_ = false;
+
         auto it = this->clients_.find(id);
         if (it == this->clients_.end())
         {
@@ -185,12 +212,16 @@ private:
             return;
         }
 
-        this->addingClient_ = false;
-
         DebugCount::decrease(DebugObject::LiveUpdatesConnection);
         qCDebug(chatterinoLiveupdates) << "Connection" << id << "closed";
 
-        auto subs = std::move(it->second->subscriptions_);
+        if constexpr (requires {
+                          it->second->onClose(it->second->subscriptions_);
+                      })
+        {
+            it->second->onClose(it->second->subscriptions_);
+        }
+        auto subs = std::exchange(it->second->subscriptions_, {});
         bool wasOpen = it->second->isOpen();
 
         if (wasOpen)
@@ -223,7 +254,10 @@ private:
                 std::make_move_iterator(subs.end()));
 
             QTimer::singleShot(this->connectBackoff_.next(), this, [this] {
-                this->addClient();
+                if (!this->pendingSubscriptions_.empty())
+                {
+                    this->addClient();
+                }
             });
             return;
         }
@@ -258,6 +292,7 @@ private:
                 std::weak_ptr{client}, this->derived(), id));
         client->ws_ = std::move(hdl);
         this->clients_.emplace(id, std::move(client));
+        DebugCount::increase(DebugObject::LiveUpdatesConnection);
     }
 
     bool trySubscribe(const Subscription &subscription)

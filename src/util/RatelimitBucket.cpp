@@ -28,6 +28,16 @@ void RatelimitBucket::send(QString channel)
     }
 }
 
+void RatelimitBucket::clearPending()
+{
+    this->queue_.clear();
+}
+
+void RatelimitBucket::removePending(const QString &channel)
+{
+    this->queue_.removeAll(channel);
+}
+
 void RatelimitBucket::handleOne()
 {
     if (this->queue_.isEmpty())

@@ -4,7 +4,9 @@
 #include "common/WindowDescriptors.hpp"
 #include "messages/Message.hpp"
 #include "providers/kick/KickChatServer.hpp"
+#include "providers/tiktok/TikTokChatServer.hpp"
 #include "providers/twitch/TwitchIrcServer.hpp"
+#include "providers/youtube/YouTubeChatServer.hpp"
 #include "util/QCompareTransparent.hpp"
 #include "util/QMagicEnum.hpp"
 
@@ -64,7 +66,7 @@ QString makeChannelName(std::span<const MultiChannel::ChildChannel> specs,
     std::set<QString, QCompareCaseInsensitive> known;
     for (const auto &spec : specs)
     {
-        known.emplace(spec.channel->getName());
+        known.emplace(spec.channel->getDisplayName());
     }
     return makeChannelName(known, space);
 }
@@ -77,6 +79,10 @@ ChannelPtr resolveChannel(const MultiChannel::Spec &spec)
             return getApp()->getTwitch()->getOrAddChannel(spec.name);
         case MultiChannel::Platform::Kick:
             return getApp()->getKickChatServer()->getOrCreate(spec.name);
+        case MultiChannel::Platform::YouTube:
+            return getApp()->getYouTubeChatServer()->getOrCreate(spec.name);
+        case MultiChannel::Platform::TikTok:
+            return getApp()->getTikTokChatServer()->getOrCreate(spec.name);
     }
     return Channel::getEmpty();
 }
@@ -149,7 +155,7 @@ MultiChannel::MultiChannel(std::span<const Spec> channels,
             }));
         connections.emplace_back(
             channel->messagesAddedAtStart.connect([this](const auto &msgs) {
-                this->addMessagesAtStart(msgs);
+                this->fillInMissingMessages(msgs);
             }));
         connections.emplace_back(channel->messageReplaced.connect(
             [this](size_t idx, const MessagePtr &prev,
@@ -301,22 +307,16 @@ bool MultiChannel::hasHighRateLimit() const
 
 bool MultiChannel::isLive() const
 {
-    const auto *active = this->activeChannel();
-    if (active)
-    {
-        return active->channel->isLive();
-    }
-    return false;
+    return std::ranges::any_of(this->channels_, [](const auto &c) {
+        return c.channel->isLive();
+    });
 }
 
 bool MultiChannel::isRerun() const
 {
-    const auto *active = this->activeChannel();
-    if (active)
-    {
-        return active->channel->isRerun();
-    }
-    return false;
+    return std::ranges::any_of(this->channels_, [](const auto &c) {
+        return c.channel->isRerun();
+    });
 }
 
 bool MultiChannel::shouldIgnoreHighlights() const
@@ -385,6 +385,10 @@ bool platformMatches(MessagePlatform lhs, MultiChannel::Platform rhs) noexcept
             return rhs == MultiChannel::Platform::Twitch;
         case MessagePlatform::Kick:
             return rhs == MultiChannel::Platform::Kick;
+        case MessagePlatform::YouTube:
+            return rhs == MultiChannel::Platform::YouTube;
+        case MessagePlatform::TikTok:
+            return rhs == MultiChannel::Platform::TikTok;
     }
     return false;
 }

@@ -6,16 +6,18 @@
 
 #include "Application.hpp"
 #include "common/Args.hpp"
-#include "common/QLogging.hpp"
 #include "controllers/commands/CommandController.hpp"
 #include "controllers/hotkeys/HotkeyController.hpp"
 #include "singletons/Settings.hpp"
+#include "singletons/WindowManager.hpp"
 #include "util/LayoutCreator.hpp"
 #include "widgets/BaseWindow.hpp"
 #include "widgets/helper/SettingsDialogTab.hpp"
 #include "widgets/settingspages/AboutPage.hpp"
 #include "widgets/settingspages/AccountsPage.hpp"
+#include "widgets/settingspages/BackupSharingPage.hpp"
 #include "widgets/settingspages/CommandPage.hpp"
+#include "widgets/settingspages/CustomizationPage.hpp"
 #include "widgets/settingspages/ExternalToolsPage.hpp"
 #include "widgets/settingspages/FiltersPage.hpp"
 #include "widgets/settingspages/GeneralPage.hpp"
@@ -27,10 +29,11 @@
 #include "widgets/settingspages/NicknamesPage.hpp"
 #include "widgets/settingspages/NotificationPage.hpp"
 #include "widgets/settingspages/PluginsPage.hpp"
+#include "widgets/Window.hpp"
 
 #include <QDialogButtonBox>
-#include <QFile>
 #include <QLineEdit>
+#include <QPointer>
 
 namespace chatterino {
 
@@ -41,29 +44,21 @@ SettingsDialog::SettingsDialog(QWidget *parent)
               BaseWindow::Flags::Dialog,
               BaseWindow::DisableLayoutSave,
               BaseWindow::BoundsCheckOnShow,
+              BaseWindow::UseSettingsStylesheet,
           },
           parent)
 {
     this->setObjectName("SettingsDialog");
-    this->setWindowTitle("Chatterino Settings");
+    this->setWindowTitle("Moltorino Settings");
     // Disable the ? button in the titlebar until we decide to use it
     this->setWindowFlags(this->windowFlags() &
                          ~Qt::WindowContextHelpButtonHint);
 
     this->resize(915, 600);
     this->themeChangedEvent();
-    QFile styleFile(":/qss/settings.qss");
-    if (!styleFile.open(QFile::ReadOnly))
-    {
-        assert(false && "Resources not loaded");
-        qCWarning(chatterinoWidget) << "Resources not loaded";
-    }
-    QString stylesheet = QString::fromUtf8(styleFile.readAll());
-    this->setStyleSheet(stylesheet);
 
     this->initUi();
     this->addTabs();
-    this->overrideBackgroundColor_ = QColor("#111111");
 
     this->addShortcuts();
     this->signalHolder_.managedConnect(getApp()->getHotkeys()->onItemsUpdated,
@@ -243,35 +238,38 @@ void SettingsDialog::addTabs()
     // Constructors are wrapped in std::function to remove some strain from first time loading.
 
     // clang-format off
-    this->addTab([]{return new GeneralPage;},          "General",        ":/settings/about.svg", SettingsTabId::General);
-    this->addTab([]{return new MoltorinoPage;},        "Moltorino",      ":/settings/moltorino.svg", SettingsTabId::Moltorino);
+    this->addTab([]{return new GeneralPage;},          "General",        ":/settings/about.svg", SettingsTabId::General, 0.88F);
+    this->addTab([]{return new CustomizationPage;},    "Customization",  ":/settings/customization.svg", SettingsTabId::Customization, 1.09F);
+    this->addTab([]{return new MoltorinoPage;},        "Moltorino",      ":/settings/moltorino.svg", SettingsTabId::Moltorino, 0.90F);
     this->ui_.tabContainer->addSpacing(16);
-    this->addTab([]{return new AccountsPage;},         "Accounts",       ":/settings/accounts.svg", SettingsTabId::Accounts);
-    this->addTab([]{return new NicknamesPage;},        "Nicknames",      ":/settings/accounts.svg");
+    this->addTab([]{return new AccountsPage;},         "Accounts",       ":/settings/accounts.svg", SettingsTabId::Accounts, 1.06F);
+    this->addTab([]{return new NicknamesPage;},        "Nicknames",      ":/settings/nicknames.svg", {}, 1.12F);
     this->ui_.tabContainer->addSpacing(16);
-    this->addTab([]{return new CommandPage;},          "Commands",       ":/settings/commands.svg");
-    this->addTab([]{return new HighlightingPage;},     "Highlights",     ":/settings/notifications.svg");
-    this->addTab([]{return new IgnoresPage;},          "Ignores",        ":/settings/ignore.svg");
-    this->addTab([]{return new FiltersPage;},          "Filters",        ":/settings/filters.svg");
+    this->addTab([]{return new CommandPage;},          "Commands",       ":/settings/commands.svg", {}, 1.10F);
+    this->addTab([]{return new HighlightingPage;},     "Highlights",     ":/settings/highlights.svg", SettingsTabId::Highlights, 1.01F);
+    this->addTab([]{return new IgnoresPage;},          "Ignores",        ":/settings/ignores.svg", {}, 1.08F);
+    this->addTab([]{return new FiltersPage;},          "Filters",        ":/settings/filters.svg", {}, 1.04F);
     this->ui_.tabContainer->addSpacing(16);
-    this->addTab([]{return new KeyboardSettingsPage;}, "Hotkeys",        ":/settings/keybinds.svg");
-    this->addTab([]{return new ModerationPage;},       "Moderation",     ":/settings/moderation.svg", SettingsTabId::Moderation);
-    this->addTab([]{return new NotificationPage;},     "Live Notifications",  ":/settings/notification2.svg");
-    this->addTab([]{return new ExternalToolsPage;},    "External tools", ":/settings/externaltools.svg");
+    this->addTab([]{return new KeyboardSettingsPage;}, "Hotkeys",        ":/settings/hotkeys.svg", {}, 1.05F);
+    this->addTab([]{return new ModerationPage;},       "Moderation",     ":/settings/moderation.svg", SettingsTabId::Moderation, 1.00F);
+    this->addTab([]{return new NotificationPage;},     "Live Notifications",  ":/settings/live-notifications.svg", {}, 1.15F);
+    this->addTab([]{return new ExternalToolsPage;},    "External tools", ":/settings/external-tools.svg", {}, 1.05F);
 #ifdef CHATTERINO_HAVE_PLUGINS
-    this->addTab([]{return new PluginsPage;},          "Plugins",        ":/settings/plugins.svg");
+    this->addTab([]{return new PluginsPage;},          "Plugins",        ":/settings/plugins.svg", {}, 1.04F);
 #endif
     this->ui_.tabContainer->addStretch(1);
-    this->addTab([]{return new AboutPage;},            "About",          ":/settings/about.svg", SettingsTabId::About, Qt::AlignBottom);
+    this->addTab([]{return new BackupSharingPage;},    "Settings Manager", ":/settings/settings-manager.svg", SettingsTabId::SettingsManager, 1.12F, Qt::AlignBottom);
+    this->addTab([]{return new AboutPage;},            "About",          ":/settings/about.svg", SettingsTabId::About, 0.88F, Qt::AlignBottom);
     // clang-format on
 }
 
 void SettingsDialog::addTab(std::function<SettingsPage *()> page,
                             const QString &name, const QString &iconPath,
-                            SettingsTabId id, Qt::Alignment alignment)
+                            SettingsTabId id, float iconOpticalScale,
+                            Qt::Alignment alignment)
 {
-    auto *tab =
-        new SettingsDialogTab(this, std::move(page), name, iconPath, id);
+    auto *tab = new SettingsDialogTab(this, std::move(page), name, iconPath, id,
+                                      iconOpticalScale);
     tab->setFixedHeight(static_cast<int>(30 * this->dpi_));
 
     this->ui_.tabContainer->addWidget(tab, 0, alignment);
@@ -303,13 +301,9 @@ void SettingsDialog::selectTab(SettingsDialogTab *tab, bool byUser)
     if (this->selectedTab_ != nullptr)
     {
         this->selectedTab_->setSelected(false);
-        this->selectedTab_->setStyleSheet("color: #FFF");
     }
 
     tab->setSelected(true);
-    tab->setStyleSheet(
-        "background: #222; color: #4FC3F7;"  // Should this be same as accent color?
-        "/*border: 1px solid #555; border-right: none;*/");
     this->selectedTab_ = tab;
     if (byUser)
     {
@@ -343,16 +337,17 @@ SettingsDialogTab *SettingsDialog::tab(SettingsTabId id)
     return nullptr;
 }
 
-void SettingsDialog::showDialog(QWidget *parent,
-                                SettingsDialogPreference preferredTab)
+void SettingsDialog::showDialog(SettingsDialogPreference preferredTab)
 {
-    static SettingsDialog *instance = new SettingsDialog(parent);
-    static bool hasShownBefore = false;
-    if (hasShownBefore)
+    static QPointer<SettingsDialog> instance;
+    if (instance == nullptr)
+    {
+        instance = new SettingsDialog(&getApp()->getWindows()->getMainWindow());
+    }
+    else
     {
         instance->refresh();
     }
-    hasShownBefore = true;
 
     // Resets the cancel button.
     getSettings()->saveSnapshot();
@@ -361,6 +356,10 @@ void SettingsDialog::showDialog(QWidget *parent,
     {
         case SettingsDialogPreference::Accounts:
             instance->selectTab(SettingsTabId::Accounts);
+            break;
+
+        case SettingsDialogPreference::Highlights:
+            instance->selectTab(SettingsTabId::Highlights);
             break;
 
         case SettingsDialogPreference::ModerationActions:
@@ -381,6 +380,35 @@ void SettingsDialog::showDialog(QWidget *parent,
 
         case SettingsDialogPreference::About: {
             instance->selectTab(SettingsTabId::About);
+        }
+        break;
+
+        case SettingsDialogPreference::Moltorino: {
+            instance->selectTab(SettingsTabId::Moltorino);
+        }
+        break;
+
+        case SettingsDialogPreference::MoltorinoAccounts: {
+            if (auto *tab = instance->tab(SettingsTabId::Moltorino))
+            {
+                instance->selectTab(tab);
+                if (auto *page = dynamic_cast<MoltorinoPage *>(tab->page()))
+                {
+                    page->showAccountSetup();
+                }
+            }
+        }
+        break;
+
+        case SettingsDialogPreference::BotBadge: {
+            if (auto *tab = instance->tab(SettingsTabId::Moltorino))
+            {
+                instance->selectTab(tab);
+                if (auto *page = dynamic_cast<MoltorinoPage *>(tab->page()))
+                {
+                    page->showBotBadgeSetup();
+                }
+            }
         }
         break;
 
@@ -437,15 +465,6 @@ void SettingsDialog::scaleChangedEvent(float newScale)
     {
         this->ui_.tabContainerContainer->setFixedWidth(150);
     }
-}
-
-void SettingsDialog::themeChangedEvent()
-{
-    BaseWindow::themeChangedEvent();
-
-    QPalette palette;
-    palette.setColor(QPalette::Window, QColor("#111"));
-    this->setPalette(palette);
 }
 
 void SettingsDialog::showEvent(QShowEvent *e)

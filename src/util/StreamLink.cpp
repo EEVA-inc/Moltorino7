@@ -5,6 +5,7 @@
 #include "util/StreamLink.hpp"
 
 #include "Application.hpp"
+#include "common/LinkParser.hpp"
 #include "common/QLogging.hpp"
 #include "common/Version.hpp"
 #include "singletons/Settings.hpp"
@@ -20,6 +21,7 @@
 #include <QStringBuilder>
 
 #include <functional>
+#include <memory>
 
 namespace {
 
@@ -159,7 +161,7 @@ void getStreamQualities(const QString &channelURL,
 void openStreamlink(const QString &channelURL, const QString &quality,
                     QStringList extraArguments)
 {
-    auto *proc = createStreamlinkProcess();
+    const auto proc = std::unique_ptr<QProcess>(createStreamlinkProcess());
     auto arguments = proc->arguments()
                      << std::move(extraArguments) << channelURL << quality;
 
@@ -196,7 +198,11 @@ void openStreamlinkForChannel(const QString &channel, QStringView prefixURL)
         }
     }
 
-    QString channelURL = prefixURL % channel;
+    const auto target = channel.trimmed();
+    const auto parsed = linkparser::parse(target);
+    const bool isCompleteUrl =
+        parsed && !parsed->hasPrefix(target) && !parsed->hasSuffix(target);
+    const QString channelURL = isCompleteUrl ? target : prefixURL % target;
 
     auto preferredQuality = getSettings()->preferredQuality.getEnum();
 

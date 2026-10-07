@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <utility>
 
@@ -33,7 +34,7 @@ public:
 
     static bool remove(const char *name);
 
-    QByteArray receive();
+    QByteArray receive(std::chrono::milliseconds timeout);
 
 private:
     IpcQueue(IpcQueuePrivate *priv);

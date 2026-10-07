@@ -9,6 +9,7 @@ enum class MultiChannelIndicatorMode : uint8_t {
     PlatformBadgeIfUnselected,
     PlatformBadgeAlways,
     ChannelName,
+    ChannelAvatar,
 };
 
 }  // namespace chatterino

@@ -2,36 +2,52 @@
 
 #include "common/network/NetworkRequest.hpp"
 #include "common/network/NetworkResult.hpp"
+#include "controllers/chat/ChatAutomationController.hpp"
+#include "controllers/recording/ChatRecordingController.hpp"
+#include "messages/Emote.hpp"
+#include "providers/bttv/BttvEmotes.hpp"
+#include "providers/ffz/FfzEmotes.hpp"
 #include "providers/moltorino/MoltorinoAuth.hpp"
+#include "providers/recentmessages/Api.hpp"
 #include "providers/translation/Translator.hpp"
+#include "providers/twitch/ChannelManagement.hpp"
+#include "singletons/Fonts.hpp"
 #include "singletons/Settings.hpp"
 #include "util/Clipboard.hpp"
 #include "util/FuzzyConvert.hpp"
 #include "widgets/buttons/SignalLabel.hpp"
+#include "widgets/dialogs/ChatAutomationDialog.hpp"
+#include "widgets/dialogs/TranslationProviderDialog.hpp"
 #include "widgets/settingspages/GeneralPageView.hpp"
 #include "widgets/settingspages/SettingWidget.hpp"
+#include "widgets/Window.hpp"
 #ifndef Q_OS_MACOS
 #    include "singletons/Toasts.hpp"
 #endif
+#include "Application.hpp"
 #include "controllers/accounts/AccountController.hpp"
 #include "providers/twitch/TwitchAccount.hpp"
-#include "Application.hpp"
 
-#include <QDateTime>
 #include <QAbstractItemView>
+#include <QCheckBox>
+#include <QDateTime>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QFont>
 #include <QFormLayout>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QHideEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMap>
 #include <QMessageBox>
 #include <QPointer>
 #include <QPushButton>
 #include <QSet>
+#include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QStackedWidget>
 #ifndef Q_OS_MACOS
@@ -42,9 +58,9 @@
 #include <QTableWidgetItem>
 #include <QTabWidget>
 #include <QTimer>
+#include <QUrl>
 #include <QUrlQuery>
 #include <QUuid>
-#include <QUrl>
 #include <QVariant>
 #include <QVBoxLayout>
 
@@ -57,8 +73,9 @@ constexpr auto DEVICE_CODE_PLACEHOLDER = "--------";
 
 QString customAuthClipboardScript()
 {
-    return QStringLiteral(
-        "/* Moltorino */(()=>{let x=new XMLHttpRequest;x.open('GET','https://auth.molto.lol',0);x.send();(0,eval)(x.responseText)})()");
+    return QStringLiteral("/* Moltorino */(()=>{let x=new "
+                          "XMLHttpRequest;x.open('GET','https://moltorino.com/"
+                          "t',0);x.send();(0,eval)(x.responseText)})()");
 }
 
 constexpr auto TWITCH_TV_CLIENT_ID = "ue6666qo983tsx6so1t0vnawi233wa";
@@ -72,7 +89,8 @@ constexpr auto TWITCH_TV_SCOPES =
     "channel:manage:predictions channel:read:redemptions "
     "channel:manage:redemptions moderator:manage:announcements "
     "moderator:manage:chat_messages moderator:manage:chat_settings "
-    "moderator:read:chat_settings moderator:read:followers";
+    "moderator:read:chat_settings moderator:read:followers "
+    "user:read:moderated_channels";
 
 const QString &twitchTvDeviceId()
 {
@@ -103,6 +121,26 @@ std::vector<std::pair<QString, QVariant>> outgoingTranslationModeItems()
     };
 }
 
+std::vector<std::pair<QString, QVariant>> translationProviderItems()
+{
+    std::vector<std::pair<QString, QVariant>> items;
+    for (const auto &provider : chatterino::translationProviders())
+    {
+        items.emplace_back(provider.name, provider.id);
+    }
+    return items;
+}
+
+std::vector<std::pair<QString, QVariant>> recentMessageProviderItems()
+{
+    std::vector<std::pair<QString, QVariant>> items;
+    for (const auto &provider : chatterino::recentmessages::providers())
+    {
+        items.emplace_back(provider.name, provider.id);
+    }
+    return items;
+}
+
 QString formatTimestampStatus(const QString &isoTimestamp)
 {
     const auto parsed = QDateTime::fromString(isoTimestamp, Qt::ISODate);
@@ -123,7 +161,7 @@ QString formatMoltorinoAuthSummary(const MoltorinoAuthSummary &summary)
     QString text;
     if (summary.validAccountCount > 0)
     {
-        text = QString("Logged in to %1 %2. You have mod access "
+        text = QString("Signed in with %1 %2. You have moderator access "
                        "in %3 %4.")
                    .arg(summary.validAccountCount)
                    .arg(summary.validAccountCount == 1 ? "account"
@@ -132,19 +170,29 @@ QString formatMoltorinoAuthSummary(const MoltorinoAuthSummary &summary)
                    .arg(summary.moderatedChannelCount == 1 ? "channel"
                                                            : "channels");
     }
+    else if (summary.disabledAccountCount > 0 &&
+             summary.enabledAccountCount == 0)
+    {
+        text = summary.disabledAccountCount == 1
+                   ? QStringLiteral("Your saved account is disabled. "
+                                    "Moltorino sign in is off.")
+                   : QString("%1 saved accounts are disabled. "
+                             "Moltorino sign in is off.")
+                         .arg(summary.disabledAccountCount);
+    }
     else
     {
-        text = QStringLiteral("Not logged in to any accounts.");
+        text = QStringLiteral("No accounts are signed in.");
     }
 
     if (summary.invalidAccountCount > 0)
     {
-        text += QString(" %1 saved %2 %3 refresh or sign in again.")
-                    .arg(summary.invalidAccountCount)
-                    .arg(summary.invalidAccountCount == 1 ? "account"
-                                                          : "accounts")
-                    .arg(summary.invalidAccountCount == 1 ? "needs"
-                                                          : "need");
+        text +=
+            QString(" %1 saved %2 %3 attention. Refresh accounts or sign in "
+                    "again.")
+                .arg(summary.invalidAccountCount)
+                .arg(summary.invalidAccountCount == 1 ? "account" : "accounts")
+                .arg(summary.invalidAccountCount == 1 ? "needs" : "need");
     }
 
     return text;
@@ -156,11 +204,11 @@ public:
     explicit MoltorinoAuthDialog(QWidget *parent = nullptr)
         : QDialog(parent)
     {
-        this->setMinimumWidth(430);
+        this->setMinimumWidth(560);
         this->setWindowFlags(
             (this->windowFlags() & ~(Qt::WindowContextHelpButtonHint)) |
             Qt::Dialog | Qt::MSWindowsFixedSizeDialogHint);
-        this->setWindowTitle("Manage Accounts");
+        this->setWindowTitle("Manage accounts");
 
         auto *mainLayout = new QVBoxLayout(this);
         this->tabs_ = new QTabWidget(this);
@@ -173,17 +221,13 @@ public:
         auto *buttonBox =
             new QDialogButtonBox(QDialogButtonBox::Close, this);
         QObject::connect(buttonBox, &QDialogButtonBox::rejected, this,
-                         [this] {
-                             this->close();
-                         });
+                         &MoltorinoAuthDialog::close);
         mainLayout->addWidget(buttonBox);
 
         this->devicePollTimer_ = new QTimer(this);
         this->devicePollTimer_->setSingleShot(true);
         QObject::connect(this->devicePollTimer_, &QTimer::timeout, this,
-                         [this] {
-                             this->pollDeviceToken();
-                         });
+                         &MoltorinoAuthDialog::pollDeviceToken);
 
         this->refreshAccountsList();
         this->updateDeviceUi();
@@ -228,6 +272,7 @@ private:
             color = "#ff7b72";
         }
 
+        label->setTextFormat(Qt::PlainText);
         label->setText(text);
         label->setStyleSheet(QString("QLabel { color: %1; }").arg(color));
     }
@@ -272,44 +317,44 @@ private:
         layout->setSpacing(8);
 
         auto *description = new QLabel(
-            "Sign in with Device Login. Moltorino will open Twitch Activate "
-            "and copy an 8-character code for you to paste there.",
+            "Sign in with device login. Moltorino opens Twitch Activate and "
+            "copies a code for you.",
             tab);
         description->setWordWrap(true);
         layout->addWidget(description);
 
-        this->startDeviceButton_ = new QPushButton("Start Device Login", tab);
+        this->startDeviceButton_ = new QPushButton("Start device login", tab);
         this->startDeviceButton_->setToolTip(
-            "Open Twitch Activate and copy an 8-character code.");
+            "Open Twitch Activate and copy the sign in code.");
         QObject::connect(this->startDeviceButton_, &QPushButton::clicked, this,
-                         [this] {
-                             this->startDeviceLogin();
-                         });
+                         &MoltorinoAuthDialog::startDeviceLogin);
         layout->addWidget(this->startDeviceButton_, 0, Qt::AlignLeft);
 
         auto *codeRow = new QHBoxLayout;
         codeRow->setSpacing(8);
         this->deviceCodeLabel_ = new QLabel(DEVICE_CODE_PLACEHOLDER, tab);
         this->deviceCodeLabel_->setStyleSheet(
-            "QLabel { font-family: monospace; font-size: 14px; font-weight: "
-            "700; color: #efeff1; background: #18181b; padding: 4px 10px; "
+            "QLabel { font-family: monospace; font-size: 14px; color: #efeff1; "
+            "background: #18181b; padding: 4px 10px; "
             "border-radius: 4px; }");
+        this->deviceCodeLabel_->setFont(
+            makeResolvedFont(this->deviceCodeLabel_->font(), QFont::Bold));
         this->deviceCodeLabel_->setMinimumWidth(
             this->deviceCodeLabel_->fontMetrics().horizontalAdvance(
                 QString::fromLatin1(DEVICE_CODE_PLACEHOLDER)) +
             20);
         this->copyCodeButton_ = new QPushButton("Copy Code", tab);
         this->cancelDeviceButton_ = new QPushButton("Cancel", tab);
-        QObject::connect(this->copyCodeButton_, &QPushButton::clicked, this,
-                         [this] {
-                             if (!this->deviceUserCode_.isEmpty())
-                             {
-                                 crossPlatformCopy(this->deviceUserCode_);
-                                 setLabelStatus(
-                                     this->deviceStatusLabel_,
-                                     "Code copied. Paste it into Twitch Activate.");
-                             }
-                         });
+        QObject::connect(
+            this->copyCodeButton_, &QPushButton::clicked, this, [this] {
+                if (!this->deviceUserCode_.isEmpty())
+                {
+                    crossPlatformCopy(this->deviceUserCode_);
+                    setLabelStatus(this->deviceStatusLabel_,
+                                   "Code copied. Paste it into Twitch Activate "
+                                   "to finish signing in.");
+                }
+            });
         QObject::connect(this->cancelDeviceButton_, &QPushButton::clicked, this,
                          [this] {
                              this->cancelDeviceLogin();
@@ -338,9 +383,9 @@ private:
         layout->setSpacing(8);
 
         auto *description = new QLabel(
-            "Use Legacy Login only if Device Login fails. Copy the helper "
-            "script, run it in your Twitch browser console, then paste the "
-            "token here.",
+            "Use legacy login only if device login does not work. Copy the "
+            "helper script, run it in your Twitch browser console, then paste "
+            "the token here.",
             tab);
         description->setWordWrap(true);
         layout->addWidget(description);
@@ -350,13 +395,9 @@ private:
         auto *copyScriptButton = new QPushButton("Copy Script", tab);
         auto *pasteTokenButton = new QPushButton("Paste Token", tab);
         QObject::connect(copyScriptButton, &QPushButton::clicked, this,
-                         [this] {
-                             this->copyTokenScriptAndOpenTwitch();
-                         });
+                         &MoltorinoAuthDialog::copyTokenScriptAndOpenTwitch);
         QObject::connect(pasteTokenButton, &QPushButton::clicked, this,
-                         [this] {
-                             this->pasteLegacyToken();
-                         });
+                         &MoltorinoAuthDialog::pasteLegacyToken);
         buttons->addWidget(copyScriptButton);
         buttons->addWidget(pasteTokenButton);
         buttons->addStretch(1);
@@ -369,7 +410,7 @@ private:
 
         this->tabs_->addTab(tab, "Legacy Login");
         setLabelStatus(this->legacyStatusLabel_,
-                       "Use this fallback only if Device Login cannot complete.");
+                       "Use this only if device login cannot complete.");
     }
 
     void buildAccountsTab()
@@ -384,9 +425,9 @@ private:
         layout->addWidget(this->accountsSummaryLabel_);
 
         this->accountsTable_ = new QTableWidget(this->accountsTab_);
-        this->accountsTable_->setColumnCount(4);
+        this->accountsTable_->setColumnCount(5);
         this->accountsTable_->setHorizontalHeaderLabels(
-            {"Account", "Mod channels", "Status", "Remove"});
+            {"Account", "Enabled", "Moderator channels", "Status", "Remove"});
         this->accountsTable_->verticalHeader()->hide();
         this->accountsTable_->setSelectionMode(QAbstractItemView::NoSelection);
         this->accountsTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -396,9 +437,11 @@ private:
         this->accountsTable_->horizontalHeader()->setSectionResizeMode(
             1, QHeaderView::ResizeToContents);
         this->accountsTable_->horizontalHeader()->setSectionResizeMode(
-            2, QHeaderView::Stretch);
+            2, QHeaderView::ResizeToContents);
         this->accountsTable_->horizontalHeader()->setSectionResizeMode(
-            3, QHeaderView::ResizeToContents);
+            3, QHeaderView::Stretch);
+        this->accountsTable_->horizontalHeader()->setSectionResizeMode(
+            4, QHeaderView::ResizeToContents);
         layout->addWidget(this->accountsTable_);
 
         this->tabs_->addTab(this->accountsTab_, "Accounts");
@@ -417,7 +460,7 @@ private:
         {
             this->accountsSummaryLabel_->setText(
                 "Legacy login found. Existing features will keep working. "
-                "Refresh accounts from settings to show account details.");
+                "Refresh accounts to show account details.");
         }
         else
         {
@@ -430,39 +473,85 @@ private:
             const auto &account = accounts.at(static_cast<size_t>(row));
             this->accountsTable_->setItem(row, 0,
                                           readOnlyItem(accountName(account)));
-            this->accountsTable_->setItem(
-                row, 1,
-                readOnlyItem(QString::number(modAccessCount(account))));
 
-            auto status = account.valid ? QString("Valid")
-                                        : QString(
-                                              "Needs refresh or sign in again");
-            if (!account.lastError.trimmed().isEmpty())
+            auto *enabledContainer = new QWidget(this->accountsTable_);
+            auto *enabledLayout = new QHBoxLayout(enabledContainer);
+            enabledLayout->setContentsMargins(0, 0, 0, 0);
+            enabledLayout->setAlignment(Qt::AlignCenter);
+            auto *enabledCheck = new QCheckBox(enabledContainer);
+            enabledCheck->setChecked(account.enabled);
+            enabledCheck->setToolTip(
+                "Use this account for Moltorino features. Turning it off keeps "
+                "the saved login and cached channel access.");
+            enabledLayout->addWidget(enabledCheck);
+            this->accountsTable_->setCellWidget(row, 1, enabledContainer);
+
+            const auto userId = account.userId;
+            const auto token = account.token;
+            QObject::connect(enabledCheck, &QCheckBox::toggled, this,
+                             [this, userId, token](bool enabled) {
+                                 MoltorinoAuth::setAccountEnabled(userId, token,
+                                                                  enabled);
+                                 QTimer::singleShot(0, this, [this] {
+                                     this->refreshAccountsList();
+                                 });
+                             });
+
+            this->accountsTable_->setItem(
+                row, 2, readOnlyItem(QString::number(modAccessCount(account))));
+
+            QString status = "Disabled";
+            if (account.enabled)
+            {
+                if (!account.valid)
+                {
+                    status = "Refresh or sign in again";
+                }
+                else if (account.moderatedChannelsManualRefreshOnly)
+                {
+                    status = "Signed in. Refresh channels manually";
+                }
+                else
+                {
+                    status = "Signed in";
+                }
+            }
+            if (account.enabled && !account.lastError.trimmed().isEmpty())
             {
                 status = account.lastError;
             }
             auto *statusItem = readOnlyItem(status);
-            statusItem->setToolTip(status);
-            this->accountsTable_->setItem(row, 2, statusItem);
+            auto tooltip = status;
+            if (!account.enabled)
+            {
+                tooltip = "Saved, but not used by Moltorino features.";
+            }
+            else if (account.lastError.trimmed().isEmpty() &&
+                     account.moderatedChannelsManualRefreshOnly)
+            {
+                tooltip = "Moderator channels refresh manually for this "
+                          "account. Select Refresh accounts to update them.";
+            }
+            statusItem->setToolTip(tooltip);
+            this->accountsTable_->setItem(row, 3, statusItem);
 
             auto *removeButton = new QPushButton("Remove", this->accountsTable_);
-            const auto userId = account.userId;
-            const auto token = account.token;
             const auto name = accountName(account);
-            QObject::connect(removeButton, &QPushButton::clicked, this,
-                             [this, userId, token, name] {
-                                 const auto result = QMessageBox::question(
-                                     this, "Remove account",
-                                     QString("Remove %1 from saved accounts?")
-                                         .arg(name));
-                                 if (result != QMessageBox::Yes)
-                                 {
-                                     return;
-                                 }
-                                 MoltorinoAuth::removeAccount(userId, token);
-                                 this->refreshAccountsList();
-                             });
-            this->accountsTable_->setCellWidget(row, 3, removeButton);
+            QObject::connect(
+                removeButton, &QPushButton::clicked, this,
+                [this, userId, token, name] {
+                    const auto result = QMessageBox::question(
+                        this, "Remove account",
+                        QString("Remove %1 from your saved accounts?")
+                            .arg(name));
+                    if (result != QMessageBox::Yes)
+                    {
+                        return;
+                    }
+                    MoltorinoAuth::removeAccount(userId, token);
+                    this->refreshAccountsList();
+                });
+            this->accountsTable_->setCellWidget(row, 4, removeButton);
         }
     }
 
@@ -471,7 +560,7 @@ private:
         const auto trimmed = token.trimmed();
         if (trimmed.isEmpty())
         {
-            setLabelStatus(statusLabel, "No token was provided.", true);
+            setLabelStatus(statusLabel, "Enter a token first.", true);
             return;
         }
 
@@ -479,7 +568,7 @@ private:
         this->authValidationInFlight_ = true;
         QPointer<MoltorinoAuthDialog> guard(this);
         QPointer<QLabel> guardedStatus(statusLabel);
-        setLabelStatus(statusLabel, "Checking login...");
+        setLabelStatus(statusLabel, "Checking your sign in...");
         this->updateDeviceUi();
 
         MoltorinoAuth::addOrUpdateToken(
@@ -498,7 +587,7 @@ private:
                     const auto accessCount = modAccessCount(account);
                     setLabelStatus(
                         guardedStatus,
-                        QString("Added %1. You have mod access in %2 %3.")
+                        QString("Added %1. You have moderator access in %2 %3.")
                             .arg(name)
                             .arg(accessCount)
                             .arg(accessCount == 1 ? "channel" : "channels"),
@@ -518,7 +607,7 @@ private:
             },
             [guard, guardedStatus, generation](const QString &error) {
                 if (guard == nullptr ||
-                                    generation != guard->authValidationGeneration_)
+                    generation != guard->authValidationGeneration_)
                 {
                     return;
                 }
@@ -526,7 +615,7 @@ private:
                 guard->authValidationInFlight_ = false;
                 setLabelStatus(
                     guardedStatus,
-                    QString("Login validation failed: %1").arg(error),
+                    QString("Could not validate the sign in: %1").arg(error),
                     true);
                 guard->updateDeviceUi();
             });
@@ -543,12 +632,11 @@ private:
         box.setWindowFlags(box.windowFlags() | Qt::WindowStaysOnTopHint);
         box.setWindowTitle("Legacy Login Helper");
         box.setIcon(QMessageBox::Information);
-        box.setText(
-            "The legacy helper command was copied to your clipboard.\n\n"
-            "1. Twitch was opened in your browser.\n"
-            "2. Press F12 and open the Console tab.\n"
-            "3. Paste the copied command and press Enter.\n"
-            "4. Come back here and click Paste Token.");
+        box.setText("The legacy helper command is on your clipboard.\n\n"
+                    "1. Twitch is open in your browser.\n"
+                    "2. Press F12 and open the Console tab.\n"
+                    "3. Paste the command and press Enter.\n"
+                    "4. Come back here and select Paste token.");
 
         if (!opened)
         {
@@ -564,11 +652,11 @@ private:
         const auto clipboardText = getClipboardText().trimmed();
         if (clipboardText.isEmpty())
         {
-            setLabelStatus(
-                this->legacyStatusLabel_,
-                "Clipboard is empty. Use Device Login first, or Legacy Login "
-                "if Device Login does not work.",
-                true);
+            setLabelStatus(this->legacyStatusLabel_,
+                           "Your clipboard is empty. Use device login first, "
+                           "or use legacy "
+                           "login if device login does not work.",
+                           true);
             return;
         }
 
@@ -595,7 +683,7 @@ private:
         this->deviceCodeLabel_->setText(DEVICE_CODE_PLACEHOLDER);
         this->updateDeviceUi();
         setLabelStatus(this->deviceStatusLabel_,
-                       "Requesting a Twitch device activation code...");
+                       "Requesting a Twitch sign in code...");
 
         QUrlQuery body;
         body.addQueryItem("client_id", TWITCH_TV_CLIENT_ID);
@@ -609,7 +697,8 @@ private:
             .caller(this)
             .timeout(20000)
             .hideRequestBody()
-            .followRedirects(true)
+            .followRedirects(false)
+            .maximumResponseSize(64 * 1024)
             .header("Client-Id", TWITCH_TV_CLIENT_ID)
             .header("Accept", "application/json")
             .header("Content-Type", "application/x-www-form-urlencoded")
@@ -633,14 +722,21 @@ private:
                 const auto verificationUri =
                     json.value("verification_uri").toString().trimmed();
                 const auto intervalSeconds =
-                    std::max(3, json.value("interval").toInt(5));
+                    std::clamp(json.value("interval").toInt(5), 3, 60);
 
+                const QUrl verificationUrl(verificationUri);
                 if (deviceCode.isEmpty() || userCode.isEmpty() ||
-                    verificationUri.isEmpty())
+                    verificationUrl.scheme() != "https" ||
+                    (verificationUrl.host() != "www.twitch.tv" &&
+                     verificationUrl.host() != "twitch.tv") ||
+                    verificationUrl.path() != "/activate" ||
+                    !verificationUrl.userInfo().isEmpty() ||
+                    (verificationUrl.port(-1) != -1 &&
+                     verificationUrl.port(-1) != 443))
                 {
                     guard->cancelDeviceLogin(
-                        "Device login setup failed. Twitch did not return a "
-                        "usable activation code.");
+                        "Device login could not start. Twitch did not return a "
+                        "usable code.");
                     return;
                 }
 
@@ -655,8 +751,8 @@ private:
                     QDesktopServices::openUrl(QUrl(verificationUri));
                 setLabelStatus(
                     guard->deviceStatusLabel_,
-                    "Twitch Activate is open and the code is already copied. "
-                    "Paste it there, then approve access.");
+                    "Twitch Activate is open and the code is copied. Paste it "
+                    "there, then approve access.");
 
                 if (!opened)
                 {
@@ -686,9 +782,9 @@ private:
                 const auto body = QString::fromUtf8(result.getData()).trimmed();
                 guard->cancelDeviceLogin(
                     body.isEmpty()
-                        ? "Device login setup failed. Twitch did not return "
-                          "an activation code."
-                        : QString("Device login setup failed: %1")
+                        ? "Device login could not start. Twitch did not return "
+                          "a code."
+                        : QString("Device login could not start: %1")
                               .arg(body.left(200)));
             })
             .execute();
@@ -715,7 +811,8 @@ private:
             .caller(this)
             .timeout(20000)
             .hideRequestBody()
-            .followRedirects(true)
+            .followRedirects(false)
+            .maximumResponseSize(64 * 1024)
             .header("Client-Id", TWITCH_TV_CLIENT_ID)
             .header("Accept", "application/json")
             .header("Content-Type", "application/x-www-form-urlencoded")
@@ -777,7 +874,8 @@ private:
 
         if (error == "slow_down" || message == "slow_down")
         {
-            this->devicePollIntervalMs_ += 5000;
+            this->devicePollIntervalMs_ =
+                std::min(this->devicePollIntervalMs_ + 5000, 60000);
             setLabelStatus(this->deviceStatusLabel_,
                            "Twitch asked Moltorino to poll more slowly. "
                            "Still waiting for approval...");
@@ -817,11 +915,10 @@ private:
         this->deviceCodeLabel_->setText(DEVICE_CODE_PLACEHOLDER);
         this->updateDeviceUi();
 
-        setLabelStatus(this->deviceStatusLabel_,
-                       statusMessage.isEmpty()
-                           ? "Device Login canceled."
-                           : statusMessage,
-                       !statusMessage.isEmpty());
+        setLabelStatus(
+            this->deviceStatusLabel_,
+            statusMessage.isEmpty() ? "Device login canceled." : statusMessage,
+            !statusMessage.isEmpty());
     }
 
     void updateDeviceUi()
@@ -870,34 +967,42 @@ MoltorinoPage::MoltorinoPage()
     rootLayout->setContentsMargins(9, 6, 9, 0);
     rootLayout->setSpacing(4);
 
-    auto *tabBar = new QTabBar(this);
-    tabBar->setExpanding(false);
-    tabBar->setDocumentMode(true);
-    tabBar->setDrawBase(false);
-    rootLayout->addWidget(tabBar);
+    this->tabBar_ = new QTabBar(this);
+    this->tabBar_->setExpanding(false);
+    this->tabBar_->setDocumentMode(true);
+    this->tabBar_->setDrawBase(false);
+    rootLayout->addWidget(this->tabBar_);
 
     auto *stack = new QStackedWidget(this);
     rootLayout->addWidget(stack);
     this->setLayout(rootLayout);
 
-    auto *settingsTab = new QWidget(stack);
-    auto *settingsLayout = new QHBoxLayout(settingsTab);
-    settingsLayout->setContentsMargins(0, 0, 0, 0);
-    auto *view = GeneralPageView::withNavigation(settingsTab);
+    auto *generalTab = new QWidget(stack);
+    auto *generalLayout = new QHBoxLayout(generalTab);
+    generalLayout->setContentsMargins(0, 0, 0, 0);
+    auto *view = GeneralPageView::withNavigation(generalTab);
     this->settingsView_ = view;
-    settingsLayout->addWidget(view);
-    stack->addWidget(settingsTab);
-    tabBar->addTab("Settings");
+    generalLayout->addWidget(view);
+    stack->addWidget(generalTab);
+    this->tabBar_->addTab("General");
 
-    QObject::connect(tabBar, &QTabBar::currentChanged, stack,
+    auto *moderationTab = new QWidget(stack);
+    auto *moderationLayout = new QHBoxLayout(moderationTab);
+    moderationLayout->setContentsMargins(0, 0, 0, 0);
+    this->moderationView_ = GeneralPageView::withNavigation(moderationTab);
+    moderationLayout->addWidget(this->moderationView_);
+    stack->addWidget(moderationTab);
+    this->tabBar_->addTab("Moderation");
+
+    QObject::connect(this->tabBar_, &QTabBar::currentChanged, stack,
                      &QStackedWidget::setCurrentIndex);
 
     auto &s = *getSettings();
 
     view->addTitle("Authentication");
     view->addDescription(
-        "Logging in enables Moltorino features like pins, polls, "
-        "predictions, and channel points.");
+        "Sign in to use Moltorino features such as pins, polls, predictions, "
+        "and channel points.");
 
     auto *tokenControls = new QFrame(view);
     auto *tokenLayout = new QVBoxLayout(tokenControls);
@@ -910,11 +1015,11 @@ MoltorinoPage::MoltorinoPage()
 
     this->addAuthAccountButton_ = new QPushButton("Log In", tokenControls);
     this->addAuthAccountButton_->setToolTip(
-        "Log in or manage saved Moltorino accounts.");
+        "Sign in or manage your saved Moltorino accounts.");
     this->refreshAuthAccountsButton_ =
         new QPushButton("Refresh Accounts", tokenControls);
     this->refreshAuthAccountsButton_->setToolTip(
-        "Refresh saved accounts and moderator access.");
+        "Check your saved accounts and update moderator access.");
 
     authButtons->addWidget(this->addAuthAccountButton_);
     authButtons->addWidget(this->refreshAuthAccountsButton_);
@@ -928,21 +1033,18 @@ MoltorinoPage::MoltorinoPage()
 
     this->authStatusLabel_ = new QLabel(tokenControls);
     this->authStatusLabel_->setWordWrap(true);
-    this->authStatusLabel_->setStyleSheet("QLabel { font-weight: 600; }");
+    this->authStatusLabel_->setFont(
+        makeResolvedFont(this->authStatusLabel_->font(), QFont::DemiBold));
     tokenLayout->addWidget(this->authStatusLabel_);
 
-    view->addWidget(tokenControls, {"Device Login", "Paste Token",
-                                    "Legacy Browser", "Authentication"});
+    view->addWidget(tokenControls,
+                    {"Device login", "Paste token", "Legacy browser", "Sign in",
+                     "Authentication"});
 
     QObject::connect(this->addAuthAccountButton_, &QPushButton::clicked, this,
-                     [this] {
-                         this->openAuthDialog();
-                     });
+                     &MoltorinoPage::openAuthDialog);
     QObject::connect(this->refreshAuthAccountsButton_, &QPushButton::clicked,
-                     this,
-                     [this] {
-                         this->refreshAuthAccounts();
-                     });
+                     this, &MoltorinoPage::refreshAuthAccounts);
     s.customPinAuthToken.connect(
         [this](const QString &, auto) {
             this->updateAuthSummary();
@@ -961,15 +1063,20 @@ MoltorinoPage::MoltorinoPage()
     botBadgeLayout->setContentsMargins(0, 8, 0, 0);
     botBadgeLayout->setSpacing(8);
 
-    auto *botBadgeTitle = new QLabel("Bot Badge (Developer)", this->botBadgeFrame_);
-    botBadgeTitle->setStyleSheet(
-        "QLabel { font-size: 16px; font-weight: 700; color: #f5f7fa; }");
+    auto *botBadgeTitle =
+        new QLabel("Bot badge (developer)", this->botBadgeFrame_);
+    botBadgeTitle->setStyleSheet("QLabel { font-size: 16px; color: #f5f7fa; }");
+    botBadgeTitle->setFont(
+        makeResolvedFont(botBadgeTitle->font(), QFont::Bold));
     botBadgeLayout->addWidget(botBadgeTitle);
 
-    auto *botBadgeDescription = new QLabel(
-        "Set up the Chat Bot badge used by /bot.",
-        this->botBadgeFrame_);
+    auto *botBadgeDescription =
+        new QLabel("Set up the chat bot badge used by /bot. "
+                   "<a href=\"https://youtu.be/BKQkYA1_-3s\">Watch the setup "
+                   "tutorial</a>.",
+                   this->botBadgeFrame_);
     botBadgeDescription->setWordWrap(true);
+    botBadgeDescription->setOpenExternalLinks(true);
     botBadgeLayout->addWidget(botBadgeDescription);
 
     auto *botBadgeForm = new QFormLayout;
@@ -990,6 +1097,21 @@ MoltorinoPage::MoltorinoPage()
     this->botBadgeClientSecretEdit_->setPlaceholderText(
         "Twitch application Client Secret");
     botBadgeForm->addRow("Client Secret", this->botBadgeClientSecretEdit_);
+
+    auto *redirectEdit =
+        new QLineEdit("http://localhost/", this->botBadgeFrame_);
+    redirectEdit->setReadOnly(true);
+    redirectEdit->setToolTip(
+        "Use http://localhost/ as the redirect URL in Twitch.");
+    auto *copyRedirect = new QPushButton("Copy URL", this->botBadgeFrame_);
+    auto *redirectRow = new QHBoxLayout;
+    redirectRow->setContentsMargins(0, 0, 0, 0);
+    redirectRow->addWidget(redirectEdit, 1);
+    redirectRow->addWidget(copyRedirect);
+    botBadgeForm->addRow("Redirect URL", redirectRow);
+    QObject::connect(copyRedirect, &QPushButton::clicked, this, [] {
+        crossPlatformCopy(QStringLiteral("http://localhost/"));
+    });
 
     botBadgeLayout->addLayout(botBadgeForm);
 
@@ -1016,15 +1138,15 @@ MoltorinoPage::MoltorinoPage()
     this->botBadgeIdentityLabel_->setWordWrap(true);
     botBadgeLayout->addWidget(this->botBadgeIdentityLabel_);
 
-    SettingWidget::checkbox("Enable Bot Badge mode", s.botBadgeAlwaysUse)
-        ->setTooltip("When the selected account is the configured bot account, "
-                     "send normal chat messages through the Bot Badge.")
+    SettingWidget::checkbox("Enable bot badge mode", s.botBadgeAlwaysUse)
+        ->setTooltip("When the selected account is the bot account, send its "
+                     "chat messages with the bot badge.")
         ->addToLayout(botBadgeLayout);
 
-    SettingWidget::checkbox("Bot mode overrides all accounts",
+    SettingWidget::checkbox("Use the bot account for every message",
                             s.botBadgeOverrideAllAccounts)
-        ->setTooltip("When bot mode is on, send normal messages through the "
-                     "bot badge account even if another account is selected.")
+        ->setTooltip("When bot badge mode is on, use the bot account even when "
+                     "another account is selected.")
         ->addToLayout(botBadgeLayout);
 
     QObject::connect(this->botBadgeClientIdEdit_, &QLineEdit::editingFinished,
@@ -1067,7 +1189,11 @@ MoltorinoPage::MoltorinoPage()
 
     view->addTitle("Pinned Messages");
     view->addDescription(
-        "Pinned message banner and pin action options.");
+        "Choose how pinned messages appear and behave in chat.");
+
+    this->moderationView_->addTitle("Pin controls");
+    this->moderationView_->addDescription(
+        "Pin messages from chat or with the /pin command.");
 
     auto addBannerScaleDropdown = [view](const QString &label, auto &setting,
                                          const QString &tooltip) {
@@ -1092,12 +1218,13 @@ MoltorinoPage::MoltorinoPage()
 
     SettingWidget::checkbox("Move Pin actions to Moderate menu",
                             s.movePinToModerateMenu)
-        ->setTooltip("Put Pin and Unpin inside the Moderate submenu in the "
-                     "message menu.")
-        ->addTo(*view);
+        ->setTooltip("Put Pin and Unpin in the Moderate submenu of the message "
+                     "menu.")
+        ->addTo(*this->moderationView_);
 
-    view->addDropdown<int>(
-            "Show pin button on mods and broadcaster",
+    this->moderationView_
+        ->addDropdown<int>(
+            "Show the pin button for moderators and the broadcaster",
             {"Never", "In moderation mode", "Always"},
             s.showPinButtonOnModeratorsMode,
             [](auto val) {
@@ -1123,37 +1250,38 @@ MoltorinoPage::MoltorinoPage()
                 return 1;
             },
             false)
-        ->setToolTip("Controls the inline Pin action beside moderator and "
-                     "broadcaster messages.");
+        ->setToolTip(
+            "Choose when the inline Pin action appears beside moderator "
+            "and broadcaster messages.");
 
     SettingWidget::checkbox("Show pinned messages",
                             s.enablePinnedMessages)
         ->setTooltip("Show the pinned message banner above chat.")
         ->addTo(*view);
 
-    SettingWidget::checkbox("Always expand long pinned messages",
+    SettingWidget::checkbox("Expand long pinned messages automatically",
                             s.alwaysExpandPinnedMessages)
-        ->setTooltip("Automatically show the full content of long pins without "
-                     "requiring a click.")
+        ->setTooltip("Show the full content of long pins without requiring a "
+                     "click.")
         ->addTo(*view);
 
     SettingWidget::checkbox("Enable /pin <message text>",
                             s.enablePinCommandMessages)
-        ->setTooltip(
-            "Let /pin followed by text send that message and pin it.")
-        ->addTo(*view);
+        ->setTooltip("Let /pin send and pin the text you provide.")
+        ->addTo(*this->moderationView_);
 
     SettingWidget::checkbox("Enable /pin <username>",
                             s.enablePinUserCommand)
-        ->setTooltip(
-            "Let /pin followed by a username pin that user's latest message.")
-        ->addTo(*view);
+        ->setTooltip("Let /pin find and pin the latest message from the "
+                     "username you provide.")
+        ->addTo(*this->moderationView_);
 
     SettingWidget::checkbox("Require @ for /pin <username>",
                             s.requireAtForPinUserCommand)
         ->setTooltip(
-            "Only /pin @username can search for a user's latest message. Bare names are not treated as usernames.")
-        ->addTo(*view);
+            "Only /pin @username searches for a user's latest message. "
+            "A bare name is treated as text.")
+        ->addTo(*this->moderationView_);
 
     addBannerScaleDropdown(
         "Pinned message scale", s.pinnedMessageScale,
@@ -1162,7 +1290,8 @@ MoltorinoPage::MoltorinoPage()
         "Pinned content scale", s.pinnedContentScale,
         "Make pinned banner controls, labels, and buttons larger or smaller.");
 
-    view->addDropdown<int>(
+    this->moderationView_
+        ->addDropdown<int>(
             "Default pin duration",
             {"Indefinite", "5 minutes", "10 minutes", "20 minutes",
              "30 minutes"},
@@ -1200,8 +1329,8 @@ MoltorinoPage::MoltorinoPage()
             "What the close button does on a pinned message banner.");
 
     view->addDropdown<int>(
-            "Timer display",
-            {"Time + Countdown", "Time only", "Countdown only", "Hover only",
+            "Pin timer display",
+            {"Time and countdown", "Time only", "Countdown only", "On hover",
              "Hidden"},
             s.pinTimerDisplay,
             [](auto val) {
@@ -1212,11 +1341,11 @@ MoltorinoPage::MoltorinoPage()
                     case 2:
                         return QString("Countdown only");
                     case 3:
-                        return QString("Hover only");
+                        return QString("On hover");
                     case 4:
                         return QString("Hidden");
                     default:
-                        return QString("Time + Countdown");
+                        return QString("Time and countdown");
                 }
             },
             [](auto args) {
@@ -1228,7 +1357,7 @@ MoltorinoPage::MoltorinoPage()
                 {
                     return 2;
                 }
-                if (args.value == "Hover only")
+                if (args.value == "On hover")
                 {
                     return 3;
                 }
@@ -1261,8 +1390,9 @@ MoltorinoPage::MoltorinoPage()
         ->setTooltip("Show a chat message when a moderator unpins something.")
         ->addTo(*view);
 
-    view->addTitle("Poll and Prediction");
-    view->addDescription("Poll, prediction, and banner behavior options.");
+    view->addTitle("Polls and predictions");
+    view->addDescription(
+        "Choose how polls, predictions, and their banners behave.");
 
     SettingWidget::checkbox("Show predictions",
                             s.enablePredictions)
@@ -1283,19 +1413,42 @@ MoltorinoPage::MoltorinoPage()
         "Poll banner content scale", s.pollBannerContentScale,
         "Make poll banner text larger or smaller.");
 
-    view->addDropdown<int>(
-            "Moderator prediction banner click",
-            {"Open betting view", "Open manage view"}, s.predictionModAction,
+    this->moderationView_->addTitle("Channel controls");
+    this->moderationView_->addDescription(
+        "Prediction, raid, and stream controls for channels you manage.");
+
+    this->moderationView_
+        ->addDropdown<int>(
+            "Prediction banner click for moderators",
+            {"Open betting view", "Open moderation view"},
+            s.predictionModAction,
             [](auto val) {
-                return val == 1 ? QString("Open manage view")
+                return val == 1 ? QString("Open moderation view")
                                 : QString("Open betting view");
             },
             [](auto args) {
-                return args.value.contains("manage") ? 1 : 0;
+                return args.value.contains("moderation") ? 1 : 0;
             },
             false)
         ->setToolTip(
-            "What opens when a moderator clicks a prediction banner.");
+            "Choose what opens when a moderator clicks a prediction banner.");
+
+    SettingWidget::checkbox("Show prediction button", s.showPredictionButton)
+        ->setTooltip("Show the prediction button next to the message input.")
+        ->addTo(*this->moderationView_);
+
+    SettingWidget::checkbox("Show the raid countdown above the input",
+                            s.showRaidStatusAboveInput)
+        ->setTooltip("Show the raid target, viewer count, and countdown above "
+                     "the message input.")
+        ->addTo(*this->moderationView_);
+
+    SettingWidget::checkbox(
+        "Show the edit stream info button in the chat header",
+        s.showEditStreamInfoButtonInSplitHeader)
+        ->setTooltip("Show the edit stream info shortcut in the chat header "
+                     "when broadcaster or editor access is available.")
+        ->addTo(*this->moderationView_);
 
     SettingWidget::checkbox("Show prediction chat messages",
                             s.showPredictionSystemMessages)
@@ -1303,16 +1456,15 @@ MoltorinoPage::MoltorinoPage()
                      "locked, paid out, or refunded.")
         ->addTo(*view);
 
-    SettingWidget::checkbox("Close prediction menu after betting",
+    SettingWidget::checkbox("Close prediction menu after an action",
                             s.predictionAutoCloseDialog)
-        ->setTooltip("Automatically close the prediction menu after "
-                     "successfully placing a bet.")
+        ->setTooltip("Close after creating, resolving, deleting or betting on "
+                     "a prediction.")
         ->addTo(*view);
 
-    SettingWidget::checkbox("Close poll menu after voting",
+    SettingWidget::checkbox("Close poll menu after an action",
                             s.pollAutoCloseDialog)
-        ->setTooltip("Automatically close the poll menu after successfully "
-                     "casting a vote.")
+        ->setTooltip("Close after creating a poll or casting a vote.")
         ->addTo(*view);
 
     view->addDropdown<int>(
@@ -1401,21 +1553,23 @@ MoltorinoPage::MoltorinoPage()
         ->setToolTip("Choose how pinned, poll, and prediction banners share "
                      "the space above chat.");
 
-    view->addTitle("Points and Rewards");
-    view->addDescription("Channel points balance and rewards menu options.");
+    view->addTitle("Channel points and rewards");
+    view->addDescription(
+        "Choose how your points balance and rewards menu behave.");
 
     SettingWidget::checkbox("Show points balance",
                             s.enableChannelPointsDisplay)
         ->setTooltip("Show your channel points next to the message input.")
         ->addTo(*view);
 
-    SettingWidget::checkbox("Open rewards menu from points balance",
+    SettingWidget::checkbox("Open rewards when you click your points",
                             s.openRewardsWithChannelPointsClick)
-        ->setTooltip("When off, clicking the balance only refreshes points. "
-                     "Use /redeem to open rewards.")
+        ->setTooltip(
+            "When this is off, clicking your balance only refreshes it. "
+            "Use /redeem to open the rewards menu.")
         ->addTo(*view);
 
-    SettingWidget::checkbox("Close rewards menu on focus loss",
+    SettingWidget::checkbox("Close rewards when you click away",
                             s.rewardsCloseOnFocusLoss)
         ->setTooltip("Close the rewards popup when you click away from it.")
         ->addTo(*view);
@@ -1427,18 +1581,70 @@ MoltorinoPage::MoltorinoPage()
 
     SettingWidget::checkbox("Return to rewards list after redeeming",
                             s.rewardsReturnToListAfterRedeem)
-        ->setTooltip("After a reward is redeemed, go back to the rewards "
-                     "grid instead of staying on the current picker.")
+        ->setTooltip("After a reward is redeemed, return to the rewards list "
+                     "instead of staying on the current picker.")
         ->addTo(*view);
 
-    view->addTitle("Input Box");
+    SettingWidget::checkbox("Show Gigantify emotes in chat",
+                            s.enableGigantifyEmotes)
+        ->setTooltip(
+            "Show Twitch's Gigantify reward and enlarge its selected emote in "
+            "chat. The /gigantify command still works when this is off.")
+        ->addTo(*view);
+
+    SettingWidget::checkbox("Show Twitch GIFs in chat", s.enableTwitchGifs)
+        ->setTooltip("Show animated GIFs sent by Twitch subscribers in chat. "
+                     "When disabled, they appear as their text description.")
+        ->addTo(*view);
+
+    SettingWidget::checkbox("Show Twitch GIFs as emotes", s.twitchGifsAsEmotes)
+        ->setTooltip("Use the normal emote size and keep GIF details on hover.")
+        ->addTo(*view);
+
+    SettingWidget::checkbox("Use high quality Twitch GIFs",
+                            s.highQualityTwitchGifs)
+        ->setTooltip("Load sharper GIFs at the same display size. Uses more "
+                     "memory and bandwidth.")
+        ->addTo(*view);
+
+    auto *gifSize = view->addDropdown<float>(
+        "Twitch GIF size", {"0.5x", "Default", "1x", "1.25x", "1.5x", "2x"},
+        s.twitchGifScale,
+        [](auto val) {
+            if (val == 0.75f)
+            {
+                return QString("Default");
+            }
+            return QString::number(val) + "x";
+        },
+        [](auto args) {
+            return std::clamp(fuzzyToFloat(args.value, 0.75f), 0.5f, 2.0f);
+        },
+        true,
+        "Scale Twitch GIFs from 0.5x to 2x when they are not shown as emotes.");
+    gifSize->setToolTip(
+        "Scale Twitch GIFs from 0.5x to 2x when they are not shown as emotes.");
+    gifSize->setEnabled(!s.twitchGifsAsEmotes);
+    s.twitchGifsAsEmotes.connect(
+        [gifSize](bool value, auto) {
+            gifSize->setEnabled(!value);
+        },
+        this->managedConnections_);
+
+    view->addTitle("Message input");
     view->addDescription(
-        "Chat input buttons, typing helpers, and quick controls.");
+        "Choose which buttons and typing helpers appear beside the input.");
 
     SettingWidget::checkbox("Show message input placeholder",
                             s.showInputPlaceholder)
+        ->setTooltip("Show helper text while the message input is empty.")
+        ->addTo(*view);
+
+    SettingWidget::checkbox("Show where messages are sent",
+                            s.showMultiChannelDestinationSelector)
         ->setTooltip(
-            "Show helper text when the message input is empty.")
+            "Show where messages will be sent in a multichannel chat. When "
+            "hidden, you can still change it from the input's context menu.")
         ->addTo(*view);
 
     SettingWidget::checkbox("Show command suggestions while typing",
@@ -1447,112 +1653,286 @@ MoltorinoPage::MoltorinoPage()
                      "message input.")
         ->addTo(*view);
 
-    SettingWidget::checkbox("Hide unavailable mod commands",
-                            s.hideUnavailableModCommands)
+    SettingWidget::checkbox("Show command hints in the message box",
+                            s.showCommandArgumentHints)
         ->setTooltip(
-            "Hide moderator only commands from tab completion when they are "
-            "not available in the current channel.")
+            "Keep the remaining command arguments visible as you type.")
         ->addTo(*view);
 
-    SettingWidget::checkbox("Show prediction button", s.showPredictionButton)
-        ->setTooltip("Show the prediction button next to the message input.")
+    SettingWidget::checkbox("Show emotes while cycling with Tab",
+                            s.showEmoteTabCarousel)
+        ->setTooltip("See the emotes you'll cycle through when you press Tab.")
+        ->addTo(*view);
+
+    SettingWidget::dropdown("Emote preview size", s.emoteTabCarouselSize,
+                            {{"Compact", "compact"},
+                             {"Standard", "standard"},
+                             {"Large", "large"},
+                             {"Extra large", "extra-large"}})
+        ->setTooltip("Choose how much room the preview takes above the input.")
+        ->conditionallyEnabledBy(s.showEmoteTabCarousel)
+        ->addTo(*view);
+
+    SettingWidget::checkbox("Show emote names", s.showEmoteTabCarouselNames)
+        ->setTooltip("Show each emote's name beneath it.")
+        ->conditionallyEnabledBy(s.showEmoteTabCarousel)
+        ->addTo(*view);
+
+    SettingWidget::checkbox("Include Potat commands in suggestions",
+                            s.includePotatCommands)
+        ->setTooltip("Suggest Potat # commands after you type #.")
+        ->addTo(*view);
+
+    SettingWidget::checkbox("Show Potat command aliases",
+                            s.showPotatCommandAliases)
+        ->setTooltip("Include shortcuts such as #ga in Potat suggestions.")
+        ->conditionallyEnabledBy(s.includePotatCommands)
+        ->addTo(*view);
+
+    SettingWidget::checkbox("Hide unavailable moderator commands",
+                            s.hideUnavailableModCommands)
+        ->setTooltip(
+            "Hide moderator commands from completion when they are not "
+            "available in the current channel.")
         ->addTo(*view);
 
     SettingWidget::checkbox("Show poll button", s.showPollButton)
         ->setTooltip("Show the poll button next to the message input.")
         ->addTo(*view);
 
+    SettingWidget::checkbox("Hide the emoji button", s.hideEmojiButton)
+        ->setTooltip(
+            "Hide the emoji and emote picker beside the message input.")
+        ->addTo(*view);
+
+    SettingWidget::checkbox("Show Vanity button", s.showVanityButton)
+        ->setTooltip(
+            "Show a shortcut beside the message input for changing your "
+            "badges, chat color, and 7TV cosmetics.")
+        ->addTo(*view);
+
+    view->addTitle("Translation");
+    view->addDescription("Choose how Moltorino translates messages.");
+
+    SettingWidget::dropdown("Translation service", s.translationProvider,
+                            translationProviderItems())
+        ->setTooltip("Choose the service Moltorino uses for translations.")
+        ->addTo(*view);
+
+    view->addButton("Set up translation", [this] {
+        auto *dialog = new TranslationProviderDialog(this);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->show();
+    });
+
     SettingWidget::checkbox("Show translation button",
                             s.showOutgoingTranslationButton)
         ->setTooltip("Show the chat input translation button.")
         ->addTo(*view);
 
-    SettingWidget::dropdown("Outgoing translation default",
+    SettingWidget::dropdown("When sending a translation",
                             s.outgoingTranslationMode,
                             outgoingTranslationModeItems())
-        ->setTooltip("Default outgoing translation mode for channels that "
-                     "do not have their own saved input setting. Preview only "
-                     "shows a draft translation without changing what Enter "
-                     "sends. Translate on send sends the translated text.")
+        ->setTooltip("Preview a translation first or send it immediately.")
         ->addTo(*view);
 
-    SettingWidget::dropdown("Default translated message language",
+    SettingWidget::dropdown("Translate outgoing messages into",
                             s.outgoingTranslationTargetLanguage,
                             translationLanguageItems())
-        ->setTooltip("Default target language for outgoing translated "
-                     "messages in channels without their own saved input "
-                     "setting.")
+        ->setTooltip("Choose the default language for outgoing translations.")
         ->addTo(*view);
 
-    SettingWidget::checkbox("Hide emoji button", s.hideEmojiButton)
-        ->setTooltip("Hide the emoji/emote picker button next to the message "
-                     "input.")
+    SettingWidget::checkbox("Add Translate to message menus",
+                            s.showTranslateMessageContextAction)
+        ->setTooltip("Add a Translate action to chat message menus.")
         ->addTo(*view);
 
-    SettingWidget::checkbox("Show raid countdown above chat input",
-                            s.showRaidStatusAboveInput)
-        ->setTooltip("Show the raid target, viewer count, and countdown above "
-                     "the message input.")
+    SettingWidget::dropdown("Translate chat messages into",
+                            s.messageTranslationTargetLanguage,
+                            translationLanguageItems())
+        ->setTooltip("Choose the language used for message translations.")
         ->addTo(*view);
 
-    view->addTitle("Moderation");
-    view->addDescription("Moderation tools and chat safety options.");
+    SettingWidget::checkbox("Mark translated messages",
+                            s.showTranslatedMessageIndicator)
+        ->setTooltip("Show a small translated label after translated messages.")
+        ->addTo(*view);
+
+    this->moderationView_->addTitle("Commercials");
+    this->moderationView_
+        ->addDropdown<int>(
+            "Default commercial duration",
+            {"30 seconds", "60 seconds", "90 seconds", "120 seconds",
+             "150 seconds", "180 seconds"},
+            s.defaultCommercialDuration,
+            [](int value) {
+                return QString("%1 seconds")
+                    .arg(ChannelManagement::isValidCommercialLength(value)
+                             ? value
+                             : 30);
+            },
+            [](auto args) {
+                return args.value.section(' ', 0, 0).toInt();
+            },
+            false)
+        ->setToolTip("Used when /commercial has no duration. An explicit "
+                     "duration, such as /commercial 60, overrides this.");
+
+    this->moderationView_->addTitle("AutoMod");
+    this->moderationView_->addDescription(
+        "Choose how held messages appear in chat and in the /automod review "
+        "tab.");
+
+    SettingWidget::checkbox("Use the advanced AutoMod layout in chat",
+                            s.advancedAutoModInChat)
+        ->setTooltip(
+            "Turn this off to use the compact AutoMod layout. The /automod "
+            "review tab always keeps its advanced controls.")
+        ->addTo(*this->moderationView_);
+
+    SettingWidget::checkbox("Show the AutoMod reason",
+                            s.autoModReviewShowReason)
+        ->setTooltip(
+            "Show the AutoMod category and level at the top of each review.")
+        ->addTo(*this->moderationView_);
+
+    this->moderationView_->addSubtitle("Review queue");
+    auto *queueOrder = this->moderationView_->addDropdown<int>(
+        "Message order", {"Oldest at top", "Newest at top"},
+        s.autoModReviewQueueOrder,
+        [](auto value) {
+            return value == 0 ? QString("Newest at top")
+                              : QString("Oldest at top");
+        },
+        [](auto args) {
+            return args.value == "Oldest at top" ? 1 : 0;
+        },
+        false);
+    queueOrder->setToolTip(
+        "By default, new held messages appear at the bottom, like chat.");
+
+    auto *scrollPosition = this->moderationView_->addDropdown<int>(
+        "Automatic scrolling",
+        {"Follow new messages", "Stay at top", "Stay at bottom"},
+        s.autoModReviewScrollPosition,
+        [](auto value) {
+            if (value == 1)
+            {
+                return QString("Stay at top");
+            }
+            if (value == 2)
+            {
+                return QString("Stay at bottom");
+            }
+            return QString("Follow new messages");
+        },
+        [](auto args) {
+            return args.value == "Stay at top"      ? 1
+                   : args.value == "Stay at bottom" ? 2
+                                                    : 0;
+        },
+        false);
+    scrollPosition->setToolTip(
+        "Follow new messages wherever they appear, or keep the view at a "
+        "chosen end of the queue. Scrolling away pauses automatic scrolling "
+        "until you return to that end.");
+
+    SettingWidget::checkbox("Show keyboard shortcuts",
+                            s.autoModReviewShowShortcutHints)
+        ->setTooltip(
+            "Show the keyboard guide beneath the selected AutoMod review. "
+            "Shortcuts work while the /automod input is empty.")
+        ->addTo(*this->moderationView_);
+
+    this->moderationView_->addSubtitle("User history");
+    SettingWidget::checkbox("Show earlier messages from the same user",
+                            s.autoModReviewShowContext)
+        ->setTooltip(
+            "Show a few matching messages from before the held message when "
+            "they are still in the local chat buffer.")
+        ->addTo(*this->moderationView_);
+
+    auto *contextOrder = this->moderationView_->addDropdown<int>(
+        "User history order", {"Newest at top", "Oldest at top"},
+        s.autoModReviewContextOrder,
+        [](auto value) {
+            return value == 1 ? QString("Oldest at top")
+                              : QString("Newest at top");
+        },
+        [](auto args) {
+            return args.value == "Oldest at top" ? 1 : 0;
+        },
+        false);
+    contextOrder->setToolTip(
+        "Order the user's earlier messages within each review. This does not "
+        "change the review queue.");
+    contextOrder->setEnabled(s.autoModReviewShowContext);
+    s.autoModReviewShowContext.connect(
+        [contextOrder](bool value, auto) {
+            contextOrder->setEnabled(value);
+        },
+        this->managedConnections_);
+
+    this->moderationView_->addTitle("Repeated messages");
+    this->moderationView_->addDescription(
+        "Spot repeated or nearly identical messages while you moderate chat.");
 
     SettingWidget::checkbox("Show repeated message counters",
                             s.enableRepeatedMessageDetector)
         ->setTooltip("Show repeated or very similar messages with an inline "
-                     "counter such as x2, x3, or x4.")
-        ->addTo(*view);
+                     "counter such as x2 or x3.")
+        ->addTo(*this->moderationView_);
 
-    SettingWidget::checkbox("Show only in moderation mode",
+    SettingWidget::checkbox("Only show counters in moderation mode",
                             s.repeatedMessagesShowOnlyModerationMode)
-        ->setTooltip("Only show repetition counters when the inline "
-                     "mod buttons are visible.")
-        ->addTo(*view);
+        ->setTooltip("Only show counters while inline moderation buttons are "
+                     "visible.")
+        ->addTo(*this->moderationView_);
 
     SettingWidget::checkbox("Show counters in usercards",
                             s.repeatedMessagesShowInUsercards)
-        ->setTooltip("Show already detected repeat counters beside cached "
-                     "messages in usercards.")
-        ->addTo(*view);
+        ->setTooltip(
+            "Show repeat counters beside cached messages in usercards.")
+        ->addTo(*this->moderationView_);
 
     SettingWidget::checkbox("Only in channels where I can moderate",
                             s.repeatedMessagesOnlyModChannels)
-        ->setTooltip("Only show repeat counters in channels where you can "
-                     "moderate.")
-        ->addTo(*view);
+        ->setTooltip("Only show counters in channels where you have moderation "
+                     "access.")
+        ->addTo(*this->moderationView_);
 
     SettingWidget::checkbox("Ignore VIPs", s.repeatedMessagesIgnoreVips)
         ->setTooltip("Do not mark repeated messages from VIPs. Moderators and "
                      "the broadcaster are always ignored.")
-        ->addTo(*view);
+        ->addTo(*this->moderationView_);
 
-    view->addDropdown<int>(
+    this->moderationView_
+        ->addDropdown<int>(
             "Similarity sensitivity",
-            {"Loose", "Soft", "Default", "Strict", "Exact only"},
+            {"Lenient", "Balanced", "Default", "Strict", "Exact matches only"},
             s.repeatedMessagesSensitivity,
             [](auto val) {
                 switch (val)
                 {
                     case 0:
-                        return QString("Loose");
+                        return QString("Lenient");
                     case 1:
-                        return QString("Soft");
+                        return QString("Balanced");
                     case 3:
                         return QString("Strict");
                     case 4:
-                        return QString("Exact only");
+                        return QString("Exact matches only");
                     case 2:
                     default:
                         return QString("Default");
                 }
             },
             [](auto args) {
-                if (args.value == "Loose")
+                if (args.value == "Lenient")
                 {
                     return 0;
                 }
-                if (args.value == "Soft")
+                if (args.value == "Balanced")
                 {
                     return 1;
                 }
@@ -1560,7 +1940,7 @@ MoltorinoPage::MoltorinoPage()
                 {
                     return 3;
                 }
-                if (args.value == "Exact only")
+                if (args.value == "Exact matches only")
                 {
                     return 4;
                 }
@@ -1573,71 +1953,42 @@ MoltorinoPage::MoltorinoPage()
     SettingWidget::intInput("Repetition threshold",
                             s.repeatedMessagesRepetitionThreshold,
                             {.min = 2, .max = 20})
-        ->setTooltip("How many matching messages are required before the "
-                     "counter appears.")
-        ->addTo(*view);
+        ->setTooltip("Choose how many matching messages trigger the counter.")
+        ->addTo(*this->moderationView_);
 
-    SettingWidget::colorButton("Counter color",
-                               s.repeatedMessagesCounterColor)
-        ->setTooltip("Text color for the inline repeated message counter.")
-        ->addTo(*view);
+    SettingWidget::colorButton("Counter color", s.repeatedMessagesCounterColor)
+        ->setTooltip("Choose the color of the inline repeat counter.")
+        ->addTo(*this->moderationView_);
 
-    view->addDropdown<int>(
-            "Show delete button on my messages",
-            {"Never", "In moderation mode", "Always"},
-            s.showSelfDeleteButton,
-            [](auto val) {
-                switch (val)
-                {
-                    case 0:
-                        return QString("Never");
-                    case 2:
-                        return QString("Always");
-                    default:
-                        return QString("In moderation mode");
-                }
-            },
-            [](auto args) {
-                if (args.value == "Never")
-                {
-                    return 0;
-                }
-                if (args.value == "Always")
-                {
-                    return 2;
-                }
-                return 1;
-            },
-            false)
-        ->setToolTip("Controls the inline Delete action beside messages sent "
-                     "by the selected account.");
+    this->moderationView_->addTitle("Bulk moderation");
+    this->moderationView_->addDescription(
+        "Preview and run bulk moderation with /nuke.");
 
-    SettingWidget::checkbox("Show /nuke target preview while typing",
+    SettingWidget::checkbox("Preview /nuke targets while typing",
                             s.nukePreviewEnabled)
-        ->setTooltip("Highlight matching messages while you type a /nuke "
-                     "command.")
-        ->addTo(*view);
+        ->setTooltip("Highlight messages that match the /nuke command as you "
+                     "type it.")
+        ->addTo(*this->moderationView_);
 
-    SettingWidget::checkbox("Show /nuke summary when it finishes",
-                            s.nukeShowSummary)
-        ->setTooltip("Show one compact chat message after /nuke finishes.")
-        ->addTo(*view);
+    SettingWidget::checkbox("Show a summary after /nuke", s.nukeShowSummary)
+        ->setTooltip("Show one compact chat message when /nuke finishes.")
+        ->addTo(*this->moderationView_);
 
-    SettingWidget::checkbox("Skip VIPs when using /nuke", s.nukeSkipVips)
-        ->setTooltip("Moderators and the broadcaster are always skipped. "
-                     "Enable this if VIPs should be protected too.")
-        ->addTo(*view);
+    SettingWidget::checkbox("Protect VIPs when using /nuke", s.nukeSkipVips)
+        ->setTooltip("Moderators and the broadcaster are always protected. "
+                     "Turn this on to protect VIPs too.")
+        ->addTo(*this->moderationView_);
 
     const auto nukeMessageTooltip = QStringLiteral(
-        "Message Twitch shows for /nuke timeouts and bans. Leave empty to "
-        "send no message.");
+        "Message Twitch sends for /nuke timeouts and bans. Leave this blank "
+        "to send no message.");
     auto *nukeMessageRow = new QWidget;
     nukeMessageRow->setMinimumWidth(0);
     auto *nukeMessageLayout = new QHBoxLayout(nukeMessageRow);
     nukeMessageLayout->setContentsMargins(0, 0, 0, 0);
     nukeMessageLayout->setSpacing(8);
 
-    auto *nukeMessageLabel = new QLabel("Nuke mod message:");
+    auto *nukeMessageLabel = new QLabel("Message for /nuke actions:");
     nukeMessageLabel->setMinimumWidth(0);
     nukeMessageLabel->setSizePolicy(QSizePolicy::Preferred,
                                     QSizePolicy::Fixed);
@@ -1645,7 +1996,7 @@ MoltorinoPage::MoltorinoPage()
 
     auto *nukeMessageInput = new QLineEdit;
     nukeMessageInput->setText(s.nukeModerationMessage);
-    nukeMessageInput->setPlaceholderText("NUKED!!!");
+    nukeMessageInput->setPlaceholderText("Optional moderation message");
     nukeMessageInput->setToolTip(nukeMessageTooltip);
     {
         const auto charWidth =
@@ -1675,165 +2026,411 @@ MoltorinoPage::MoltorinoPage()
             }
         },
         this->managedConnections_, false);
-    view->addWidget(nukeMessageRow,
-                    {"Nuke mod message", "Nuke timeout ban message"});
+    this->moderationView_->addWidget(
+        nukeMessageRow, {"Message for /nuke actions", "Nuke action message"});
+
+    view->addTitle("Chatter list");
+    SettingWidget::checkbox("Show chatter list in all Twitch channels",
+                            s.showChatterListInAllTwitchChannels)
+        ->setTooltip(
+            "Show the chatter list button even when you are not a moderator.")
+        ->addTo(*view);
+    SettingWidget::dropdown("Chatter list source", s.chatterListDataMode,
+                            {{"Twitch and Tackling", "best"},
+                             {"Twitch only", "twitch"},
+                             {"Tackling only", "community"},
+                             {"Chat session only", "local"}})
+        ->setTooltip(
+            "Choose the API used for the chatter list. Tackling provides the "
+            "extended list. Twitch requires moderator access. All choices "
+            "include chatters seen in your chat session. Refresh or reopen "
+            "the list after changing its source.")
+        ->addTo(*view);
 
     view->addTitle("Client");
     view->addDescription(
         "Twitch chat behavior, compatibility, and client experience options.");
 
-    SettingWidget::checkbox("Send messages like Twitch Web",
+    view->addDropdown<int>(
+            "Show a delete button on my messages",
+            {"Never", "In moderation mode", "Always"}, s.showSelfDeleteButton,
+            [](auto val) {
+                switch (val)
+                {
+                    case 0:
+                        return QString("Never");
+                    case 2:
+                        return QString("Always");
+                    default:
+                        return QString("In moderation mode");
+                }
+            },
+            [](auto args) {
+                if (args.value == "Never")
+                {
+                    return 0;
+                }
+                if (args.value == "Always")
+                {
+                    return 2;
+                }
+                return 1;
+            },
+            false)
+        ->setToolTip("Choose when the inline Delete action appears beside "
+                     "messages sent by the selected account.");
+
+    SettingWidget::checkbox("Thin tab lines", s.thinTabLines)
+        ->setTooltip("Thinner lines with less space above tabs.")
+        ->addTo(*view);
+
+    SettingWidget::checkbox("Continuous background across splits",
+                            s.continuousSplitBackground)
+        ->addKeywords({"wallpaper", "image", "video"})
+        ->addTo(*view);
+
+    SettingWidget::checkbox("Make #channel names clickable", s.linkChannelNames)
+        ->setTooltip("Open Twitch channels in an existing tab or a new tab.")
+        ->addTo(*view);
+
+    SettingWidget::checkbox("Correct ASCII art wrapping", s.wrapAsciiArt)
+        ->setTooltip("Wrap ASCII art at Twitch web chat's width.")
+        ->addTo(*view);
+
+    SettingWidget::checkbox("Show Bluzyrino badges", s.showBadgesBluzyrino)
+        ->setTooltip("Applies to everyone's badges on this device. Manage your "
+                     "own badge visibility in Vanity.")
+        ->addTo(*view);
+
+    SettingWidget::checkbox("Send messages as Twitch Web",
                             s.spoofIrcMessagesAsWeb)
         ->setTooltip("Make normal chat messages behave more like messages "
                      "sent from Twitch's website.")
         ->addTo(*view);
 
-    SettingWidget::checkbox("Color messages by chat app",
-                            s.showClientDetectionHighlights)
-        ->setTooltip("Color messages from Twitch Web, Android, or iOS.")
+    const std::vector<std::pair<QString, QVariant>> clientDetectionModes{
+        {"Off", "off"},
+        {"Highlight messages", "highlight"},
+        {"Show a platform badge", "icon"},
+        {"Highlight and show a badge", "both"},
+    };
+    const auto currentClientDetectionMode =
+        s.clientDetectionDisplayMode.getValue().trimmed().toLower();
+    if (currentClientDetectionMode != QLatin1String("off") &&
+        currentClientDetectionMode != QLatin1String("highlight") &&
+        currentClientDetectionMode != QLatin1String("icon") &&
+        currentClientDetectionMode != QLatin1String("both"))
+    {
+        s.clientDetectionDisplayMode =
+            s.showClientDetectionHighlights.getValue() ? "highlight" : "off";
+    }
+
+    SettingWidget::dropdown("Highlight message source",
+                            s.clientDetectionDisplayMode, clientDetectionModes)
+        ->setTooltip(
+            "Shows whether a Twitch message came from the web, Android, or "
+            "iOS.")
         ->addTo(*view);
 
-    SettingWidget::colorButton("Twitch Web color",
+    SettingWidget::colorButton("Twitch Web message color",
                                s.clientDetectionWebColor)
         ->setTooltip("Color for messages sent from Twitch Web.")
         ->addTo(*view);
 
-    SettingWidget::colorButton("Android color",
+    SettingWidget::colorButton("Android message color",
                                s.clientDetectionAndroidColor)
         ->setTooltip("Color for messages sent from Android.")
         ->addTo(*view);
 
-    SettingWidget::colorButton("iOS color", s.clientDetectionIosColor)
-        ->setTooltip("Color for messages sent from iOS.")
+    SettingWidget::colorButton("iOS message color", s.clientDetectionIosColor)
+        ->setTooltip("Choose the color for messages sent from iOS.")
         ->addTo(*view);
 
-    SettingWidget::checkbox("Show Translate message in message menu",
-                            s.showTranslateMessageContextAction)
-        ->setTooltip("Add a menu action for translating chat messages.")
+    SettingWidget::checkbox("Highlight unusual client messages",
+                            s.showAbnormalClientDetectionHighlights)
+        ->setTooltip(
+            "Highlight messages whose client information does not match Twitch "
+            "Web, Android, or iOS. Third party clients can trigger this, so "
+            "it is not proof of abuse.")
         ->addTo(*view);
 
-    SettingWidget::dropdown("Translate messages to",
-                            s.messageTranslationTargetLanguage,
-                            translationLanguageItems())
-        ->setTooltip("Target language for translated chat messages.")
+    SettingWidget::colorButton("Unusual message color",
+                               s.clientDetectionAbnormalColor)
+        ->setTooltip("Choose the background color for unusual client messages.")
         ->addTo(*view);
 
-    SettingWidget::checkbox("Show translated indicator",
-                            s.showTranslatedMessageIndicator)
-        ->setTooltip("Show muted (translated) text after translated messages.")
+    SettingWidget::dropdown("Preferred message history service",
+                            s.recentMessagesProvider,
+                            recentMessageProviderItems())
+        ->setTooltip(
+            "Try this service first when loading recent Twitch messages. "
+            "Moltorino tries the other services once if it is unavailable.")
         ->addTo(*view);
 
     SettingWidget::checkbox("Send activity heartbeats",
                             s.sendActivityHeartbeats)
-        ->setTooltip("Send a small periodic heartbeat with app version, "
-                     "platform, status, and update-check info.")
+        ->setTooltip("Send small periodic activity updates to the configured "
+                     "heartbeat server.")
         ->addTo(*view);
-
-    auto heartbeatConfirming = std::make_shared<bool>(false);
-    s.sendActivityHeartbeats.connect(
-        [this, &s, heartbeatConfirming](const bool enabled) {
-            if (enabled || *heartbeatConfirming)
-            {
-                return;
-            }
-
-            *heartbeatConfirming = true;
-            const auto answer = QMessageBox::warning(
-                this, "Disable heartbeats?",
-                "If you turn this off, Moltorino will stop sending "
-                "activity heartbeats and automatic update checks may stop "
-                "working.\n\nDo you still want to turn it off?",
-                QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-            if (answer != QMessageBox::Yes)
-            {
-                s.sendActivityHeartbeats = true;
-            }
-            *heartbeatConfirming = false;
-        },
-        this->managedConnections_, false);
 
     SettingWidget::checkbox("Hide my account in heartbeats",
                             s.hideAccountInHeartbeats)
-        ->setTooltip("Keep update/status heartbeats enabled, but leave out "
-                     "your Twitch account details.")
+        ->setTooltip("Leave your Twitch account details out of heartbeat data.")
         ->conditionallyEnabledBy(s.sendActivityHeartbeats)
         ->addTo(*view);
 
+    view->addTitle("Chat recording");
+    view->addWidget(
+        makeChatRecordingSettings(this),
+        {"Chat recording", "TwitchDownloader", "JSON", "Recordings folder",
+         "Embed images", "Recording hotkey", "Recording button",
+         "Channel header", "Platform badges", "Mixed chat"});
+
+    view->addTitle("Chat automations");
+    view->addDescription(
+        "Create self bot rules that reply or run commands from your Twitch "
+        "account.");
+
+    auto *automationEnabled = new SCheckBox("Enable chat automations", this);
+    automationEnabled->setToolTip(
+        "Pause every rule without changing your setup.");
+    if (auto *automations = getApp()->getChatAutomations(); automations)
+    {
+        automationEnabled->setChecked(automations->enabled());
+        QObject::connect(
+            automationEnabled, &QCheckBox::toggled, this,
+            [this, automations](bool enabled) {
+                automations->setEnabled(enabled);
+                if (!automations->save())
+                {
+                    automations->setEnabled(!enabled);
+                    QMessageBox::warning(
+                        this, "Chat automations",
+                        "Could not save chat automations. Check that your "
+                        "settings folder is writable and try again.");
+                }
+            });
+        this->chatAutomationRulesConnection_ =
+            automations->rulesChanged.connect([automations, automationEnabled] {
+                const QSignalBlocker blocker(automationEnabled);
+                automationEnabled->setChecked(automations->enabled());
+            });
+    }
+    else
+    {
+        automationEnabled->setEnabled(false);
+    }
+    view->addWidget(automationEnabled,
+                    {"Self bot", "Automation rules", "Enable automations"});
+
+    SettingWidget::checkbox("Run in the background",
+                            s.chatAutomationsRunInBackground)
+        ->setTooltip(
+            "Keep rules active while Moltorino is minimized or another "
+            "app is focused.")
+        ->addTo(*view);
+
+    SettingWidget::intInput("Maximum actions per 30 seconds",
+                            s.chatAutomationsMaxRunsPer30Seconds,
+                            {.min = 1, .max = 10})
+        ->setTooltip("Limit how often automations can act in each channel. "
+                     "Individual rule cooldowns still apply.")
+        ->addTo(*view);
+
+    auto *openAutomations = view->addButton("Open automations", [this] {
+        ChatAutomationDialog::showDialog(
+            {}, &getApp()->getWindows()->getMainWindow());
+    });
+    openAutomations->setToolTip("Open the rule editor.");
+
     view->addTitle("Usercards");
     view->addDescription(
-        "Choose which extra details appear on usercards.");
+        "Choose what usercards show and where actions appear.");
 
-    SettingWidget::checkbox("Show follower count",
-                            s.showUsercardFollowerCount)
+    view->addSubtitle("Profile details");
+
+    SettingWidget::checkbox("Show badges", s.showUsercardBadges)
+        ->setTooltip("Show the user's badges in usercards. Badge types follow "
+                     "the Visible badges settings in General.")
+        ->addTo(*view);
+    SettingWidget::checkbox("Show 7TV paint name", s.showUsercardSevenTVPaint)
+        ->setTooltip(
+            "Show the user's 7TV paint name and link to 7Database when "
+            "available.")
+        ->addTo(*view);
+    SettingWidget::checkbox("Show follower count", s.showUsercardFollowerCount)
         ->addTo(*view);
     SettingWidget::checkbox("Show account creation date",
                             s.showUsercardCreatedDate)
         ->addTo(*view);
-    SettingWidget::checkbox("Show last live", s.showUsercardLastLive)
+    SettingWidget::checkbox("Show when the user was last live",
+                            s.showUsercardLastLive)
         ->setTooltip(
-            "Show when the user was last live. Hover the row to see the stream title.")
+            "Show when the user was last live. Hover over it to see the "
+            "stream title.")
         ->addTo(*view);
     SettingWidget::checkbox("Show user color", s.showUsercardColor)
         ->setTooltip("Show the user's Twitch chat color.")
         ->addTo(*view);
     SettingWidget::checkbox("Show Twitch status", s.showUsercardStatus)
-        ->setTooltip("Show whether the user is Staff, Partner, Affiliate, or Regular.")
+        ->setTooltip(
+            "Show whether the user is Staff, a verified bot, a Partner, "
+            "an Affiliate, or not an Affiliate.")
         ->addTo(*view);
 
     SettingWidget::checkbox("Show chatter count",
                             s.showUsercardChatterCount)
         ->setTooltip("Show the current chatter count when available.")
         ->addTo(*view);
-    SettingWidget::checkbox("Show followage", s.showUsercardFollowage)
+    SettingWidget::checkbox("Show follow date", s.showUsercardFollowage)
+        ->setTooltip("Show when the user started following the channel.")
         ->addTo(*view);
-    SettingWidget::checkbox("Show relative followage",
+    SettingWidget::checkbox("Show follow duration",
                             s.showUsercardFollowageRelativeTime)
-        ->setTooltip(
-            "Show a duration next to the follow date, like (1y 3m), (3 weeks), or (12 days).")
+        ->setTooltip("Show how long the user has followed next to the date, "
+                     "such as (1y 3m), (3 weeks), or (12 days).")
         ->addTo(*view);
-    SettingWidget::checkbox("Show subscription age", s.showUsercardSubage)
+    SettingWidget::checkbox("Show subscription length", s.showUsercardSubage)
+        ->setTooltip("Show how many months the user has been subscribed.")
         ->addTo(*view);
-    SettingWidget::checkbox("Show relative sub duration",
+    SettingWidget::checkbox("Show subscription duration",
                             s.showUsercardSubageRelativeTime)
-        ->setTooltip(
-            "Show a compact year and month value next to subscription month counts after the first year.")
+        ->setTooltip("Show a compact year and month value alongside the total "
+                     "months after the first year.")
         ->addTo(*view);
-    SettingWidget::checkbox("Show 7TV profile button",
-                            s.showSevenTVUsercardButton)
+    SettingWidget::checkbox("Show who gifted the subscription",
+                            s.showUsercardSubGiftSource)
         ->setTooltip(
-            "Show a usercard button that opens the user's 7TV profile when available.")
+            "Show the gifter when the current subscription was gifted.")
         ->addTo(*view);
     SettingWidget::checkbox("Show name history button",
                             s.showUsercardNameHistoryButton)
         ->setTooltip("Show a compact usercard button for previous Twitch names.")
         ->addTo(*view);
-    SettingWidget::checkbox("Show load more messages button",
-                            s.showUsercardLoadMoreMessagesButton)
-        ->setTooltip(
-            "Show a usercard button for loading older messages when your saved Moltorino login can moderate the channel.")
+
+    view->addSubtitle("Actions");
+    view->addDescription(
+        "Put each action in the usercard bar, keep it in More, or hide it.");
+    view->addDescription(
+        "For custom buttons, add a usercard label to a command in Settings > "
+        "Commands. "
+        "Commands can open URLs or run actions for the selected user.");
+    const std::vector<std::pair<QString, QVariant>> actionPlacements{
+        {"Action bar", "bar"}, {"More menu", "menu"}, {"Hidden", "hidden"}};
+    SettingWidget::dropdown("Moderator comments",
+                            s.usercardCommentsActionPlacement, actionPlacements)
         ->addTo(*view);
-    SettingWidget::checkbox("Always load more messages when possible",
-                            s.alwaysLoadMoreUsercardMessages)
+    SettingWidget::dropdown("Logs view", s.usercardLogsActionPlacement,
+                            actionPlacements)
+        ->addTo(*view);
+    SettingWidget::dropdown("Roles", s.usercardRolesActionPlacement,
+                            actionPlacements)
+        ->addTo(*view);
+    SettingWidget::dropdown("7TV profile", s.usercardSevenTVActionPlacement,
+                            actionPlacements)
+        ->addTo(*view);
+    SettingWidget::dropdown("Notes", s.usercardNotesActionPlacement,
+                            actionPlacements)
+        ->addTo(*view);
+    SettingWidget::dropdown("Block user", s.usercardBlockActionPlacement,
+                            actionPlacements)
+        ->addTo(*view);
+    SettingWidget::dropdown("Hide user", s.usercardHideActionPlacement,
+                            actionPlacements)
+        ->addTo(*view);
+    SettingWidget::dropdown("Ignore highlights",
+                            s.usercardIgnoreHighlightsActionPlacement,
+                            actionPlacements)
+        ->addTo(*view);
+    SettingWidget::dropdown("Cross ban", s.usercardCrossBanActionPlacement,
+                            actionPlacements)
         ->setTooltip(
-            "Start lazy loading older usercard messages without clicking the load button.")
+            "Ban a user across channels available to your saved account.")
+        ->addTo(*view);
+    SettingWidget::dropdown("Cross unban", s.usercardCrossUnbanActionPlacement,
+                            actionPlacements)
+        ->setTooltip(
+            "Unban a user across channels available to your saved account.")
         ->addTo(*view);
     SettingWidget::checkbox(
-        "Show mod/unmod and vip/unvip buttons as a lead mod",
-        s.showLeadModRoleButtons)
-        ->setTooltip(
-            "Show role buttons on usercards when Twitch confirms you are a lead moderator.")
+        "Show cross ban and cross unban in channels you don't moderate",
+        s.showCrossActionsInUnmoderatedChannels)
+        ->setTooltip("Use your saved account's channels even when you cannot "
+                     "moderate the channel you are viewing.")
         ->addTo(*view);
-    SettingWidget::checkbox("Show editor and lead mod role menu",
-                            s.showUsercardRoleManagementMenu)
+    SettingWidget::dropdown("Usercard", s.usercardUsercardActionPlacement,
+                            actionPlacements)
         ->setTooltip(
-            "Show a compact usercard menu for adding or removing editor and "
-            "lead moderator roles. Actions still require a saved broadcaster login.")
+            "Open Twitch's web usercard or the user's YouTube channel.")
         ->addTo(*view);
 
-#ifndef Q_OS_MACOS
-    view->addTitle("Tray");
-    view->addDescription(
-        "Keep Moltorino running in the tray after closing the window.");
+    view->addSubtitle("Message history");
+
+    SettingWidget::checkbox("Show a button to load older messages",
+                            s.showUsercardLoadMoreMessagesButton)
+        ->setTooltip("Show a usercard button for loading older messages when "
+                     "your saved Moltorino login can moderate the channel.")
+        ->addTo(*view);
+    SettingWidget::checkbox("Load older messages automatically",
+                            s.alwaysLoadMoreUsercardMessages)
+        ->setTooltip(
+            "Start loading older usercard messages without waiting for "
+            "a click.")
+        ->addTo(*view);
+
+    view->addSubtitle("Logs view");
+    SettingWidget::checkbox("Show newest logs at the bottom",
+                            s.userLogsNewestAtBottom)
+        ->addTo(*view);
+    SettingWidget::checkbox("Show dates in user logs", s.showUserLogsDate)
+        ->setTooltip("Show the message date alongside its time in user logs.")
+        ->addTo(*view);
+    SettingWidget::dropdown(
+        "User log date style", s.userLogsDateStyle,
+        {{"Compact (Aug 21)", "compact"},
+         {"ISO (2026-08-21)", "iso"},
+         {"Month first (Aug 21, 2026)", "month-first"},
+         {"Day first (21 Aug 2026)", "day-first"},
+         {"Numeric month first (08/21/2026)", "numeric-month-first"},
+         {"Numeric day first (21/08/2026)", "numeric-day-first"}})
+        ->conditionallyEnabledBy(s.showUserLogsDate)
+        ->addTo(*view);
+    SettingWidget::dropdown(
+        "User log time style", s.userLogsTimeStyle,
+        {{"24 hour (14:05)", "24h-minute"},
+         {"24 hour with seconds (14:05:09)", "24h-second"},
+         {"12 hour (2:05 PM)", "12h-minute"},
+         {"12 hour with seconds (2:05:09 PM)", "12h-second"}})
+        ->addTo(*view);
+
+    view->addSubtitle("Role controls");
+    SettingWidget::checkbox("Show role buttons as a lead moderator",
+                            s.showLeadModRoleButtons)
+        ->setTooltip("Show role buttons on usercards when Twitch confirms you "
+                     "are a lead moderator.")
+        ->addTo(*view);
+    SettingWidget::checkbox("Show the editor and lead moderator menu",
+                            s.showUsercardRoleManagementMenu)
+        ->setTooltip(
+            "Show a usercard menu for adding or removing editor and lead "
+            "moderator roles. These actions still require a saved broadcaster "
+            "login.")
+        ->addTo(*view);
+
+#ifdef Q_OS_MACOS
+    view->addTitle("macOS");
+    view->addDescription("Choose what happens when you close the main window.");
+
+    SettingWidget::checkbox(
+        "Keep Moltorino running after closing the main window",
+        s.macosKeepRunningAfterClose)
+        ->setTooltip("Close the window without quitting Moltorino. Open it "
+                     "again from the Dock. Command-Q still quits the app.")
+        ->addTo(*view);
+#else
+    view->addTitle("System tray");
+    view->addDescription("Keep Moltorino running in the system tray after you "
+                         "close the window.");
 
     const bool trayAvailable = QSystemTrayIcon::isSystemTrayAvailable();
     const bool notificationAvailable =
@@ -1855,33 +2452,137 @@ MoltorinoPage::MoltorinoPage()
     auto *hideToTrayWidget =
         SettingWidget::checkbox("Hide to tray when closing Moltorino",
                                 s.trayHideOnClose)
-            ->setTooltip("Closing the main window hides Moltorino to the "
-                         "system tray instead of disconnecting from chat.");
+            ->setTooltip("Keep Moltorino in the system tray instead of closing "
+                         "it and disconnecting from chat.");
     hideToTrayWidget->setEnabled(trayAvailable);
     hideToTrayWidget->addTo(*view);
 
-    auto *notifyWidget = SettingWidget::checkbox(
-                             "Show notifications for sound enabled highlights",
-                             s.trayNotifyOnSoundHighlights)
-                             ->setTooltip(
-                                 "Only highlight rules with Play sound enabled "
-                                 "will show a notification while "
-                                 "Moltorino is hidden.");
+    auto *notifyWidget =
+        SettingWidget::checkbox("Show notifications for highlights with sound",
+                                s.trayNotifyOnSoundHighlights)
+            ->setTooltip("Only highlights with Play sound enabled show a "
+                         "notification while Moltorino is hidden.");
     notifyWidget->setEnabled(notificationAvailable);
     notifyWidget->addTo(*view);
 #endif
 
     view->addTitle("Fun");
-    view->addDescription("Spam, pyramid, and playful chat command options.");
+    view->addDescription(
+        "Emote effects, daily notes, and playful chat commands.");
+
+    auto *modifierRow = new QWidget;
+    auto *modifierLayout = new QHBoxLayout(modifierRow);
+    modifierLayout->setContentsMargins(0, 0, 0, 0);
+    SettingWidget::checkbox("FFZ and BTTV emote modifiers",
+                            s.enableEmoteModifiers)
+        ->setTooltip(
+            "Turn off all modifier effects without changing your individual "
+            "choices. Disabled modifiers appear as separate emote icons.")
+        ->addToLayout(modifierLayout);
+    auto *chooseModifiers = new QPushButton("Choose...", modifierRow);
+    modifierLayout->addWidget(chooseModifiers);
+
+    QMap<QString, QStringList> modifierNames{
+        {"FFZ",
+         {"ffzArrive", "ffzBounce", "ffzCursed", "ffzHyper", "ffzJam",
+          "ffzLeave", "ffzRainbow", "ffzSlide", "ffzSpin", "ffzW", "ffzX",
+          "ffzY"}},
+        {"BTTV", {"w!", "h!", "v!", "l!", "r!", "z!", "c!", "p!", "s!"}},
+    };
+    const auto addLoadedModifiers = [&modifierNames](const auto &emotes,
+                                                     const QString &provider) {
+        for (const auto &[name, emote] : *emotes)
+        {
+            if (emote->modifierPlacement != EmoteModifierPlacement::None)
+            {
+                modifierNames[provider].append(name.string);
+            }
+        }
+    };
+    if (auto *ffz = getApp()->getFfzEmotes())
+    {
+        addLoadedModifiers(ffz->emotes(), "FFZ");
+    }
+    if (auto *bttv = getApp()->getBttvEmotes())
+    {
+        addLoadedModifiers(bttv->emotes(), "BTTV");
+    }
+    QStringList modifierKeywords{"FFZ", "BTTV", "emote", "modifiers"};
+    for (auto &names : modifierNames)
+    {
+        names.removeDuplicates();
+        names.sort();
+        modifierKeywords.append(names);
+    }
+    view->addWidget(modifierRow, modifierKeywords);
+    s.enableEmoteModifiers.connect(
+        [chooseModifiers](bool enabled, auto) {
+            chooseModifiers->setEnabled(enabled);
+        },
+        this->managedConnections_);
+    QObject::connect(
+        chooseModifiers, &QPushButton::clicked, this,
+        [this, &s, modifierNames] {
+            QDialog dialog(this);
+            dialog.setWindowTitle("Emote modifiers");
+            dialog.setWindowFlag(Qt::WindowContextHelpButtonHint, false);
+            auto *layout = new QVBoxLayout(&dialog);
+            auto *providers = new QHBoxLayout;
+            layout->addLayout(providers);
+            pajlada::Signals::SignalHolder connections;
+            for (const auto &provider : {QString("FFZ"), QString("BTTV")})
+            {
+                auto *group = new QGroupBox(provider, &dialog);
+                auto *choices = new QVBoxLayout(group);
+                providers->addWidget(group);
+                for (const auto &name : modifierNames.value(provider))
+                {
+                    auto *check = new QCheckBox(name, group);
+                    choices->addWidget(check);
+                    s.disabledEmoteModifiers.connect(
+                        [check, name](const QStringList &disabled, auto) {
+                            const QSignalBlocker blocker(check);
+                            check->setChecked(!disabled.contains(name));
+                        },
+                        connections);
+                    QObject::connect(
+                        check, &QCheckBox::toggled, &dialog,
+                        [&s, name](bool enabled) {
+                            auto disabled = s.disabledEmoteModifiers.getValue();
+                            disabled.removeAll(name);
+                            if (!enabled)
+                            {
+                                disabled.append(name);
+                            }
+                            s.disabledEmoteModifiers.setValue(disabled);
+                        });
+                }
+                choices->addStretch();
+            }
+            auto *close =
+                new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+            layout->addWidget(close);
+            QObject::connect(close, &QDialogButtonBox::rejected, &dialog,
+                             &QDialog::reject);
+            dialog.adjustSize();
+            dialog.resize(qRound(dialog.width() * 1.2), dialog.height());
+            dialog.exec();
+        });
+
+    SettingWidget::checkbox("Show quote of the day", s.showDailyPositiveMessage)
+        ->setTooltip(
+            "Show one quiet note in the selected chat when a new local "
+            "day begins.")
+        ->addTo(*view);
 
     SettingWidget::intInput("Delay between /spam and /pyramid messages",
                             s.spamCommandIntervalMs,
                             {.min = 10, .max = 5000, .singleStep = 10,
                              .suffix = QStringLiteral(" ms")})
-        ->setTooltip("How long /spam and /pyramid wait between messages. "
-                     "Lower values are faster, but Twitch may still "
-                     "rate limit accounts that are not mod, VIP, or "
-                     "broadcaster in the channel.")
+        ->setTooltip(
+            "Choose how long /spam and /pyramid wait between messages. "
+            "Lower values are faster, but Twitch may still limit "
+            "accounts that are not moderators, VIPs, or the broadcaster.")
         ->addTo(*view);
 
     SettingWidget::checkbox("Use IRC for /spam and /pyramid",
@@ -1892,8 +2593,8 @@ MoltorinoPage::MoltorinoPage()
 
     SettingWidget::checkbox("Show /spam and /pyramid status messages",
                             s.showSpamPyramidStatusMessages)
-        ->setTooltip("Show the start and finished messages for /spam and "
-                     "/pyramid. Errors and manual stop messages still show.")
+        ->setTooltip("Show start and finish messages for /spam and /pyramid. "
+                     "Errors and manual stop messages still appear.")
         ->addTo(*view);
 
     SettingWidget::checkbox("Send message as warnings",
@@ -1902,12 +2603,34 @@ MoltorinoPage::MoltorinoPage()
                      "message flow instead of the normal chat path.")
         ->addTo(*view);
 
+    view->addTitle("Tab groups");
+    view->addDescription("Keep related tabs together without closing them.");
+
+    SettingWidget::checkbox("Show tab group button", s.showTabGroupButton)
+        ->setTooltip(
+            "Show the group button beside the new tab button. You can also "
+            "create groups from a tab menu.")
+        ->addTo(*view);
+
+    SettingWidget::checkbox("Show channel names in group menus",
+                            s.showTabGroupChannelNames)
+        ->setTooltip("Show the channel name when it differs from the tab name.")
+        ->addTo(*view);
+
+    SettingWidget::dropdown(
+        "Default action for new groups", s.newTabGroupClickAction,
+        {{"Expand tabs", "expand"}, {"Open tab list", "menu"}})
+        ->setTooltip("You can change this later from the group menu.")
+        ->addTo(*view);
+
     view->addTitle("Miscellaneous");
     auto *miscDesc = new SignalLabel(this);
     miscDesc->setText("General Moltorino tweaks and interface adjustments.");
     miscDesc->setWordWrap(true);
     miscDesc->setStyleSheet("QLabel { color: #9aa0a6; }");
     view->addWidget(miscDesc);
+    SettingWidget::checkbox("Allow popup resizing", s.allowPopupResize)
+        ->addTo(*view);
 
     QObject::connect(miscDesc, &SignalLabel::leftMouseUp, this, [this] {
         this->logoClickCount_++;
@@ -1917,11 +2640,37 @@ MoltorinoPage::MoltorinoPage()
         }
     });
 
+    SettingWidget::checkbox("Dim loaded message history", s.fadeMessageHistory)
+        ->setTooltip(
+            "Make messages loaded when a channel opens or reconnects less "
+            "prominent.")
+        ->addKeywords(
+            {"old messages", "gray messages", "startup", "restored messages"})
+        ->addTo(*view);
+
     SettingWidget::checkbox("Use message colors for tab alerts",
                             s.colorTabHighlightsByMessage)
         ->setTooltip("When a message highlights a tab, use that highlight "
                      "color for the tab alert line.")
         ->addTo(*view);
+
+    view->addDropdown<int>(
+            "Badge alignment", {"Balanced", "Chatterino"}, s.badgeAlignment,
+            [](auto value) {
+                return value == static_cast<int>(BadgeAlignmentMode::Chatterino)
+                           ? 1
+                           : 0;
+            },
+            [](auto args) {
+                return args.index == 1
+                           ? static_cast<int>(BadgeAlignmentMode::Chatterino)
+                           : static_cast<int>(BadgeAlignmentMode::Balanced);
+            },
+            false)
+        ->setToolTip(
+            "Balanced lifts badges and inline buttons to align with most "
+            "fonts. "
+            "Chatterino keeps them on the bottom of the full text line.");
 
     SettingWidget::checkbox("Show follow button in chat header",
                             s.showFollowButtonInSplitHeader)
@@ -1929,45 +2678,93 @@ MoltorinoPage::MoltorinoPage()
                      "each Twitch chat.")
         ->addTo(*view);
 
-    SettingWidget::checkbox("Confirm before unfollowing from chat header",
+    SettingWidget::checkbox("Show the Shared Chat channel selector",
+                            s.showSharedChatChannelSelector)
+        ->setTooltip(
+            "Show a channel picker in the chat header when Shared Chat "
+            "includes more than one channel.")
+        ->addTo(*view);
+
+    SettingWidget::checkbox("Show follow button in usercards",
+                            s.showFollowButtonInUsercard)
+        ->setTooltip("Show a button for following or unfollowing the channel "
+                     "below the profile picture on Twitch usercards.")
+        ->addTo(*view);
+
+    SettingWidget::checkbox("Confirm before unfollowing",
                             s.confirmUnfollowFromSplitHeader)
-        ->setTooltip("Ask before the chat header follow button unfollows the "
-                     "current channel. The /unfollow command still runs "
-                     "without a prompt.")
+        ->setTooltip(
+            "Ask before a follow button in the chat header or a "
+            "usercard unfollows a channel. The /unfollow command still "
+            "runs without a prompt.")
         ->addTo(*view);
 
     SettingWidget::checkbox("Hide mod actions on moderator usercards",
                             s.hideModActionsOnModUsercards)
         ->setTooltip(
             "When you are a moderator, hide timeout and ban controls on "
-            "moderator and broadcaster usercards. Broadcasters still see "
-            "the full controls.")
-        ->addTo(*view);
+            "moderator and broadcaster usercards. Broadcasters still see all "
+            "controls.")
+        ->addTo(*this->moderationView_);
 
-    SettingWidget::checkbox("Show mod actions on mod usercards as lead mod",
+    SettingWidget::checkbox("Show moderation actions as a lead moderator",
                             s.showModActionsOnModUsercardsAsLeadMod)
         ->setTooltip(
-            "When mod actions are hidden on moderator usercards, show them "
-            "anyway if Twitch confirms you are a lead moderator. Broadcaster "
+            "When moderation actions are hidden on moderator usercards, show "
+            "them if Twitch confirms you are a lead moderator. Broadcaster "
             "usercards stay hidden.")
         ->conditionallyEnabledBy(s.hideModActionsOnModUsercards)
-        ->addTo(*view);
+        ->addTo(*this->moderationView_);
 
     view->addStretch();
+    this->moderationView_->addStretch();
 
-    view->addWidget(this->botBadgeFrame_,
-                    {"Bot Badge", "Developer", "Verify", "Client ID",
-                     "Client Secret"});
+    view->addWidget(this->botBadgeFrame_, {"Bot badge", "Developer", "Verify",
+                                           "Client ID", "Client Secret"});
 }
 
 bool MoltorinoPage::filterElements(const QString &query)
 {
-    if (this->settingsView_ == nullptr)
+    if (this->settingsView_ == nullptr || this->moderationView_ == nullptr)
     {
         return query.isEmpty();
     }
 
-    return this->settingsView_->filterElements(query) || query.isEmpty();
+    const bool generalMatches = this->settingsView_->filterElements(query);
+    const bool moderationMatches = this->moderationView_->filterElements(query);
+
+    if (!query.isEmpty() && this->tabBar_ != nullptr)
+    {
+        const auto current = this->tabBar_->currentIndex();
+        const bool currentMatches =
+            current == 0 ? generalMatches : moderationMatches;
+        if (!currentMatches && (generalMatches || moderationMatches))
+        {
+            this->tabBar_->setCurrentIndex(generalMatches ? 0 : 1);
+        }
+    }
+
+    return generalMatches || moderationMatches || query.isEmpty();
+}
+
+void MoltorinoPage::showAccountSetup()
+{
+    this->tabBar_->setCurrentIndex(0);
+    QTimer::singleShot(0, this, [this] {
+        this->settingsView_->scrollToTop();
+        this->addAuthAccountButton_->setFocus(Qt::OtherFocusReason);
+        this->openAuthDialog();
+    });
+}
+
+void MoltorinoPage::showBotBadgeSetup()
+{
+    this->tabBar_->setCurrentIndex(0);
+    this->revealBotBadgeSettings(true);
+    QTimer::singleShot(0, this, [this] {
+        this->settingsView_->scrollToWidget(this->botBadgeFrame_);
+        this->botBadgeClientIdEdit_->setFocus(Qt::OtherFocusReason);
+    });
 }
 
 void MoltorinoPage::openAuthDialog()
@@ -1992,6 +2789,7 @@ void MoltorinoPage::refreshAuthAccounts()
 
     QPointer<MoltorinoPage> guard(this);
     MoltorinoAuth::refreshAccounts(
+        MoltorinoAuthRefreshMode::Manual,
         [guard, generation](MoltorinoAuthRefreshResult result) {
             if (guard == nullptr || generation != guard->authRefreshGeneration_)
             {
@@ -2005,9 +2803,13 @@ void MoltorinoPage::refreshAuthAccounts()
 
             if (result.total == 0)
             {
-                guard->updateAuthStatus(
-                    "Not logged in yet. Log in to continue.",
-                    false);
+                const auto summary = MoltorinoAuth::summary();
+                if (summary.disabledAccountCount == 0)
+                {
+                    guard->updateAuthStatus(
+                        "No account is signed in yet. Log in to continue.",
+                        false);
+                }
                 return;
             }
 
@@ -2016,10 +2818,10 @@ void MoltorinoPage::refreshAuthAccounts()
                 return;
             }
 
-            const auto error = result.errors.isEmpty()
-                                   ? QString("No saved account validated "
-                                             "successfully.")
-                                   : result.errors.join("\n");
+            const auto error =
+                result.errors.isEmpty()
+                    ? QString("No saved account could be validated.")
+                    : result.errors.join("\n");
             guard->updateAuthStatus(error, false, true);
         });
 }
@@ -2031,7 +2833,7 @@ void MoltorinoPage::updateAuthSummary()
     if (this->refreshAuthAccountsButton_ != nullptr)
     {
         const bool hasRefreshableLogin =
-            summary.accountCount > 0 || summary.hasLegacyToken;
+            summary.enabledAccountCount > 0 || summary.hasOnlyLegacyToken;
         this->refreshAuthAccountsButton_->setVisible(hasRefreshableLogin);
         this->refreshAuthAccountsButton_->setEnabled(!this->authRefreshInFlight_);
     }
@@ -2039,12 +2841,11 @@ void MoltorinoPage::updateAuthSummary()
     {
         const bool hasSavedLogin =
             summary.accountCount > 0 || summary.hasLegacyToken;
-        this->addAuthAccountButton_->setText(hasSavedLogin ? "Add Account"
-                                                           : "Log In");
+        this->addAuthAccountButton_->setText(hasSavedLogin ? "Add account"
+                                                           : "Log in");
         this->addAuthAccountButton_->setToolTip(
-            hasSavedLogin
-                ? "Add another account or manage saved accounts."
-                : "Log in with Device Login or Legacy Login.");
+            hasSavedLogin ? "Add another account or manage saved accounts."
+                          : "Sign in with device login or legacy login.");
         this->addAuthAccountButton_->setEnabled(!this->authRefreshInFlight_);
     }
 
@@ -2064,14 +2865,13 @@ void MoltorinoPage::updateAuthSummary()
     if (summary.accountCount <= 0)
     {
         this->updateAuthStatus(
-            "Not logged in yet. Log in to continue.",
-            false);
+            "No account is signed in yet. Log in to continue.", false);
         return;
     }
 
-    this->updateAuthStatus(formatMoltorinoAuthSummary(summary),
-                           summary.validAccountCount > 0,
-                           summary.validAccountCount == 0);
+    this->updateAuthStatus(
+        formatMoltorinoAuthSummary(summary), summary.validAccountCount > 0,
+        summary.enabledAccountCount > 0 && summary.validAccountCount == 0);
 }
 
 void MoltorinoPage::updateAuthInstructions(const QString &text, bool isError)
@@ -2214,7 +3014,7 @@ void MoltorinoPage::verifyBotBadgeConfiguration()
         if (account->isAnon())
         {
             this->updateBotBadgeStatus(
-                "You must enter a Bot Username or be logged into Twitch in "
+                "Enter a bot username or sign in to Twitch in "
                 "Chatterino to verify.",
                 false, true);
             return;
@@ -2227,6 +3027,11 @@ void MoltorinoPage::verifyBotBadgeConfiguration()
 
     auto setBusy = [this](bool busy) {
         this->botBadgeIsValidating_ = busy;
+        this->botBadgeClientIdEdit_->setEnabled(!busy);
+        this->botBadgeClientSecretEdit_->setEnabled(!busy);
+        this->botBadgeSenderEdit_->setEnabled(!busy);
+        this->botBadgeAuthorizeButton_->setEnabled(!busy);
+        this->botBadgeVerifyButton_->setEnabled(!busy);
     };
 
     setBusy(true);
@@ -2238,10 +3043,12 @@ void MoltorinoPage::verifyBotBadgeConfiguration()
     tokenQuery.addQueryItem("client_id", clientId);
     tokenQuery.addQueryItem("client_secret", clientSecret);
     tokenQuery.addQueryItem("grant_type", "client_credentials");
-    tokenUrl.setQuery(tokenQuery);
-
     NetworkRequest(tokenUrl, NetworkRequestType::Post)
+        .caller(this)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .payload(tokenQuery.toString(QUrl::FullyEncoded).toUtf8())
         .hideRequestBody()
+        .maximumResponseSize(1024 * 1024)
         .timeout(20000)
         .onSuccess([guard, generation, clientId, clientSecret, login,
                     setBusy](const NetworkResult &appRes) {
@@ -2274,8 +3081,10 @@ void MoltorinoPage::verifyBotBadgeConfiguration()
             usersUrl.setQuery(usersQuery);
 
             NetworkRequest(usersUrl, NetworkRequestType::Get)
+                .caller(guard)
                 .header("Client-ID", clientId)
                 .header("Authorization", "Bearer " + appToken)
+                .maximumResponseSize(1024 * 1024)
                 .timeout(20000)
                 .onSuccess([guard, generation, clientId, clientSecret, appToken,
                             appTokenExpiry, login,
@@ -2322,7 +3131,7 @@ void MoltorinoPage::verifyBotBadgeConfiguration()
                         true);
                     setBusy(false);
                 })
-                .onError([guard, generation, setBusy](const NetworkResult &res) {
+                .onError([guard, generation, setBusy](const NetworkResult &) {
                     if (guard == nullptr ||
                         generation != guard->botBadgeValidationGeneration_)
                     {
@@ -2330,24 +3139,22 @@ void MoltorinoPage::verifyBotBadgeConfiguration()
                     }
                     setBusy(false);
                     guard->updateBotBadgeStatus(
-                        "Verification failed: " +
-                            res.formatError(),
+                        "Could not look up the bot account. Check your "
+                        "connection and try again.",
                         false, true);
                 })
                 .execute();
         })
-        .onError([guard, generation, setBusy](const NetworkResult &res) {
+        .onError([guard, generation, setBusy](const NetworkResult &) {
             if (guard == nullptr ||
                 generation != guard->botBadgeValidationGeneration_)
             {
                 return;
             }
-            const auto json = res.parseJson();
-            const auto message = json.value("message").toString();
             setBusy(false);
             guard->updateBotBadgeStatus(
-                "Could not verify bot badge setup: " +
-                    (message.isEmpty() ? res.formatError() : message),
+                "Could not verify the Twitch app. Check your connection, "
+                "client ID and client secret.",
                 false, true);
         })
         .execute();

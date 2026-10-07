@@ -4,9 +4,17 @@
 
 #include "common/WindowDescriptors.hpp"
 
+#include "Application.hpp"
 #include "common/QLogging.hpp"
+#include "debug/AssertInGuiThread.hpp"
+#include "providers/kick/KickChannel.hpp"
+#include "providers/kick/KickChatServer.hpp"
+#include "providers/tiktok/TikTokChatServer.hpp"
+#include "providers/twitch/TwitchIrcServer.hpp"
+#include "providers/youtube/YouTubeChatServer.hpp"
 #include "util/Backup.hpp"
 #include "util/Expected.hpp"
+#include "util/MultiChannel.hpp"
 #include "util/QMagicEnum.hpp"
 #include "widgets/Window.hpp"
 
@@ -15,6 +23,9 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonParseError>
+#include <QSet>
+
+#include <algorithm>
 
 namespace chatterino {
 
@@ -34,7 +45,16 @@ ExpectedStr<QJsonArray> loadWindowArray(const QString &settingsPath)
             QStringLiteral("Failed to open '%1'").arg(settingsPath));
     }
 
-    QByteArray data = file.readAll();
+    constexpr qint64 MAX_LAYOUT_BYTES = 8 * 1024 * 1024;
+    if (file.size() > MAX_LAYOUT_BYTES)
+    {
+        return makeUnexpected(QStringLiteral("Window layout is too large"));
+    }
+    const auto data = file.read(MAX_LAYOUT_BYTES + 1);
+    if (data.size() > MAX_LAYOUT_BYTES)
+    {
+        return makeUnexpected(QStringLiteral("Window layout is too large"));
+    }
     QJsonParseError error;
     QJsonDocument document = QJsonDocument::fromJson(data, &error);
     if (error.error != QJsonParseError::NoError)
@@ -64,59 +84,33 @@ ExpectedStr<QJsonArray> loadWindowArray(const QString &settingsPath)
             QStringLiteral("Window layout does not contain any windows"));
     }
 
-    return windows;
-}
-
-template <typename T>
-T loadNodes(const QJsonObject &obj)
-{
-    static_assert("loadNodes must be called with the SplitNodeDescriptor "
-                  "or ContainerNodeDescriptor type");
-}
-
-template <>
-SplitNodeDescriptor loadNodes(const QJsonObject &root)
-{
-    SplitNodeDescriptor descriptor;
-
-    descriptor.flexH_ = root.value("flexh").toDouble(1.0);
-    descriptor.flexV_ = root.value("flexv").toDouble(1.0);
-
-    auto data = root.value("data").toObject();
-
-    SplitDescriptor::loadFromJSON(descriptor, root, data);
-
-    return descriptor;
-}
-
-template <>
-ContainerNodeDescriptor loadNodes(const QJsonObject &root)
-{
-    ContainerNodeDescriptor descriptor;
-
-    descriptor.flexH_ = root.value("flexh").toDouble(1.0);
-    descriptor.flexV_ = root.value("flexv").toDouble(1.0);
-
-    descriptor.vertical_ = root.value("type").toString() == "vertical";
-
-    for (QJsonValue _val : root.value("items").toArray())
+    for (const auto &windowValue : windows)
     {
-        auto _obj = _val.toObject();
-
-        auto _type = _obj.value("type");
-        if (_type == "split")
+        if (!windowValue.isObject())
         {
-            descriptor.items_.emplace_back(
-                loadNodes<SplitNodeDescriptor>(_obj));
+            return makeUnexpected(
+                QStringLiteral("Window layout contains an invalid window"));
         }
-        else
+
+        const auto tabsValue = windowValue.toObject().value("tabs");
+        if (!tabsValue.isArray())
         {
-            descriptor.items_.emplace_back(
-                loadNodes<ContainerNodeDescriptor>(_obj));
+            return makeUnexpected(
+                QStringLiteral("Window layout contains a window without a "
+                               "valid tabs array"));
+        }
+
+        for (const auto &tabValue : tabsValue.toArray())
+        {
+            if (!tabValue.isObject())
+            {
+                return makeUnexpected(
+                    QStringLiteral("Window layout contains an invalid tab"));
+            }
         }
     }
 
-    return descriptor;
+    return windows;
 }
 
 const QList<QUuid> loadFilters(QJsonValue val)
@@ -162,6 +156,8 @@ void SplitDescriptor::loadFromJSON(SplitDescriptor &descriptor,
     descriptor.server_ = data.value("server").toInt(-1);
     descriptor.anonymous_ = data.value("anonymous").toBool(false);
     descriptor.moderationMode_ = root.value("moderationMode").toBool();
+    descriptor.autoModChannelFilter_ =
+        data.value("autoModChannel").toString().trimmed().toLower();
     if (data.contains("channel"))
     {
         descriptor.channelName_ = data.value("channel").toString();
@@ -179,10 +175,12 @@ void SplitDescriptor::loadFromJSON(SplitDescriptor &descriptor,
     }
     if (descriptor.type_ == u"kick")
     {
-        descriptor.kickChannelID =
-            static_cast<uint64_t>(data["channelID"].toInt());
-        descriptor.kickUserID = static_cast<uint64_t>(data["userID"].toInt());
-        descriptor.kickRoomID = static_cast<uint64_t>(data["roomID"].toInt());
+        descriptor.kickChannelID = static_cast<uint64_t>(
+            std::max<qint64>(0, data["channelID"].toInteger()));
+        descriptor.kickUserID = static_cast<uint64_t>(
+            std::max<qint64>(0, data["userID"].toInteger()));
+        descriptor.kickRoomID = static_cast<uint64_t>(
+            std::max<qint64>(0, data["roomID"].toInteger()));
     }
     else if (descriptor.type_ == u"multi")
     {
@@ -198,6 +196,123 @@ void SplitDescriptor::loadFromJSON(SplitDescriptor &descriptor,
                 MultiChannelIndicatorMode::PlatformBadgeIfUnselected);
         descriptor.mcIndex = static_cast<uint32_t>(data["activeIndex"].toInt());
     }
+}
+
+IndirectChannel SplitDescriptor::decodeChannel() const
+{
+    assertInGuiThread();
+
+    auto type = qmagicenum::enumCast<Channel::Type>(this->type_);
+    if (!type)
+    {
+        return Channel::getEmpty();
+    }
+
+    switch (*type)
+    {
+        case Channel::Type::Twitch:
+            if (this->anonymous_)
+            {
+                return getApp()->getTwitch()->getOrAddAnonymousChannel(
+                    this->channelName_);
+            }
+            return getApp()->getTwitch()->getOrAddChannel(this->channelName_);
+        case Channel::Type::TwitchMentions:
+            return getApp()->getTwitch()->getMentionsChannel();
+        case Channel::Type::TwitchWatching:
+            return getApp()->getTwitch()->getWatchingChannel();
+        case Channel::Type::TwitchWhispers:
+            return getApp()->getTwitch()->getWhispersChannel();
+        case Channel::Type::TwitchLive:
+            return getApp()->getTwitch()->getLiveChannel();
+        case Channel::Type::TwitchAutomod:
+            return getApp()->getTwitch()->getAutomodChannel();
+        case Channel::Type::Misc:
+            return getApp()->getTwitch()->getChannelOrEmpty(this->channelName_);
+        case Channel::Type::Kick:
+            return getApp()->getKickChatServer()->getOrCreate(
+                this->channelName_, KickChannel::UserInit{
+                                        .roomID = this->kickRoomID,
+                                        .userID = this->kickUserID,
+                                        .channelID = this->kickChannelID,
+                                    });
+        case Channel::Type::YouTube:
+            return getApp()->getYouTubeChatServer()->getOrCreate(
+                this->channelName_);
+        case Channel::Type::TikTok:
+            return getApp()->getTikTokChatServer()->getOrCreate(
+                this->channelName_);
+        case Channel::Type::Multi: {
+            QVarLengthArray<MultiChannel::Spec, 4> specs;
+            for (const auto &child : this->children)
+            {
+                auto spec = MultiChannel::Spec::fromDescriptor(child);
+                if (spec)
+                {
+                    specs.emplace_back(*std::move(spec));
+                }
+            }
+            auto channel =
+                std::make_shared<MultiChannel>(specs, this->mcIndicator);
+            channel->setActiveChannelIndex(this->mcIndex);
+            return {std::move(channel)};
+        }
+
+        case Channel::Type::None:
+        case Channel::Type::Direct:
+        case Channel::Type::TwitchEnd:
+            break;
+    }
+
+    return Channel::getEmpty();
+}
+
+SplitNodeDescriptor SplitNodeDescriptor::loadFromJSON(const QJsonObject &root)
+{
+    SplitNodeDescriptor descriptor;
+
+    descriptor.flexH_ = root.value("flexh").toDouble(1.0);
+    descriptor.flexV_ = root.value("flexv").toDouble(1.0);
+
+    auto data = root.value("data").toObject();
+
+    SplitDescriptor::loadFromJSON(descriptor, root, data);
+
+    return descriptor;
+}
+
+ContainerNodeDescriptor ContainerNodeDescriptor::loadFromJSON(
+    const QJsonObject &root, unsigned depth)
+{
+    ContainerNodeDescriptor descriptor;
+    if (depth >= 64)
+    {
+        return descriptor;
+    }
+
+    descriptor.flexH_ = root.value("flexh").toDouble(1.0);
+    descriptor.flexV_ = root.value("flexv").toDouble(1.0);
+
+    descriptor.vertical_ = root.value("type").toString() == "vertical";
+
+    for (QJsonValue _val : root.value("items").toArray())
+    {
+        auto _obj = _val.toObject();
+
+        auto _type = _obj.value("type");
+        if (_type == "split")
+        {
+            descriptor.items_.emplace_back(
+                SplitNodeDescriptor::loadFromJSON(_obj));
+        }
+        else if (_type == "horizontal" || _type == "vertical")
+        {
+            descriptor.items_.emplace_back(
+                ContainerNodeDescriptor::loadFromJSON(_obj, depth + 1));
+        }
+    }
+
+    return descriptor;
 }
 
 TabDescriptor TabDescriptor::loadFromJSON(const QJsonObject &tabObj)
@@ -216,11 +331,21 @@ TabDescriptor TabDescriptor::loadFromJSON(const QJsonObject &tabObj)
         tab.customTabColor_ = colorVal.toString();
     }
 
+    QJsonValue groupVal = tabObj.value("groupId");
+    if (groupVal.isString())
+    {
+        tab.groupId_ = groupVal.toString().left(64);
+    }
+    tab.ungroupedIndex_ =
+        std::clamp(tabObj.value("ungroupedIndex").toInt(-1), -1, 100000);
+
     // Load tab selected state
     tab.selected_ = tabObj.value("selected").toBool(false);
 
     // Load tab "highlightsEnabled" state
     tab.highlightsEnabled_ = tabObj.value("highlightsEnabled").toBool(true);
+
+    tab.alwaysVisible_ = tabObj.value("alwaysVisible").toBool(false);
 
     QJsonObject splitRoot = tabObj.value("splits2").toObject();
 
@@ -231,11 +356,11 @@ TabDescriptor TabDescriptor::loadFromJSON(const QJsonObject &tabObj)
         auto nodeType = splitRoot.value("type").toString();
         if (nodeType == "split")
         {
-            tab.rootNode_ = loadNodes<SplitNodeDescriptor>(splitRoot);
+            tab.rootNode_ = SplitNodeDescriptor::loadFromJSON(splitRoot);
         }
         else if (nodeType == "horizontal" || nodeType == "vertical")
         {
-            tab.rootNode_ = loadNodes<ContainerNodeDescriptor>(splitRoot);
+            tab.rootNode_ = ContainerNodeDescriptor::loadFromJSON(splitRoot);
         }
     }
 
@@ -323,6 +448,67 @@ WindowLayout WindowLayout::loadFromFile(const QString &path)
         }
 
         bool hasSetASelectedTab = false;
+
+        QSet<QString> groupIds;
+        const QJsonArray groups = windowObj.value("tabGroups").toArray();
+        constexpr auto MAX_GROUPS = 128;
+        for (const auto &groupVal : groups)
+        {
+            if (window.tabGroups_.size() >= MAX_GROUPS)
+            {
+                break;
+            }
+
+            const auto groupObj = groupVal.toObject();
+            const auto id = groupObj.value("id").toString().left(64);
+            if (id.isEmpty() || groupIds.contains(id))
+            {
+                continue;
+            }
+            groupIds.insert(id);
+
+            const auto storedColor =
+                groupObj.value("color").toString().left(32);
+            auto colorMode =
+                groupObj.value("colorMode").toString().toLower();
+            if (colorMode != "theme" && colorMode != "none" &&
+                colorMode != "custom")
+            {
+                colorMode = storedColor.isEmpty() ? QStringLiteral("theme")
+                                                  : QStringLiteral("custom");
+            }
+
+            auto icon = groupObj.value("icon").toString().toLower();
+            static const QSet<QString> validIcons = {
+                QStringLiteral("folder"), QStringLiteral("star"),
+                QStringLiteral("heart"),  QStringLiteral("bell"),
+                QStringLiteral("shield"), QStringLiteral("none"),
+                QStringLiteral("custom"),
+            };
+            if (!validIcons.contains(icon))
+            {
+                icon = QStringLiteral("folder");
+            }
+            auto customIconPath =
+                groupObj.value("customIconPath").toString().left(1024);
+            if (icon != "custom")
+            {
+                customIconPath.clear();
+            }
+
+            window.tabGroups_.push_back({
+                .id_ = id,
+                .name_ = groupObj.value("name").toString().left(64),
+                .colorMode_ = colorMode,
+                .color_ = storedColor,
+                .icon_ = icon,
+                .customIconPath_ = customIconPath,
+                .collapsed_ = groupObj.value("collapsed").toBool(false),
+                .muted_ = groupObj.value("muted").toBool(false),
+                .openMenuOnClick_ =
+                    groupObj.value("openMenuOnClick").toBool(false),
+            });
+        }
 
         // Load window tabs
         QJsonArray tabs = windowObj.value("tabs").toArray();

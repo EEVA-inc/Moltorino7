@@ -15,7 +15,10 @@
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QDebug>
+#include <QDir>
+#include <QFileInfo>
 #include <QRegularExpression>
+#include <QStandardPaths>
 #include <QStringList>
 #include <QUuid>
 
@@ -95,6 +98,46 @@ std::optional<Args::Channel> parseActivateOption(QString input)
 
 namespace chatterino {
 
+std::optional<QString> validatedMigrationReadyFilePath(const QString &path)
+{
+    const auto trimmedPath = path.trimmed();
+    const auto tempPath = QStandardPaths::writableLocation(
+        QStandardPaths::TempLocation);
+    if (trimmedPath.isEmpty() || tempPath.isEmpty())
+    {
+        return std::nullopt;
+    }
+
+    const QFileInfo markerInfo(trimmedPath);
+    const auto markerPath = QDir::cleanPath(markerInfo.absoluteFilePath());
+    const auto markerDirectory = QDir::fromNativeSeparators(
+        QDir::cleanPath(QFileInfo(markerPath).absolutePath()));
+    const auto normalizedTempPath =
+        QDir::fromNativeSeparators(QDir::cleanPath(tempPath));
+#ifdef Q_OS_WIN
+    constexpr auto pathCaseSensitivity = Qt::CaseInsensitive;
+#else
+    constexpr auto pathCaseSensitivity = Qt::CaseSensitive;
+#endif
+    auto tempPathPrefix = normalizedTempPath;
+    if (!tempPathPrefix.endsWith(u'/'))
+    {
+        tempPathPrefix += u'/';
+    }
+    const bool markerIsUnderTemp =
+        QString::compare(markerDirectory, normalizedTempPath,
+                         pathCaseSensitivity) == 0 ||
+        markerDirectory.startsWith(tempPathPrefix, pathCaseSensitivity);
+    if (markerInfo.fileName() !=
+            QStringLiteral("Moltorino7-migration-ready-mb0015") ||
+        !markerIsUnderTemp)
+    {
+        return std::nullopt;
+    }
+
+    return markerPath;
+}
+
 Args::Args(const QApplication &app, const Paths &paths)
 {
     QCommandLineParser parser;
@@ -103,6 +146,8 @@ Args::Args(const QApplication &app, const Paths &paths)
 
     auto crashRecoveryOption = hiddenOption("crash-recovery");
     auto remoteRestartOption = hiddenOption("remote-restart");
+    auto migrationReadyFileOption =
+        hiddenOption("moltorino-migration-ready-file", "", "path");
     auto exceptionCodeOption = hiddenOption("cr-exception-code", "", "code");
     auto exceptionMessageOption =
         hiddenOption("cr-exception-message", "", "message");
@@ -141,6 +186,10 @@ Args::Args(const QApplication &app, const Paths &paths)
         "specified, Twitch is assumed.",
         "t:channel");
 
+    QCommandLineOption useOldScalingOption(
+        "use-old-scaling",
+        "Use legacy 96 DPI scaling for this launch.");
+
 #ifndef NDEBUG
     QCommandLineOption useLocalEventsubOption(
         "use-local-eventsub",
@@ -151,6 +200,7 @@ Args::Args(const QApplication &app, const Paths &paths)
         {{"V", "version"}, "Displays version information."},
         crashRecoveryOption,
         remoteRestartOption,
+        migrationReadyFileOption,
         exceptionCodeOption,
         exceptionMessageOption,
         parentWindowOption,
@@ -160,6 +210,7 @@ Args::Args(const QApplication &app, const Paths &paths)
         loginOption,
         channelLayout,
         activateOption,
+        useOldScalingOption,
 #ifndef NDEBUG
         useLocalEventsubOption,
 #endif
@@ -194,6 +245,17 @@ Args::Args(const QApplication &app, const Paths &paths)
 
     this->crashRecovery = parser.isSet(crashRecoveryOption);
     this->remoteRestart = parser.isSet(remoteRestartOption);
+    if (parser.isSet(migrationReadyFileOption))
+    {
+        const auto markerPath = parser.value(migrationReadyFileOption).trimmed();
+        this->migrationReadyFile = validatedMigrationReadyFilePath(markerPath);
+        if (!markerPath.isEmpty() && !this->migrationReadyFile.has_value())
+        {
+            qCWarning(chatterinoArgs)
+                << "Ignoring an invalid migration readiness marker path"
+                << markerPath;
+        }
+    }
     if (parser.isSet(exceptionCodeOption))
     {
         this->exceptionCode =
@@ -226,6 +288,11 @@ Args::Args(const QApplication &app, const Paths &paths)
     {
         this->activateChannel =
             parseActivateOption(parser.value(activateOption));
+    }
+
+    if (parser.isSet(useOldScalingOption))
+    {
+        this->useOldScaling = true;
     }
 
 #ifndef NDEBUG

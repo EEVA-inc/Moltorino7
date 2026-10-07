@@ -115,12 +115,50 @@ void tryMigrateLinuxSettingsInto(const QString &destinationPath)
 }
 
 Paths::Paths()
+    : Paths(Modes::instance())
+{
+}
+
+Paths::Paths(const Modes &modes)
 {
     this->initAppFilePathHash();
 
     this->initCheckPortable();
-    this->initRootDirectory();
+    this->initRootDirectory(modes);
     this->initSubDirectories();
+
+    QStringList bases{
+        QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation),
+        QStandardPaths::writableLocation(
+            QStandardPaths::GenericConfigLocation)};
+    const auto standardData =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (!standardData.isEmpty())
+    {
+        bases.append(QFileInfo(standardData).dir().absolutePath());
+    }
+    bases.removeDuplicates();
+    for (const auto &base : bases)
+    {
+        if (base.isEmpty())
+        {
+            continue;
+        }
+        this->bluzyrinoDataDirectories.append(combinePath(base, "Bluzyrino"));
+#ifndef Q_OS_WIN
+        this->bluzyrinoDataDirectories.append(combinePath(base, "bluzyrino"));
+#endif
+    }
+    if (!standardData.isEmpty())
+    {
+#ifdef Q_OS_WIN
+        this->bluzyrinoDataDirectories.append(
+            QFileInfo(standardData).dir().filePath("Chatterino2"));
+#else
+        this->bluzyrinoDataDirectories.append(standardData);
+#endif
+    }
+    this->bluzyrinoDataDirectories.removeDuplicates();
 }
 
 bool Paths::createFolder(const QString &folderPath)
@@ -181,13 +219,13 @@ void Paths::initCheckPortable()
         combinePath(QCoreApplication::applicationDirPath(), "portable"));
 }
 
-void Paths::initRootDirectory()
+void Paths::initRootDirectory(const Modes &modes)
 {
     assert(this->portable_.has_value());
 
     this->rootAppDataDirectory = [&]() -> QString {
 
-        if (Modes::instance().isPortable)
+        if (modes.isPortable)
         {
             return QCoreApplication::applicationDirPath();
         }

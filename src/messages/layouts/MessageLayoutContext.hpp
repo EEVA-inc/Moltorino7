@@ -8,6 +8,10 @@
 
 #include <QColor>
 #include <QPainter>
+#include <QPoint>
+#include <QStringView>
+
+#include <optional>
 
 namespace pajlada::Signals {
 class SignalHolder;
@@ -38,6 +42,7 @@ struct MessageColors {
     QColor regularText;
     QColor linkText;
     QColor systemText;
+    QColor timestampText;
 
     QColor messageSeperator;
 
@@ -49,6 +54,7 @@ struct MessageColors {
 
 // TODO: Explore if we can let settings own this
 struct MessagePreferences {
+    bool showHighlights = true;
     QColor lastMessageColor;
     Qt::BrushStyle lastMessagePattern{};
 
@@ -59,6 +65,10 @@ struct MessagePreferences {
     bool enableWatchStreakHighlight{};
     bool enableAutomodHighlight{};
     bool enableClientDetectionHighlight{};
+    bool enableClientDetectionIcon{};
+    bool enableAbnormalClientDetectionHighlight{};
+    bool enableAnnouncementHighlight{};
+    bool enableColoredAnnouncementHighlight{};
 
     bool alternateMessages{};
     bool separateMessages{};
@@ -68,6 +78,7 @@ struct MessagePreferences {
     QColor clientDetectionWebColor;
     QColor clientDetectionAndroidColor;
     QColor clientDetectionIosColor;
+    QColor clientDetectionAbnormalColor;
 
     void connectSettings(Settings *settings,
                          pajlada::Signals::SignalHolder &holder);
@@ -96,9 +107,24 @@ struct MessagePaintContext {
 
     bool isLastReadMessage{};
     bool isCollapsed{};
+
+    bool paintMessageShadow{};
+    bool messageShadowEmotes = true;
+    QColor messageShadowColor{Qt::black};
+    int messageShadowOpacity{};
+    QPoint messageShadowOffset{1, 1};
+    int messageShadowBlur{};
+    int highlightOpacityAdjustment{};
+
+    const MessageLayoutElement *hoveredElement = nullptr;
+    bool hoverAnimateOnly = false;
 };
 
 struct MessageLayoutContext {
+    struct MessageTextRange {
+        qsizetype start{};
+        qsizetype length{};
+    };
     const MessageColors &messageColors;
     MessageElementFlags flags;
 
@@ -111,6 +137,23 @@ struct MessageLayoutContext {
 
     Channel *selectedChannel = nullptr;
     const Message &message;
+
+    bool autoModReviewExpanded = false;
+    bool autoModReviewChannel = false;
+    const MessagePreferences *preferences = nullptr;
+
+    bool showHighlights() const
+    {
+        return this->preferences == nullptr ||
+               this->preferences->showHighlights;
+    }
+
+    void resetMessageTextCursor() const;
+    std::optional<MessageTextRange> claimMessageTextRange(
+        QStringView renderedText) const;
+
+    bool trackMessageText = false;
+    mutable qsizetype messageTextCursor_{};
 };
 
 }  // namespace chatterino

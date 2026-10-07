@@ -9,13 +9,14 @@ class QApplication;
 namespace chatterino {
 
 class Args;
+class Modes;
 class Paths;
 class Settings;
 class Updates;
 
 bool activateExistingGuiInstance(const Paths &paths);
 
-void runGui(QApplication &a, const Paths &paths, Settings &settings,
-            const Args &args, Updates &updates);
+void runGui(QApplication &a, const Modes &modes, const Paths &paths,
+            Settings &settings, const Args &args, Updates &updates);
 
 }

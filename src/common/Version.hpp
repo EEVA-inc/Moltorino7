@@ -12,8 +12,6 @@
 
 namespace chatterino {
 
-inline const QString CHATTERINO_VERSION = QStringLiteral("7.5.5");
-
 class Version
 {
 public:
@@ -22,6 +20,8 @@ public:
     const QString &version() const;
     const QString &internalVersion() const;
     const QString &commitHash() const;
+    const QString &fullCommit() const;
+    QString updateChannel() const;
 
     const bool &isModified() const;
 
@@ -52,6 +52,7 @@ private:
     QString version_;
     QString internalVersion_;
     QString commitHash_;
+    QString fullCommit_;
     bool isModified_{false};
     QString dateOfBuild_;
     QString fullVersion_;

@@ -7,7 +7,10 @@
 #include <QObject>
 #include <QTimer>
 
+#include <functional>
 #include <memory>
+#include <optional>
+#include <stop_token>
 
 class QNetworkReply;
 
@@ -44,9 +47,11 @@ private:
     std::shared_ptr<NetworkData> data_;
     QNetworkReply *reply_{};
     QTimer *timer_{};
+    std::optional<std::stop_callback<std::function<void()>>> cancellation_;
 
 private Q_SLOTS:
     void timeout();
+    void responseTooLarge();
     void finished();
 };
 

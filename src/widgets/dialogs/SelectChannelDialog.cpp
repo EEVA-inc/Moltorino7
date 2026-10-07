@@ -7,6 +7,9 @@
 #include "Application.hpp"
 #include "controllers/hotkeys/HotkeyController.hpp"
 #include "providers/kick/KickChatServer.hpp"
+#include "providers/tiktok/TikTokChatServer.hpp"
+#include "providers/tiktok/TikTokTypes.hpp"
+#include "providers/youtube/YouTubeChatServer.hpp"
 #include "providers/twitch/TwitchChannel.hpp"
 #include "providers/twitch/TwitchIrcServer.hpp"
 #include "singletons/Fonts.hpp"
@@ -33,6 +36,8 @@ namespace {
 
 using namespace chatterino;
 
+constexpr auto ActiveDestinationRole = Qt::UserRole + 1;
+
 class AddToMultiChannel : public BasePopup
 {
     Q_OBJECT
@@ -58,10 +63,27 @@ public:
             "Twitch", QVariant::fromValue(MultiChannel::Platform::Twitch));
         this->platform->addItem(
             "Kick", QVariant::fromValue(MultiChannel::Platform::Kick));
+        this->platform->addItem(
+            "YouTube", QVariant::fromValue(MultiChannel::Platform::YouTube));
+        this->platform->addItem(
+            "TikTok", QVariant::fromValue(MultiChannel::Platform::TikTok));
         layout->addWidget(this->platform);
 
-        this->name->setPlaceholderText("Name");
+        this->name->setPlaceholderText("Channel name or source");
+        QObject::connect(
+            this->platform, &QComboBox::currentIndexChanged, this, [this] {
+                const auto selected = this->platform->currentData()
+                                          .value<MultiChannel::Platform>();
+                this->name->setPlaceholderText(
+                    selected == MultiChannel::Platform::YouTube
+                        ? "@handle, channel ID/URL, video URL, or video:<ID>"
+                        : "Channel name");
+            });
         layout->addWidget(this->name);
+        this->error = new QLabel;
+        this->error->setWordWrap(true);
+        this->error->hide();
+        layout->addWidget(this->error);
 
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok |
                                              QDialogButtonBox::Cancel);
@@ -102,9 +124,22 @@ Q_SIGNALS:
 private:
     void accept()
     {
-        auto nameText = this->name->text();
+        auto nameText = this->name->text().trimmed();
         auto platform =
             this->platform->currentData().value<MultiChannel::Platform>();
+        if (platform == MultiChannel::Platform::TikTok)
+        {
+            const auto handle = normalizeTikTokHandle(nameText);
+            if (!handle)
+            {
+                this->error->setText(
+                    "Enter a TikTok handle or a profile or LIVE URL.");
+                this->error->show();
+                this->name->setFocus();
+                return;
+            }
+            nameText = *handle;
+        }
         if (!nameText.isEmpty())
         {
             this->specAdded(MultiChannel::Spec{
@@ -117,6 +152,7 @@ private:
 
     QComboBox *platform = nullptr;
     QLineEdit *name = nullptr;
+    QLabel *error = nullptr;
 };
 
 QListWidgetItem *makeMultiChannelItem(const MultiChannel::Spec &spec)
@@ -125,10 +161,16 @@ QListWidgetItem *makeMultiChannelItem(const MultiChannel::Spec &spec)
     switch (spec.platform)
     {
         case MultiChannel::Platform::Twitch:
-            name += u"[T] ";
+            name += u"[Twitch] ";
             break;
         case MultiChannel::Platform::Kick:
-            name += u"[K] ";
+            name += u"[Kick] ";
+            break;
+        case MultiChannel::Platform::YouTube:
+            name += u"[YouTube] ";
+            break;
+        case MultiChannel::Platform::TikTok:
+            name += u"[TikTok] ";
             break;
     }
     name += spec.name;
@@ -283,19 +325,25 @@ SelectChannelDialog::SelectChannelDialog(QWidget *parent)
     ui.automod = new AutoCheckedRadioButton("AutoMod");
     layout->addWidget(ui.automod);
 
-    ui.automodLabel = new QLabel("Shows when AutoMod catches a message in "
-                                 "any channel you moderate.");
+    ui.automodLabel = new QLabel("Channel filter:");
     ui.automodLabel->setVisible(false);
     ui.automodLabel->setWordWrap(true);
     layout->addWidget(ui.automodLabel);
+
+    ui.automodChannel = new QLineEdit();
+    ui.automodChannel->setPlaceholderText("All channels");
+    ui.automodChannel->setVisible(false);
+    layout->addWidget(ui.automodChannel);
 
     QObject::connect(ui.automod, &AutoCheckedRadioButton::toggled, this,
                      [this](bool enabled) {
                          auto &ui = this->ui_;
                          ui.automodLabel->setVisible(enabled);
+                         ui.automodChannel->setVisible(enabled);
                      });
 
     ui.automod->installEventFilter(&this->tabFilter_);
+    ui.automodChannel->installEventFilter(&this->tabFilter_);
 
     layout->addStretch(1);
 
@@ -323,6 +371,50 @@ SelectChannelDialog::SelectChannelDialog(QWidget *parent)
 
         ui.notebook->addPage(ui.kickPage, "Kick");
     }
+
+    {
+        ui.youtubePage = new QWidget;
+        auto *youtubeLayout = new QVBoxLayout(ui.youtubePage);
+
+        auto *youtubeLabel = new QLabel(
+            "Join a YouTube live chat using a channel handle, channel ID or "
+            "URL, video URL, or video:<ID>.");
+        youtubeLabel->setWordWrap(true);
+        youtubeLayout->addWidget(youtubeLabel);
+
+        ui.youtubeSource = new QLineEdit();
+        ui.youtubeSource->setPlaceholderText(
+            "@handle, channel ID/URL, video URL, or video:<ID>");
+        youtubeLayout->addWidget(ui.youtubeSource);
+
+        youtubeLayout->addStretch(1);
+
+        ui.notebook->addPage(ui.youtubePage, "YouTube");
+    }
+
+    {
+        ui.tiktokPage = new QWidget;
+        auto *tiktokLayout = new QVBoxLayout(ui.tiktokPage);
+        auto *description = new QLabel(
+            "Read TikTok LIVE chat without an account. Connect a TikTok "
+            "account in Settings > Accounts to send messages.");
+        description->setWordWrap(true);
+        tiktokLayout->addWidget(description);
+        auto *label = new QLabel("Channel:");
+        ui.tiktokSource = new QLineEdit;
+        ui.tiktokSource->setObjectName("tiktokSource");
+        ui.tiktokSource->setPlaceholderText("@handle or TikTok LIVE URL");
+        label->setBuddy(ui.tiktokSource);
+        tiktokLayout->addWidget(label);
+        tiktokLayout->addWidget(ui.tiktokSource);
+        ui.tiktokError = new QLabel;
+        ui.tiktokError->setWordWrap(true);
+        ui.tiktokError->hide();
+        tiktokLayout->addWidget(ui.tiktokError);
+        tiktokLayout->addStretch(1);
+        ui.notebook->addPage(ui.tiktokPage, "TikTok");
+    }
+
     // Multi
     {
         ui.multiPage = new QWidget;
@@ -331,13 +423,11 @@ SelectChannelDialog::SelectChannelDialog(QWidget *parent)
         auto *layout = new QVBoxLayout(ui.multiPage);
         {
             auto *descriptionLabel = new QLabel(
-                "Show multiple channels in one split. From the input box, you "
-                "can select an active/context channel to send messages in. "
-                "Report issues <a "
-                "href=\"https://github.com/SevenTV/chatterino7/issues\">here</"
-                "a>.");
+                "Combine channels in one split. Choose where to send from "
+                "the input box.");
             descriptionLabel->setWordWrap(true);
-            descriptionLabel->setOpenExternalLinks(true);
+            descriptionLabel->setSizePolicy(QSizePolicy::Preferred,
+                                            QSizePolicy::Minimum);
             layout->addWidget(descriptionLabel);
 
             auto *header = new QWidget;
@@ -350,11 +440,30 @@ SelectChannelDialog::SelectChannelDialog(QWidget *parent)
 
             QObject::connect(add, &QPushButton::clicked, this, [this] {
                 auto *diag = new AddToMultiChannel(this);
-                QObject::connect(diag, &AddToMultiChannel::specAdded, this,
-                                 [this](const MultiChannel::Spec &spec) {
-                                     this->ui_.multiView->addItem(
-                                         makeMultiChannelItem(spec));
-                                 });
+                QObject::connect(
+                    diag, &AddToMultiChannel::specAdded, this,
+                    [this](const MultiChannel::Spec &spec) {
+                        const auto caseSensitivity =
+                            spec.platform == MultiChannel::Platform::YouTube
+                                ? Qt::CaseSensitive
+                                : Qt::CaseInsensitive;
+                        for (int i = 0; i < this->ui_.multiView->count(); ++i)
+                        {
+                            auto *item = this->ui_.multiView->item(i);
+                            const auto existing =
+                                item->data(Qt::UserRole)
+                                    .value<MultiChannel::Spec>();
+                            if (existing.platform == spec.platform &&
+                                existing.name.compare(spec.name,
+                                                      caseSensitivity) == 0)
+                            {
+                                this->ui_.multiView->setCurrentItem(item);
+                                return;
+                            }
+                        }
+                        this->ui_.multiView->addItem(
+                            makeMultiChannelItem(spec));
+                    });
                 diag->show();
             });
             QObject::connect(remove, &QPushButton::clicked, this, [this] {
@@ -368,6 +477,7 @@ SelectChannelDialog::SelectChannelDialog(QWidget *parent)
         ui.multiView->setDragDropMode(QListWidget::InternalMove);
         ui.multiView->setFrameStyle(QFrame::NoFrame);
         ui.multiView->setSizeAdjustPolicy(QListView::AdjustToContents);
+        ui.multiView->setMinimumHeight(qRound(120 * this->scale()));
         layout->addWidget(ui.multiView, 1);
 
         layout->addWidget(new QLabel("Channel indicator:"));
@@ -377,14 +487,38 @@ SelectChannelDialog::SelectChannelDialog(QWidget *parent)
             auto v = [](Mode mode) {
                 return QVariant::fromValue(mode);
             };
-            ui.multiIndicatorMode->addItem("None", v(Mode::None));
-            ui.multiIndicatorMode->addItem("Platform badge if unselected",
-                                           v(Mode::PlatformBadgeIfUnselected));
-            ui.multiIndicatorMode->addItem("Platform badge",
-                                           v(Mode::PlatformBadgeAlways));
-            ui.multiIndicatorMode->addItem("Channel name",
-                                           v(Mode::ChannelName));
+            const auto addIndicator = [&](const QString &label, Mode mode,
+                                          const QString &tooltip) {
+                ui.multiIndicatorMode->addItem(label, v(mode));
+                ui.multiIndicatorMode->setItemData(
+                    ui.multiIndicatorMode->count() - 1, tooltip,
+                    Qt::ToolTipRole);
+            };
+            addIndicator("None", Mode::None, "Do not label message sources.");
+            addIndicator(
+                "Platform badge for other platforms",
+                Mode::PlatformBadgeIfUnselected,
+                "Mark messages from a different platform than the selected "
+                "send channel.");
+            addIndicator("Platform badge on every message",
+                         Mode::PlatformBadgeAlways,
+                         "Show the source platform's badge on every "
+                         "message.");
+            addIndicator(
+                "Channel avatar", Mode::ChannelAvatar,
+                "Show the source channel's profile picture. The channel name "
+                "is used when no picture is available.");
+            addIndicator("Channel name", Mode::ChannelName,
+                         "Show the source channel's name on every message.");
             ui.multiIndicatorMode->setCurrentIndex(1);
+            const auto updateTooltip = [combo = ui.multiIndicatorMode] {
+                combo->setToolTip(
+                    combo->currentData(Qt::ToolTipRole).toString());
+            };
+            QObject::connect(ui.multiIndicatorMode,
+                             &QComboBox::currentIndexChanged, this,
+                             updateTooltip);
+            updateTooltip();
         }
         layout->addWidget(ui.multiIndicatorMode);
 
@@ -410,6 +544,15 @@ SelectChannelDialog::SelectChannelDialog(QWidget *parent)
 
 void SelectChannelDialog::ok()
 {
+    if (this->ui_.notebook->isSelected(this->ui_.tiktokPage) &&
+        !normalizeTikTokHandle(this->ui_.tiktokSource->text()))
+    {
+        this->ui_.tiktokError->setText(
+            "Enter a TikTok handle or a profile or LIVE URL.");
+        this->ui_.tiktokError->show();
+        this->ui_.tiktokSource->setFocus();
+        return;
+    }
     // accept and close
     this->hasSelectedChannel_ = true;
     this->close();
@@ -433,6 +576,7 @@ void SelectChannelDialog::setSelectedChannel(
     assert(channel);
 
     this->selectedChannel_ = channel;
+    this->ui_.multiView->clear();
 
     switch (indirectChannel.getType())
     {
@@ -483,14 +627,32 @@ void SelectChannelDialog::setSelectedChannel(
             this->ui_.notebook->select(this->ui_.kickPage);
         }
         break;
+        case Channel::Type::YouTube: {
+            this->ui_.channelAnonymous->setChecked(false);
+            this->ui_.youtubeSource->setText(channel->getName());
+            this->ui_.youtubeSource->selectAll();
+            this->ui_.notebook->select(this->ui_.youtubePage);
+        }
+        break;
+        case Channel::Type::TikTok: {
+            this->ui_.channelAnonymous->setChecked(false);
+            this->ui_.tiktokSource->setText(channel->getName());
+            this->ui_.tiktokSource->selectAll();
+            this->ui_.notebook->select(this->ui_.tiktokPage);
+        }
+        break;
         case Channel::Type::Multi: {
             this->ui_.channelAnonymous->setChecked(false);
             const auto *mc = dynamic_cast<const MultiChannel *>(channel.get());
             if (mc)
             {
+                size_t index = 0;
                 for (const auto &child : mc->channels())
                 {
-                    this->ui_.multiView->addItem(makeMultiChannelItem(child));
+                    auto *item = makeMultiChannelItem(child);
+                    item->setData(ActiveDestinationRole,
+                                  index++ == mc->activeChannelIndex());
+                    this->ui_.multiView->addItem(item);
                 }
                 int indicatorIdx = this->ui_.multiIndicatorMode->findData(
                     QVariant::fromValue(mc->indicatorMode()));
@@ -498,7 +660,6 @@ void SelectChannelDialog::setSelectedChannel(
                 {
                     this->ui_.multiIndicatorMode->setCurrentIndex(indicatorIdx);
                 }
-                this->mcChannelIndex = mc->activeChannelIndex();
             }
             this->ui_.notebook->select(this->ui_.multiPage);
         }
@@ -525,9 +686,22 @@ IndirectChannel SelectChannelDialog::getSelectedChannel() const
             this->ui_.kickName->text().trimmed());
     }
 
+    if (this->ui_.notebook->isSelected(this->ui_.youtubePage))
+    {
+        return getApp()->getYouTubeChatServer()->getOrCreate(
+            this->ui_.youtubeSource->text().trimmed());
+    }
+
+    if (this->ui_.notebook->isSelected(this->ui_.tiktokPage))
+    {
+        return getApp()->getTikTokChatServer()->getOrCreate(
+            this->ui_.tiktokSource->text());
+    }
+
     if (this->ui_.notebook->isSelected(this->ui_.multiPage))
     {
         QVarLengthArray<MultiChannel::Spec, 4> specs;
+        size_t activeIndex = 0;
         for (int i = 0; i < this->ui_.multiView->count(); i++)
         {
             auto *item = this->ui_.multiView->item(i);
@@ -539,13 +713,17 @@ IndirectChannel SelectChannelDialog::getSelectedChannel() const
             auto *spec = get_if<MultiChannel::Spec>(&data);
             if (spec)
             {
+                if (item->data(ActiveDestinationRole).toBool())
+                {
+                    activeIndex = specs.size();
+                }
                 specs.emplace_back(std::move(*spec));
             }
         }
         auto ptr = std::make_shared<MultiChannel>(
             specs, this->ui_.multiIndicatorMode->currentData()
                        .value<MultiChannelIndicatorMode>());
-        ptr->setActiveChannelIndex(this->mcChannelIndex);
+        ptr->setActiveChannelIndex(activeIndex);
         return {std::move(ptr)};
     }
 
@@ -589,6 +767,26 @@ IndirectChannel SelectChannelDialog::getSelectedChannel() const
     return this->selectedChannel_;
 }
 
+void SelectChannelDialog::setAutoModChannelFilter(QString channel)
+{
+    channel = channel.trimmed();
+    if (channel.startsWith(u'#'))
+    {
+        channel.remove(0, 1);
+    }
+    this->ui_.automodChannel->setText(channel);
+}
+
+QString SelectChannelDialog::getAutoModChannelFilter() const
+{
+    auto channel = this->ui_.automodChannel->text().trimmed().toLower();
+    if (channel.startsWith(u'#'))
+    {
+        channel.remove(0, 1);
+    }
+    return channel;
+}
+
 bool SelectChannelDialog::hasSeletedChannel() const
 {
     return this->hasSelectedChannel_;
@@ -622,7 +820,13 @@ bool SelectChannelDialog::EventFilter::eventFilter(QObject *watched,
 
             if (widget == ui.automod)
             {
-                // Special case for when current selection is "AutoMod" (the last entry in the list), next wrap is Channel, but we need to select its edit box
+                ui.automodChannel->setFocus();
+                ui.automodChannel->selectAll();
+                return true;
+            }
+
+            if (widget == ui.automodChannel)
+            {
                 ui.channel->setFocus();
                 return true;
             }
@@ -647,7 +851,20 @@ bool SelectChannelDialog::EventFilter::eventFilter(QObject *watched,
 
             if (widget == ui.channelName)
             {
-                // Special case for when current selection is the "Channel" entry's edit box since the Edit box actually has the focus
+                if (ui.automodChannel->isVisible())
+                {
+                    ui.automodChannel->setFocus();
+                    ui.automodChannel->selectAll();
+                }
+                else
+                {
+                    ui.automod->setFocus();
+                }
+                return true;
+            }
+
+            if (widget == ui.automodChannel)
+            {
                 ui.automod->setFocus();
                 return true;
             }
@@ -669,11 +886,14 @@ bool SelectChannelDialog::EventFilter::eventFilter(QObject *watched,
             return true;
         }
 
-        if (keyEvent == QKeySequence::DeleteStartOfWord &&
-            ui.channelName->selectionLength() > 0)
+        if (keyEvent == QKeySequence::DeleteStartOfWord)
         {
-            ui.channelName->backspace();
-            return true;
+            if (auto *lineEdit = qobject_cast<QLineEdit *>(widget);
+                lineEdit != nullptr && lineEdit->selectionLength() > 0)
+            {
+                lineEdit->backspace();
+                return true;
+            }
         }
 
         return false;
@@ -707,6 +927,11 @@ void SelectChannelDialog::scaleChangedEvent(float newScale)
 
     ui.channelName->setFont(uiFont);
     ui.channelAnonymous->setFont(uiFont);
+    ui.automodChannel->setFont(uiFont);
+    ui.kickName->setFont(uiFont);
+    ui.youtubeSource->setFont(uiFont);
+    ui.tiktokSource->setFont(uiFont);
+    ui.multiView->setMinimumHeight(qRound(120 * newScale));
 }
 
 void SelectChannelDialog::addShortcuts()

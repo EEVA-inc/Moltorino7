@@ -6,9 +6,14 @@
 
 #include <QString>
 
+#include <cstdint>
 #include <optional>
 
 namespace chatterino {
+
+namespace env {
+inline constexpr const char *LOG_TO_FILE = "CHATTERINO_LOG_TO_FILE";
+}
 
 class Env
 {
@@ -23,6 +28,7 @@ public:
     const uint16_t twitchServerPort;
     const bool twitchServerSecure;
     const std::optional<QString> proxyUrl;
+    const QString logToFile;
 };
 
 }

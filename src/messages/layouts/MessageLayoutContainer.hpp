@@ -10,6 +10,7 @@
 
 #include <QPoint>
 #include <QRect>
+#include <QRegion>
 
 #include <memory>
 #include <optional>
@@ -23,6 +24,11 @@ class QPainter;
 
 namespace chatterino {
 
+struct AnimatedElementRegions {
+    QRegion periodic;
+    QRegion selfTimed;
+};
+
 enum class TextDirection : uint8_t {
     Neutral,
     RTL,
@@ -30,6 +36,7 @@ enum class TextDirection : uint8_t {
 };
 
 class MessageLayoutElement;
+struct AnimatedMessageShadow;
 struct Selection;
 struct MessagePaintContext;
 
@@ -41,6 +48,7 @@ struct MessageLayoutContainer {
                      MessageFlags flags);
 
     void endLayout();
+    void releasePickerImages() const;
 
     void addElement(MessageLayoutElement *element);
 
@@ -50,9 +58,15 @@ struct MessageLayoutContainer {
 
     void breakLine();
 
-    void paintElements(QPainter &painter, const MessagePaintContext &ctx) const;
+    void paintElements(QPainter &painter, const MessagePaintContext &ctx,
+                       bool paintFragmentHighlights = true,
+                       bool paintEmotes = true) const;
 
-    bool paintAnimatedElements(QPainter &painter, qreal yOffset, bool isCollapsed = false) const;
+    AnimatedElementRegions paintAnimatedElements(
+        QPainter &painter, qreal yOffset, bool isCollapsed = false,
+        const AnimatedMessageShadow *shadow = nullptr,
+        const MessageLayoutElement *hoveredElement = nullptr,
+        bool hoverAnimateOnly = false) const;
 
     void paintSelection(QPainter &painter, size_t messageIndex,
                         const Selection &selection, qreal yOffset) const;
@@ -114,6 +128,9 @@ private:
     void addElement(MessageLayoutElement *element, bool forceAdd,
                     qsizetype prevIndex);
 
+    bool shouldRemoveSpaceBetweenEmotes(const MessageLayoutElement &element,
+                                        qsizetype prevIndex) const;
+
     void reorderRTL(size_t firstTextIndex);
 
     void paintSelectionRect(QPainter &painter, const Line &line, qreal left,
@@ -149,6 +166,9 @@ private:
     bool centerBadges_ = false;
     qreal width_ = 0;
     float descent_ = 0.F;
+    qreal metadataCenterAboveBottom_ = 0;
+    bool hasUsernameAlignment_ = false;
+    bool useBalancedMetadataAlignment_ = true;
     MessageFlags flags_{};
 
     size_t line_{};

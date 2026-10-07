@@ -4,6 +4,7 @@
 
 #include "common/websockets/detail/WebSocketConnectionImpl.hpp"
 
+#include "common/DiagnosticPrivacy.hpp"
 #include "common/QLogging.hpp"
 #include "common/Version.hpp"
 
@@ -38,6 +39,10 @@ void WebSocketConnectionHelper<Derived, Inner>::post(auto &&fn)
 template <typename Derived, typename Inner>
 void WebSocketConnectionHelper<Derived, Inner>::run()
 {
+    if (this->options.maxMessageBytes != 0)
+    {
+        this->stream.read_message_max(this->options.maxMessageBytes);
+    }
     auto host = this->options.url.host(QUrl::FullyEncoded).toStdString();
     if constexpr (requires { this->derived()->setupStream(host); })
     {
@@ -114,8 +119,11 @@ void WebSocketConnectionHelper<Derived, Inner>::tryConnect(
 
     auto endpoint = entry->endpoint();
 
-    qCDebug(chatterinoWebsocket)
-        << *this << "connect to" << endpoint.address().to_string();
+    if (diagnostics::mayLogUrl(this->options.url))
+    {
+        qCDebug(chatterinoWebsocket)
+            << *this << "connect to" << endpoint.address().to_string();
+    }
 
     beast::get_lowest_layer(this->stream)
         .expires_after(std::chrono::seconds{30});
@@ -135,23 +143,32 @@ void WebSocketConnectionHelper<Derived, Inner>::onTcpHandshake(
 
     if (ec)
     {
-        qCDebug(chatterinoWebsocket)
-            << *this << "error in tcp handshake" << ep.address().to_string()
-            << ec.message();
+        if (diagnostics::mayLogUrl(this->options.url))
+        {
+            qCDebug(chatterinoWebsocket)
+                << *this << "error in tcp handshake" << ep.address().to_string()
+                << ec.message();
+        }
 
         beast::get_lowest_layer(this->stream).socket().close(ec);
         if (ec)
         {
-            qCDebug(chatterinoWebsocket)
-                << *this << "closing websocket after error" << ec.message();
+            if (diagnostics::mayLogUrl(this->options.url))
+            {
+                qCDebug(chatterinoWebsocket)
+                    << *this << "closing websocket after error" << ec.message();
+            }
         }
 
         this->tryConnect(this->resolvedEndpoints.advanceEntry());
         return;
     }
 
-    qCDebug(chatterinoWebsocket)
-        << *this << "TCP handshake done" << ep.address().to_string();
+    if (diagnostics::mayLogUrl(this->options.url))
+    {
+        qCDebug(chatterinoWebsocket)
+            << *this << "TCP handshake done" << ep.address().to_string();
+    }
     this->options.url.setPort(ep.port());
 
     this->resolvedEndpoints = {};
@@ -185,10 +202,13 @@ void WebSocketConnectionHelper<Derived, Inner>::doWsHandshake()
                 }
                 catch (const boost::system::system_error &err)
                 {
-                    qCWarning(chatterinoWebsocket)
-                        << "Invalid header - name:" << QUtf8StringView(key)
-                        << "value:" << QUtf8StringView(value)
-                        << "error:" << QUtf8StringView(err.what());
+                    if (diagnostics::mayLogUrl(this->options.url))
+                    {
+                        qCWarning(chatterinoWebsocket)
+                            << "Invalid header - name:" << QUtf8StringView(key)
+                            << "value:" << QUtf8StringView(value)
+                            << "error:" << QUtf8StringView(err.what());
+                    }
                 }
             }
 
@@ -235,7 +255,10 @@ void WebSocketConnectionHelper<Derived, Inner>::onWsHandshake(
         return;
     }
 
-    qCDebug(chatterinoWebsocket) << *this << "WS handshake done";
+    if (diagnostics::mayLogUrl(this->options.url))
+    {
+        qCDebug(chatterinoWebsocket) << *this << "WS handshake done";
+    }
 
     this->listener->onOpen();
     this->trySend();
@@ -329,7 +352,10 @@ void WebSocketConnectionHelper<Derived, Inner>::closeImpl()
     }
     this->isClosing = true;
 
-    qCDebug(chatterinoWebsocket) << *this << "Closing...";
+    if (diagnostics::mayLogUrl(this->options.url))
+    {
+        qCDebug(chatterinoWebsocket) << *this << "Closing...";
+    }
 
     this->resolver.cancel();
     beast::get_lowest_layer(this->stream).cancel();
@@ -339,14 +365,21 @@ void WebSocketConnectionHelper<Derived, Inner>::closeImpl()
         [this, lifetime{this->shared_from_this()}](auto ec) {
             if (ec)
             {
-                qCWarning(chatterinoWebsocket) << *this << "Failed to close"
-                                               << QUtf8StringView(ec.message());
+                if (diagnostics::mayLogUrl(this->options.url))
+                {
+                    qCWarning(chatterinoWebsocket)
+                        << *this << "Failed to close"
+                        << QUtf8StringView(ec.message());
+                }
 
                 beast::get_lowest_layer(this->stream).close();
             }
             else
             {
-                qCDebug(chatterinoWebsocket) << *this << "Closed";
+                if (diagnostics::mayLogUrl(this->options.url))
+                {
+                    qCDebug(chatterinoWebsocket) << *this << "Closed";
+                }
             }
             this->detach();
         });
@@ -363,8 +396,11 @@ template <typename Derived, typename Inner>
 void WebSocketConnectionHelper<Derived, Inner>::fail(std::string_view ec,
                                                      QStringView op)
 {
-    qCWarning(chatterinoWebsocket)
-        << *this << "Failed:" << op << QUtf8StringView(ec);
+    if (diagnostics::mayLogUrl(this->options.url))
+    {
+        qCWarning(chatterinoWebsocket)
+            << *this << "Failed:" << op << QUtf8StringView(ec);
+    }
     if (this->stream.is_open())
     {
         this->closeImpl();
@@ -409,9 +445,13 @@ void TlsWebSocketConnection::afterTcpHandshake()
                 return;
             }
 
-            qCDebug(chatterinoWebsocket)
-                << *this << "TLS handshake done, using"
-                << ::SSL_get_version(this->stream.next_layer().native_handle());
+            if (diagnostics::mayLogUrl(this->options.url))
+            {
+                qCDebug(chatterinoWebsocket)
+                    << *this << "TLS handshake done, using"
+                    << ::SSL_get_version(
+                           this->stream.next_layer().native_handle());
+            }
             this->doWsHandshake();
         });
 }

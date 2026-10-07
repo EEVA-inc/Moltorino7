@@ -4,6 +4,7 @@
 
 #include "common/websockets/detail/WebSocketConnection.hpp"
 
+#include "common/DiagnosticPrivacy.hpp"
 #include "common/QLogging.hpp"
 #include "WebSocketPoolImpl.hpp"
 
@@ -21,13 +22,19 @@ WebSocketConnection::WebSocketConnection(
     , resolver(boost::asio::make_strand(ioc))
     , id(id)
 {
-    qCDebug(chatterinoWebsocket) << *this << "Created";
+    if (diagnostics::mayLogUrl(this->options.url))
+    {
+        qCDebug(chatterinoWebsocket) << *this << "Created";
+    }
 }
 
 WebSocketConnection::~WebSocketConnection()
 {
     assert(!this->listener && !this->pool);
-    qCDebug(chatterinoWebsocket) << *this << "Destroyed";
+    if (diagnostics::mayLogUrl(this->options.url))
+    {
+        qCDebug(chatterinoWebsocket) << *this << "Destroyed";
+    }
 }
 
 QDebug operator<<(QDebug dbg, const WebSocketConnection &conn)
@@ -51,7 +58,10 @@ void WebSocketConnection::detach()
         this->pool->removeConnection(this);
         this->pool = nullptr;
     }
-    qCDebug(chatterinoWebsocket) << *this << "Detached";
+    if (diagnostics::mayLogUrl(this->options.url))
+    {
+        qCDebug(chatterinoWebsocket) << *this << "Detached";
+    }
 }
 
 }

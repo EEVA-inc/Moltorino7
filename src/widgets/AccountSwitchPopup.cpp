@@ -12,6 +12,8 @@
 #include "widgets/dialogs/SettingsDialog.hpp"
 #include "widgets/helper/KickAccountSwitchWidget.hpp"
 #include "widgets/helper/MicroNotebook.hpp"
+#include "widgets/helper/TikTokAccountSwitchWidget.hpp"
+#include "widgets/helper/YouTubeAccountSwitchWidget.hpp"
 
 #include <QLayout>
 #include <QPainter>
@@ -27,6 +29,7 @@ AccountSwitchPopup::AccountSwitchPopup(QWidget *parent)
               BaseWindow::TopMost,
               BaseWindow::Frameless,
               BaseWindow::DisableLayoutSave,
+              BaseWindow::CloseOnMinimize,
               BaseWindow::LinuxPopup,
           },
           parent)
@@ -41,9 +44,21 @@ AccountSwitchPopup::AccountSwitchPopup(QWidget *parent)
     this->ui_.accountSwitchWidget->setFocusPolicy(Qt::NoFocus);
     this->ui_.kickAccountSwitcher = new KickAccountSwitchWidget(this);
     this->ui_.kickAccountSwitcher->setFocusPolicy(Qt::NoFocus);
+    this->ui_.youtubeAccountSwitcher = new YouTubeAccountSwitchWidget(this);
+    this->ui_.youtubeAccountSwitcher->setFocusPolicy(Qt::NoFocus);
+    this->ui_.tiktokAccountSwitcher = new TikTokAccountSwitchWidget(this);
+    this->ui_.tiktokAccountSwitcher->setFocusPolicy(Qt::NoFocus);
 
     auto updateNotebook = [this, notebook] {
-        if (getApp()->getAccounts()->kick.accounts.empty())
+        bool hasAlternativeAccounts =
+            !getApp()->getAccounts()->kick.accounts.empty() ||
+            !getApp()->getAccounts()->tiktok.accounts.empty();
+#if MOLTORINO_HAVE_YOUTUBE_ACCOUNTS
+        hasAlternativeAccounts =
+            hasAlternativeAccounts ||
+            !getApp()->getAccounts()->youtube.accounts.empty();
+#endif
+        if (!hasAlternativeAccounts)
         {
             notebook->setShowHeader(false);
             notebook->select(this->ui_.accountSwitchWidget);
@@ -56,9 +71,19 @@ AccountSwitchPopup::AccountSwitchPopup(QWidget *parent)
     updateNotebook();
     this->signalHolder_.addConnection(
         getApp()->getAccounts()->kick.userListUpdated.connect(updateNotebook));
+    this->signalHolder_.addConnection(
+        getApp()->getAccounts()->tiktok.userListUpdated.connect(
+            updateNotebook));
+    this->signalHolder_.addConnection(
+        getApp()->getAccounts()->youtube.userListUpdated.connect(
+            updateNotebook));
 
     notebook->addPage(this->ui_.accountSwitchWidget, "Twitch");
     notebook->addPage(this->ui_.kickAccountSwitcher, "Kick");
+#if MOLTORINO_HAVE_YOUTUBE_ACCOUNTS
+    notebook->addPage(this->ui_.youtubeAccountSwitcher, "YouTube");
+#endif
+    notebook->addPage(this->ui_.tiktokAccountSwitcher, "TikTok");
     QVBoxLayout *vbox = new QVBoxLayout(this);
     vbox->addWidget(notebook);
 
@@ -69,14 +94,13 @@ AccountSwitchPopup::AccountSwitchPopup(QWidget *parent)
     hbox->addWidget(manageAccountsButton);
     vbox->addLayout(hbox);
 
-    connect(manageAccountsButton, &QPushButton::clicked, [this]() {
-        SettingsDialog::showDialog(this->parentWidget(),
-                                   SettingsDialogPreference::Accounts);
+    connect(manageAccountsButton, &QPushButton::clicked, []() {
+        SettingsDialog::showDialog(SettingsDialogPreference::Accounts);
     });
 
     this->getLayoutContainer()->setLayout(vbox);
 
-    this->setScaleIndependentSize(200, 200);
+    this->setScaleIndependentSize(310, 220);
     this->themeChangedEvent();
 }
 
@@ -125,6 +149,8 @@ void AccountSwitchPopup::refresh()
 {
     this->ui_.accountSwitchWidget->refresh();
     this->ui_.kickAccountSwitcher->refresh();
+    this->ui_.youtubeAccountSwitcher->refresh();
+    this->ui_.tiktokAccountSwitcher->refresh();
 }
 
 void AccountSwitchPopup::paintEvent(QPaintEvent *)

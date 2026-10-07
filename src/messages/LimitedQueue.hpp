@@ -6,6 +6,7 @@
 
 #include <boost/circular_buffer.hpp>
 
+#include <algorithm>
 #include <cassert>
 #include <mutex>
 #include <optional>
@@ -26,6 +27,14 @@ public:
     }
 
 private:
+    void ensureStorageUnlocked()
+    {
+        if (this->buffer_.capacity() == 0 && this->limit_ != 0)
+        {
+            this->buffer_.set_capacity(this->limit_);
+        }
+    }
+
     /// Property Accessors
     /**
      * @brief Return the amount of space left in the buffer
@@ -129,6 +138,14 @@ public:
         this->buffer_.clear();
     }
 
+    void releaseStorage()
+    {
+        std::unique_lock lock(this->mutex_);
+
+        this->buffer_.clear();
+        this->buffer_.set_capacity(0);
+    }
+
     /**
      * @brief Push an item to the end of the queue
      *
@@ -139,6 +156,12 @@ public:
     bool pushBack(const T &item, T &deleted)
     {
         std::unique_lock lock(this->mutex_);
+
+        this->ensureStorageUnlocked();
+        if (this->buffer_.capacity() == 0)
+        {
+            return false;
+        }
 
         bool full = this->buffer_.full();
         if (full)
@@ -159,14 +182,45 @@ public:
     {
         std::unique_lock lock(this->mutex_);
 
+        this->ensureStorageUnlocked();
+        if (this->buffer_.capacity() == 0)
+        {
+            return false;
+        }
+
         bool full = this->buffer_.full();
         this->buffer_.push_back(item);
+        return full;
+    }
+
+    bool pushFront(const T &item, T &deleted)
+    {
+        std::unique_lock lock(this->mutex_);
+
+        this->ensureStorageUnlocked();
+        if (this->buffer_.capacity() == 0)
+        {
+            return false;
+        }
+
+        const bool full = this->buffer_.full();
+        if (full)
+        {
+            deleted = this->buffer_.back();
+        }
+        this->buffer_.push_front(item);
         return full;
     }
 
     void pushFrontWhile(auto &&next)
     {
         std::unique_lock lock(this->mutex_);
+
+        this->ensureStorageUnlocked();
+        if (this->buffer_.capacity() == 0)
+        {
+            return;
+        }
 
         while (!this->buffer_.full())
         {
@@ -192,6 +246,17 @@ public:
     std::vector<T> pushFront(const std::vector<T> &items)
     {
         std::unique_lock lock(this->mutex_);
+
+        if (items.empty() || this->limit_ == 0)
+        {
+            return {};
+        }
+
+        this->ensureStorageUnlocked();
+        if (this->buffer_.capacity() == 0)
+        {
+            return {};
+        }
 
         size_t numToPush = std::min(items.size(), this->space());
         std::vector<T> pushed;
@@ -347,6 +412,29 @@ public:
     {
         std::shared_lock lock(this->mutex_);
         return {this->buffer_.begin(), this->buffer_.end()};
+    }
+
+    bool replaceContentsIfUnchanged(const std::vector<T> &expected,
+                                    std::vector<T> replacement)
+    {
+        std::unique_lock lock(this->mutex_);
+        if (this->buffer_.size() != expected.size() ||
+            !std::equal(this->buffer_.begin(), this->buffer_.end(),
+                        expected.begin()))
+        {
+            return false;
+        }
+
+        this->ensureStorageUnlocked();
+        this->buffer_.clear();
+        const auto first = replacement.size() > this->limit_
+                               ? replacement.size() - this->limit_
+                               : size_t{0};
+        for (auto i = first; i < replacement.size(); ++i)
+        {
+            this->buffer_.push_back(std::move(replacement[i]));
+        }
+        return true;
     }
 
     [[nodiscard]] std::vector<T> lastN(size_t nItems) const

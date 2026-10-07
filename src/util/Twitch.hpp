@@ -7,10 +7,13 @@
 #include <QRegularExpression>
 #include <QString>
 #include <QStringList>
+#include <QUrl>
 
 namespace chatterino {
 
 extern const QStringList VALID_HELIX_COLORS;
+
+QUrl twitchUsercardUrl(QString channel, QString username);
 
 void openTwitchUsercard(const QString channel, const QString username);
 

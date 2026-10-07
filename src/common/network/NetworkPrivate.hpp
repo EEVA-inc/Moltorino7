@@ -15,12 +15,18 @@
 
 #include <memory>
 #include <optional>
+#include <stop_token>
 
 class QNetworkReply;
+class QVersionNumber;
 
 namespace chatterino {
 
 class NetworkResult;
+
+namespace network::detail {
+bool needsTwitchCdnHttp1(const QUrl &url, const QVersionNumber &qtVersion);
+}
 
 class NetworkRequester : public QObject
 {
@@ -44,7 +50,9 @@ public:
     bool hasCaller{};
     QPointer<QObject> caller;
     bool cache{};
+    std::function<bool(const QByteArray &)> cacheValidator;
     bool executeConcurrently{};
+    std::stop_token cancellation;
 
     bool hideRequestBody = false;
 
@@ -58,6 +66,7 @@ public:
     std::unique_ptr<QHttpMultiPart, DeleteLater> multiPartPayload;
 
     std::optional<std::chrono::milliseconds> timeout{};
+    std::optional<qsizetype> maximumResponseSize{};
 #ifndef NDEBUG
     bool ignoreSslErrors = false;
 #endif

@@ -9,6 +9,7 @@
 #include <QHttpMultiPart>
 
 #include <memory>
+#include <stop_token>
 
 class QJsonArray;
 class QJsonObject;
@@ -49,7 +50,8 @@ public:
     NetworkRequest hideRequestBody() &&;
 
     NetworkRequest payload(const QByteArray &payload) &&;
-    NetworkRequest cache() &&;
+    NetworkRequest cache(
+        std::function<bool(const QByteArray &)> validator = {}) &&;
 
     NetworkRequest caller(const QObject *caller) &&;
     NetworkRequest header(const char *headerName, const char *value) &&;
@@ -64,7 +66,10 @@ public:
     NetworkRequest headerList(
         const std::vector<std::pair<QByteArray, QByteArray>> &headers) &&;
     NetworkRequest timeout(int ms) &&;
+    NetworkRequest maximumResponseSize(qsizetype bytes) &&;
+    NetworkRequest maximumRedirectsAllowed(int maximum) &&;
     NetworkRequest concurrent() &&;
+    NetworkRequest cancelWith(std::stop_token cancellation) &&;
     NetworkRequest multiPart(QHttpMultiPart *payload) &&;
 
     NetworkRequest followRedirects(bool on) &&;

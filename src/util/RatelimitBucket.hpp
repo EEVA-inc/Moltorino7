@@ -19,6 +19,8 @@ public:
                     std::function<void(QString)> callback, QObject *parent);
 
     void send(QString channel);
+    void clearPending();
+    void removePending(const QString &channel);
 
 private:
 

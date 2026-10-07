@@ -5,6 +5,7 @@
 #include "common/network/NetworkPrivate.hpp"
 
 #include "Application.hpp"
+#include "common/DiagnosticPrivacy.hpp"
 #include "common/network/NetworkManager.hpp"
 #include "common/network/NetworkResult.hpp"
 #include "common/network/NetworkTask.hpp"
@@ -48,6 +49,10 @@ void runCallback(bool concurrent, auto &&fn)
 
 void loadUncached(std::shared_ptr<NetworkData> &&data)
 {
+    if (data->cancellation.stop_requested())
+    {
+        return;
+    }
     DebugCount::increase(DebugObject::HTTPRequestStarted);
 
     NetworkRequester requester;
@@ -63,20 +68,30 @@ void loadUncached(std::shared_ptr<NetworkData> &&data)
 
 void loadCached(std::shared_ptr<NetworkData> &&data)
 {
+    if (data->cancellation.stop_requested())
+    {
+        return;
+    }
     if (isAppAboutToQuit())
     {
-        qCDebug(chatterinoHTTP)
-            << "Skipping cached network load " << data->request.url()
-            << "because app is about to quit";
+        if (diagnostics::mayLogUrl(data->request.url()))
+        {
+            qCDebug(chatterinoHTTP)
+                << "Skipping cached network load " << data->request.url()
+                << "because app is about to quit";
+        }
         return;
     }
 
     auto *app = tryGetApp();
     if (!app)
     {
-        qCDebug(chatterinoHTTP)
-            << "Skipping cached network load " << data->request.url()
-            << "because app is about to quit";
+        if (diagnostics::mayLogUrl(data->request.url()))
+        {
+            qCDebug(chatterinoHTTP)
+                << "Skipping cached network load " << data->request.url()
+                << "because app is about to quit";
+        }
         return;
     }
 
@@ -88,10 +103,36 @@ void loadCached(std::shared_ptr<NetworkData> &&data)
         return;
     }
 
-    QByteArray bytes = cachedFile.readAll();
+    if (data->maximumResponseSize &&
+        cachedFile.size() > *data->maximumResponseSize)
+    {
+        if (diagnostics::mayLogUrl(data->request.url()))
+        {
+            qCDebug(chatterinoHTTP).noquote()
+                << data->typeString() << "[cached response too large]"
+                << data->request.url().toString();
+        }
+        cachedFile.close();
+        cachedFile.remove();
+        loadUncached(std::move(data));
+        return;
+    }
 
-    qCDebug(chatterinoHTTP).noquote() << data->typeString() << "[CACHED] 200"
-                                      << data->request.url().toString();
+    QByteArray bytes = cachedFile.readAll();
+    if (data->cacheValidator && !data->cacheValidator(bytes))
+    {
+        cachedFile.close();
+        cachedFile.remove();
+        loadUncached(std::move(data));
+        return;
+    }
+
+    if (diagnostics::mayLogUrl(data->request.url()))
+    {
+        qCDebug(chatterinoHTTP).noquote()
+            << data->typeString() << "[CACHED] 200"
+            << data->request.url().toString();
+    }
 
     data->emitSuccess(
         {NetworkResult::NetworkError::NoError, QVariant(200), bytes});
@@ -152,9 +193,12 @@ void NetworkData::emitSuccess(NetworkResult &&result)
 
                     if (isAppAboutToQuit())
                     {
-                        qCDebug(chatterinoHTTP)
-                            << "Success callback for" << url.toString()
-                            << "skipped because we're about to quit";
+                        if (diagnostics::mayLogUrl(url))
+                        {
+                            qCDebug(chatterinoHTTP)
+                                << "Success callback for" << url.toString()
+                                << "skipped because we're about to quit";
+                        }
                         return;
                     }
 
@@ -163,10 +207,15 @@ void NetworkData::emitSuccess(NetworkResult &&result)
                     cb(result);
                     if (timer.elapsed() > SLOW_HTTP_THRESHOLD)
                     {
-                        qCWarning(chatterinoHTTP)
-                            << "Slow HTTP success handler for" << url.toString()
-                            << timer.elapsed()
-                            << "ms (threshold:" << SLOW_HTTP_THRESHOLD << "ms)";
+                        if (diagnostics::mayLogUrl(url))
+                        {
+                            qCWarning(chatterinoHTTP)
+                                << "Slow HTTP success handler for"
+                                << url.toString()
+                                << timer.elapsed()
+                                << "ms (threshold:" << SLOW_HTTP_THRESHOLD
+                                << "ms)";
+                        }
                     }
                 });
 }
@@ -189,9 +238,12 @@ void NetworkData::emitError(NetworkResult &&result)
 
                     if (isAppAboutToQuit())
                     {
-                        qCDebug(chatterinoHTTP)
-                            << "Error callback for" << url.toString()
-                            << "skipped because we're about to quit";
+                        if (diagnostics::mayLogUrl(url))
+                        {
+                            qCDebug(chatterinoHTTP)
+                                << "Error callback for" << url.toString()
+                                << "skipped because we're about to quit";
+                        }
                         return;
                     }
 
@@ -216,9 +268,12 @@ void NetworkData::emitFinally()
 
                     if (isAppAboutToQuit())
                     {
-                        qCDebug(chatterinoHTTP)
-                            << "Finally callback for" << url.toString()
-                            << "skipped because we're about to quit";
+                        if (diagnostics::mayLogUrl(url))
+                        {
+                            qCDebug(chatterinoHTTP)
+                                << "Finally callback for" << url.toString()
+                                << "skipped because we're about to quit";
+                        }
                         return;
                     }
 

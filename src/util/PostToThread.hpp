@@ -13,6 +13,11 @@ namespace chatterino {
 
 static void postToThread(auto &&f, QObject *obj = QCoreApplication::instance())
 {
+    if (obj == nullptr)
+    {
+        return;
+    }
+
     QMetaObject::invokeMethod(obj, std::forward<decltype(f)>(f));
 }
 

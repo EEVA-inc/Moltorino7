@@ -6,6 +6,8 @@
 
 #include "widgets/BaseWidget.hpp"
 #include "widgets/dialogs/KickLoginPage.hpp"
+#include "widgets/dialogs/TikTokLoginPage.hpp"
+#include "widgets/dialogs/YouTubeLoginPage.hpp"
 
 #include <QAction>
 #include <QApplication>
@@ -84,6 +86,8 @@ private:
         AdvancedLoginWidget advanced;
 
         KickLoginPage kick;
+        YouTubeLoginPage youtube;
+        TikTokLoginPage tiktok;
     } ui_;
 };
 

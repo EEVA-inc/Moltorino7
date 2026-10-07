@@ -20,6 +20,49 @@ namespace chatterino {
 
 using namespace literals;
 
+namespace {
+
+bool isDigit(QChar c)
+{
+    const auto value = c.unicode();
+    return value >= '0' && value <= '9';
+}
+
+bool isLowerHexLetter(QChar c)
+{
+    const auto value = c.unicode();
+    return value >= 'a' && value <= 'f';
+}
+
+bool isUpperHexLetter(QChar c)
+{
+    const auto value = c.unicode();
+    return value >= 'A' && value <= 'F';
+}
+
+bool isUuidVariant(QChar c)
+{
+    return c == QLatin1Char('8') || c == QLatin1Char('9') ||
+           c == QLatin1Char('a') || c == QLatin1Char('b') ||
+           c == QLatin1Char('A') || c == QLatin1Char('B');
+}
+
+QString highlightMatchSourceName(HighlightMatchSource source)
+{
+    switch (source)
+    {
+        case HighlightMatchSource::Phrase:
+            return u"phrase"_s;
+        case HighlightMatchSource::WordList:
+            return u"moderation-list"_s;
+        case HighlightMatchSource::AutoMod:
+            return u"automod"_s;
+    }
+    return {};
+}
+
+}
+
 Message::Message()
     : parseTime(QTime::currentTime())
 {
@@ -33,6 +76,10 @@ Message::~Message()
 
 ScrollbarHighlight Message::getScrollBarHighlight() const
 {
+    if (this->isHiddenByClientNonce())
+    {
+        return {};
+    }
     if (this->flags.has(MessageFlag::Highlighted) ||
         this->flags.has(MessageFlag::HighlightedWhisper))
     {
@@ -58,7 +105,8 @@ ScrollbarHighlight Message::getScrollBarHighlight() const
     }
 
     if (this->flags.has(MessageFlag::RedeemedHighlight) ||
-        this->flags.has(MessageFlag::RedeemedChannelPointReward))
+        (this->flags.has(MessageFlag::RedeemedChannelPointReward) &&
+         !this->usesTwitchGigantifyPresentation()))
     {
         return {
             ColorProvider::instance().color(ColorType::RedeemedHighlight),
@@ -104,6 +152,23 @@ ScrollbarHighlight Message::getScrollBarHighlight() const
         };
     }
 
+    if (this->flags.has(MessageFlag::Announcement) &&
+        getSettings()->enableAnnouncementHighlight)
+    {
+        return {
+            ColorProvider::instance().color(colorTypeFromHelixAnnouncementColor(
+                this->announcementColor,
+                getSettings()->enableColoredAnnouncementHighlight)),
+        };
+    }
+
+    if (this->flags.has(MessageFlag::UncategorizedNotification))
+    {
+        return {
+            ColorProvider::instance().color(ColorType::Subscription),
+        };
+    }
+
     return {};
 }
 
@@ -124,16 +189,28 @@ std::shared_ptr<Message> Message::clone() const
     cloned->usernameColor = this->usernameColor;
     cloned->serverReceivedTime = this->serverReceivedTime;
     cloned->twitchBadges = this->twitchBadges;
+    if (this->sharedChatSourceBadges)
+    {
+        cloned->sharedChatSourceBadges =
+            std::make_unique<const std::vector<TwitchBadge>>(
+                *this->sharedChatSourceBadges);
+    }
     cloned->twitchBadgeInfos = this->twitchBadgeInfos;
     cloned->externalBadges = this->externalBadges;
     cloned->highlightColor = this->highlightColor;
+    cloned->highlightMatches = this->highlightMatches;
+    cloned->autoModReview = this->autoModReview;
     cloned->replyThread = this->replyThread;
     cloned->replyParent = this->replyParent;
     cloned->translatedFrom = this->translatedFrom;
     cloned->count = this->count;
     cloned->reward = this->reward;
+    cloned->sharedChatSourceId = this->sharedChatSourceId;
     cloned->platform = this->platform;
     cloned->clientDetection = this->clientDetection;
+    cloned->emoteOnly = this->emoteOnly;
+    cloned->bits = this->bits;
+    cloned->announcementColor = this->announcementColor;
     std::ranges::transform(this->elements, std::back_inserter(cloned->elements),
                            [](const auto &element) {
                                return element->clone();
@@ -182,6 +259,25 @@ QJsonObject Message::toJson() const
         msg["highlightColor"_L1] = this->highlightColor->name(QColor::HexArgb);
     }
 
+    if (this->highlightMatches && !this->highlightMatches->empty())
+    {
+        QJsonArray matches;
+        for (const auto &match : *this->highlightMatches)
+        {
+            matches.append(QJsonObject{
+                {"start"_L1, static_cast<qint64>(match.start)},
+                {"length"_L1, static_cast<qint64>(match.length)},
+                {"color"_L1, match.color.name(QColor::HexArgb)},
+                {"rule"_L1, match.ruleName},
+                {"pattern"_L1, match.pattern},
+                {"source"_L1, highlightMatchSourceName(match.source)},
+                {"style"_L1, highlightMatchStyleName(match.style)},
+                {"paintID"_L1, match.paintID},
+            });
+        }
+        msg["highlightMatches"_L1] = matches;
+    }
+
     if (this->replyThread)
     {
         msg["replyThread"_L1] = this->replyThread->toJson();
@@ -195,6 +291,17 @@ QJsonObject Message::toJson() const
     if (this->reward)
     {
         msg["reward"_L1] = this->reward->toJson();
+    }
+
+    if (this->bits > 0)
+    {
+        msg["bits"_L1] = static_cast<qint64>(this->bits);
+    }
+
+    if (this->flags.has(MessageFlag::Announcement))
+    {
+        msg["announcementColor"_L1] =
+            qmagicenum::enumNameString(this->announcementColor);
     }
 
     if (!getApp()->isTest())
@@ -233,6 +340,80 @@ QString Message::clientDetectionStatusToString(ClientDetectionStatus status)
         default:
             return QStringLiteral("Unknown");
     }
+}
+
+bool Message::isHiddenByClientNonce() const
+{
+    return this->flags.has(MessageFlag::ExtendedClientNonce) &&
+           !getSettings()->extendedClientNonceParsing;
+}
+
+bool Message::usesTwitchGigantifyPresentation() const
+{
+    return this->flags.has(MessageFlag::GigantifiedEmote) &&
+           getSettings()->enableGigantifyEmotes;
+}
+
+Message::ClientDetectionStatus Message::classifyClientNonce(
+    const QString &nonce)
+{
+    using Status = ClientDetectionStatus;
+
+    if (nonce.isEmpty())
+    {
+        return Status::Abnormal;
+    }
+
+    if (nonce.size() == 32)
+    {
+        const bool web = std::all_of(nonce.cbegin(), nonce.cend(), [](QChar c) {
+            return isDigit(c) || isLowerHexLetter(c);
+        });
+        return web ? Status::Web : Status::Abnormal;
+    }
+
+    if (nonce.size() != 36 || nonce.at(8) != QLatin1Char('-') ||
+        nonce.at(13) != QLatin1Char('-') ||
+        nonce.at(18) != QLatin1Char('-') ||
+        nonce.at(23) != QLatin1Char('-') ||
+        nonce.at(14) != QLatin1Char('4') || !isUuidVariant(nonce.at(19)))
+    {
+        return Status::Abnormal;
+    }
+
+    bool sawLower = false;
+    bool sawUpper = false;
+    for (qsizetype index = 0; index < nonce.size(); ++index)
+    {
+        if (index == 8 || index == 13 || index == 18 || index == 23)
+        {
+            continue;
+        }
+
+        const auto c = nonce.at(index);
+        if (isDigit(c))
+        {
+            continue;
+        }
+        if (isLowerHexLetter(c))
+        {
+            sawLower = true;
+            continue;
+        }
+        if (isUpperHexLetter(c))
+        {
+            sawUpper = true;
+            continue;
+        }
+
+        return Status::Abnormal;
+    }
+
+    if (sawLower && sawUpper)
+    {
+        return Status::Abnormal;
+    }
+    return sawUpper ? Status::IOS : Status::Android;
 }
 
 Message::ReplyStatus Message::isReplyable() const
