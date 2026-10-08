@@ -410,50 +410,8 @@ ThemeCustomizationProfile profileFromTheme(const ThemeDescriptor &descriptor,
     {
         return *profile;
     }
-    ThemeCustomizationProfile profile;
-    profile.name = descriptor.name;
-    profile.useThemeFonts = false;
-    profile.useThemeFontSizes = false;
-    profile.baseTheme = descriptor.key;
-    profile.background = nestedColor(
-        json, {u"colors"_s, u"window"_s, u"background"_s}, profile.background);
-    profile.chatBackground =
-        nestedColor(json, {u"colors"_s, u"splits"_s, u"background"_s},
-                    profile.chatBackground);
-    profile.surface = nestedColor(
-        json,
-        {u"colors"_s, u"tabs"_s, u"regular"_s, u"backgrounds"_s, u"regular"_s},
-        profile.surface);
-    profile.raisedSurface = nestedColor(
-        json,
-        {u"colors"_s, u"tabs"_s, u"selected"_s, u"backgrounds"_s, u"regular"_s},
-        profile.raisedSurface);
-    profile.text =
-        nestedColor(json, {u"colors"_s, u"window"_s, u"text"_s}, profile.text);
-    profile.chatText = nestedColor(
-        json, {u"colors"_s, u"messages"_s, u"textColors"_s, u"regular"_s},
-        profile.text);
-    profile.separateChatText = profile.chatText != profile.text;
-    const auto messageSystem = nestedColor(
-        json, {u"colors"_s, u"messages"_s, u"textColors"_s, u"system"_s},
-        profile.mutedText);
-    profile.mutedText = nestedColor(
-        json, {u"colors"_s, u"tabs"_s, u"regular"_s, u"text"_s}, messageSystem);
-    profile.systemText = nestedColor(
-        json, {u"colors"_s, u"messages"_s, u"textColors"_s, u"system"_s},
-        messageSystem);
-    profile.timestampText = nestedColor(
-        json, {u"colors"_s, u"messages"_s, u"textColors"_s, u"timestamp"_s},
-        profile.systemText);
-    profile.accent =
-        nestedColor(json, {u"colors"_s, u"accent"_s}, profile.accent);
-    profile.foundation = ThemeFoundation::ChatterinoClassic;
-    profile.useThemeMessageRows = false;
-    profile.cornerStyle = ThemeCornerStyle::Classic;
-    profile.tabCornerRadius = 0;
-    profile.chatCornerRadius = 0;
-    profile.roundChat = false;
-    return profile;
+    return customizationProfileFromClassicTheme(json, descriptor.name,
+                                                descriptor.key);
 }
 
 QJsonObject appearanceEnvelope(const QJsonObject &theme)
@@ -1676,11 +1634,15 @@ protected:
         }
 
         painter.setFont(interfaceFont);
-        painter.setPen(interfaceText);
+        painter.setPen(color(
+            {u"colors"_s, u"splits"_s, u"header"_s,
+             polished ? u"text"_s : u"focusedText"_s}, interfaceText));
         painter.drawText(channelHeader.adjusted(8, 0, -8, 0),
                          Qt::AlignVCenter | Qt::AlignHCenter,
                          u"yusuf7n (live)"_s);
-        painter.setPen(mutedText);
+        painter.setPen(color(
+            {u"colors"_s, u"messages"_s, u"textColors"_s,
+             u"chatPlaceholder"_s}, mutedText));
         painter.drawText(input.adjusted(8, 0, -8, 0), Qt::AlignVCenter,
                          u"Send message as moltobenne_..."_s);
 
@@ -3558,6 +3520,12 @@ void CustomizationPage::duplicateProfile()
     {
         copy.useThemeMessageRows = true;
         copy.alternateMessageRows = getSettings()->alternateMessages.getValue();
+    }
+    if (!this->selectedCustom_ && !copy.originalColors.isEmpty())
+    {
+        copy.originalGeneratedColors = {};
+        copy.originalGeneratedColors =
+            buildCustomizedTheme(copy).value(u"colors"_s).toObject();
     }
     if (copy.chatFontFamily.isEmpty())
     {

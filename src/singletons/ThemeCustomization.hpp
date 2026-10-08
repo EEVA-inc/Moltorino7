@@ -63,10 +63,12 @@ QPainterPath themeTopTabPath(const QRectF &rect, qreal radius, bool roundLeft,
                              bool roundRight);
 
 struct ThemeCustomizationProfile {
-    static constexpr int CURRENT_VERSION = 14;
+    static constexpr int CURRENT_VERSION = 16;
 
     QString name;
     QString baseTheme = QStringLiteral("Dark");
+    QJsonObject originalColors;
+    QJsonObject originalGeneratedColors;
 
     QColor background = QColor(QStringLiteral("#111111"));
     QColor chatBackground = QColor(QStringLiteral("#191919"));
@@ -164,6 +166,9 @@ enum class ThemePaletteMode : uint8_t {
 
 std::optional<ThemeCustomizationProfile> customizationProfileFromTheme(
     const QJsonObject &theme);
+
+ThemeCustomizationProfile customizationProfileFromClassicTheme(
+    const QJsonObject &theme, const QString &name, const QString &key);
 
 std::optional<ThemeCustomizationProfile> customizationProfileFromBluzyrinoTheme(
     const QJsonObject &theme, const QString &name);

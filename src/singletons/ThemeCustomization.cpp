@@ -62,6 +62,56 @@ QJsonObject tabState(const QColor &text, const QColor &regular,
     };
 }
 
+QJsonObject validatedThemeColors(const QJsonObject &source,
+                                 const QJsonObject &shape)
+{
+    QJsonObject result;
+    for (auto it = shape.begin(); it != shape.end(); ++it)
+    {
+        const auto value = source.value(it.key());
+        if (it->isObject())
+        {
+            const auto child =
+                validatedThemeColors(value.toObject(), it->toObject());
+            if (!child.isEmpty())
+            {
+                result.insert(it.key(), child);
+            }
+        }
+        else if (value.isString() && QColor(value.toString()).isValid())
+        {
+            result.insert(it.key(), value);
+        }
+    }
+    return result;
+}
+
+QJsonObject preserveUnchangedThemeColors(QJsonObject generated,
+                                         const QJsonObject &reference,
+                                         const QJsonObject &original)
+{
+    for (auto it = generated.begin(); it != generated.end(); ++it)
+    {
+        if (it->isObject())
+        {
+            it.value() = preserveUnchangedThemeColors(
+                it->toObject(), reference.value(it.key()).toObject(),
+                original.value(it.key()).toObject());
+        }
+        else
+        {
+            const auto saved = original.value(it.key());
+            if (QColor(saved.toString()).isValid() &&
+                QColor(it->toString()) ==
+                    QColor(reference.value(it.key()).toString()))
+            {
+                it.value() = saved;
+            }
+        }
+    }
+    return generated;
+}
+
 QString depthName(ThemeSurfaceDepth value)
 {
     switch (value)
@@ -946,6 +996,55 @@ void ThemeCustomizationProfile::clearDisabledFontOverrides()
     }
 }
 
+ThemeCustomizationProfile customizationProfileFromClassicTheme(
+    const QJsonObject &theme, const QString &name, const QString &key)
+{
+    const auto colors = theme.value(u"colors"_s).toObject();
+    const auto window = colors.value(u"window"_s).toObject();
+    const auto tabs = colors.value(u"tabs"_s).toObject();
+    const auto regularTab = tabs.value(u"regular"_s).toObject();
+    const auto selectedTab = tabs.value(u"selected"_s).toObject();
+    const auto text = colors.value(u"messages"_s)
+                          .toObject()
+                          .value(u"textColors"_s)
+                          .toObject();
+    ThemeCustomizationProfile profile;
+    profile.name = name;
+    profile.useThemeFonts = false;
+    profile.useThemeFontSizes = false;
+    profile.baseTheme = key;
+    profile.background = readColor(window, u"background"_s, profile.background);
+    profile.chatBackground = readColor(colors.value(u"splits"_s).toObject(),
+                                       u"background"_s, profile.chatBackground);
+    profile.surface = readColor(regularTab.value(u"backgrounds"_s).toObject(),
+                                u"regular"_s, profile.surface);
+    profile.raisedSurface =
+        readColor(selectedTab.value(u"backgrounds"_s).toObject(), u"regular"_s,
+                  profile.raisedSurface);
+    profile.text = readColor(window, u"text"_s, profile.text);
+    profile.chatText = readColor(text, u"regular"_s, profile.text);
+    profile.separateChatText = profile.chatText != profile.text;
+    profile.systemText = readColor(text, u"system"_s, profile.mutedText);
+    profile.mutedText = readColor(regularTab, u"text"_s, profile.systemText);
+    profile.timestampText = readColor(text, u"timestamp"_s, profile.systemText);
+    profile.accent = readColor(colors, u"accent"_s, profile.accent);
+    profile.foundation = ThemeFoundation::ChatterinoClassic;
+    profile.useThemeMessageRows = false;
+    profile.cornerStyle = ThemeCornerStyle::Classic;
+    profile.tabCornerRadius = 0;
+    profile.chatCornerRadius = 0;
+    profile.roundChat = false;
+    if (key == u"Dark" || key == u"Black" || key == u"Light" || key == u"White")
+    {
+        const auto generated =
+            buildCustomizedTheme(profile).value(u"colors"_s).toObject();
+        profile.originalColors = validatedThemeColors(
+            theme.value(u"colors"_s).toObject(), generated);
+        profile.originalGeneratedColors = generated;
+    }
+    return profile;
+}
+
 std::optional<ThemeCustomizationProfile> customizationProfileFromTheme(
     const QJsonObject &theme)
 {
@@ -1174,6 +1273,18 @@ std::optional<ThemeCustomizationProfile> customizationProfileFromTheme(
                 typography.value(u"useThemeFontSizes"_s).toBool(false);
         }
     }
+    if (version >= 16 &&
+        customization.value(u"originalColors"_s).isObject() &&
+        customization.value(u"originalGeneratedColors"_s).isObject())
+    {
+        const auto shape =
+            buildCustomizedTheme(profile).value(u"colors"_s).toObject();
+        profile.originalColors = validatedThemeColors(
+            customization.value(u"originalColors"_s).toObject(), shape);
+        profile.originalGeneratedColors = validatedThemeColors(
+            customization.value(u"originalGeneratedColors"_s).toObject(),
+            shape);
+    }
     return profile.isValid() ? std::optional(profile) : std::nullopt;
 }
 
@@ -1227,9 +1338,6 @@ QJsonObject buildCustomizedTheme(const ThemeCustomizationProfile &input)
     const QColor focusedChannelBar =
         profile.foundation == ThemeFoundation::MoltorinoPolished ? channelBar
                                                                  : selected;
-    const QColor focusedChannelBorder =
-        profile.foundation == ThemeFoundation::MoltorinoPolished ? border
-                                                                 : accentLine;
     const QColor messageRegular = profile.hasWallpaper()
                                       ? alpha(profile.chatBackground, 0)
                                       : profile.chatBackground;
@@ -1268,7 +1376,7 @@ QJsonObject buildCustomizedTheme(const ThemeCustomizationProfile &input)
         {u"timestamp"_s, encoded(profile.timestampText)},
     };
 
-    const QJsonObject colors{
+    QJsonObject colors{
         {u"accent"_s, encoded(profile.accent)},
         {u"window"_s,
          QJsonObject{{u"background"_s, encoded(profile.background)},
@@ -1315,7 +1423,7 @@ QJsonObject buildCustomizedTheme(const ThemeCustomizationProfile &input)
               QJsonObject{{u"background"_s, encoded(channelBar)},
                           {u"border"_s, encoded(border)},
                           {u"focusedBackground"_s, encoded(focusedChannelBar)},
-                          {u"focusedBorder"_s, encoded(focusedChannelBorder)},
+                          {u"focusedBorder"_s, encoded(border)},
                           {u"focusedText"_s, encoded(profile.text)},
                           {u"text"_s, encoded(profile.text)}}},
              {u"input"_s,
@@ -1346,7 +1454,7 @@ QJsonObject buildCustomizedTheme(const ThemeCustomizationProfile &input)
          }},
     };
 
-    const QJsonObject customization{
+    QJsonObject customization{
         {u"version"_s, ThemeCustomizationProfile::CURRENT_VERSION},
         {u"foundation"_s, foundationName(profile.foundation)},
         {u"surfaceDepth"_s,
@@ -1418,13 +1526,27 @@ QJsonObject buildCustomizedTheme(const ThemeCustomizationProfile &input)
                      {u"interfaceSize"_s, profile.interfaceFontSize}}},
     };
 
+    if (!profile.originalColors.isEmpty() &&
+        !profile.originalGeneratedColors.isEmpty())
+    {
+        const auto original =
+            validatedThemeColors(profile.originalColors, colors);
+        const auto reference =
+            validatedThemeColors(profile.originalGeneratedColors, colors);
+        customization.insert(u"originalColors"_s, original);
+        customization.insert(u"originalGeneratedColors"_s, reference);
+        colors = preserveUnchangedThemeColors(colors, reference, original);
+    }
+
     return {
         {u"$schema"_s, u"../../docs/ChatterinoTheme.schema.json"_s},
         {u"metadata"_s,
          QJsonObject{
              {u"name"_s, profile.name},
              {u"iconTheme"_s, light ? u"dark"_s : u"light"_s},
-             {u"fallbackTheme"_s, light ? u"Light"_s : profile.baseTheme},
+             {u"fallbackTheme"_s,
+              light && profile.originalColors.isEmpty() ? u"Light"_s
+                                                       : profile.baseTheme},
              {u"moltorino"_s, customization}}},
         {u"colors"_s, colors},
     };
