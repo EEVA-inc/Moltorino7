@@ -1257,6 +1257,11 @@ void GeneralPage::initLayout(GeneralPageView &layout)
         ->addKeywords({"homies", "custom"})
         ->setTooltip("Custom Homies badges")
         ->addTo(layout);
+    SettingWidget::checkbox("JilChat", s.showBadgesJilChat)
+        ->addKeywords({"jilchat", "jil"})
+        ->setTooltip("Badges from JilChat. Nothing is requested from JilChat "
+                     "while this is off.")
+        ->addTo(layout);
     SettingWidget::checkbox("Moltorino", s.showBadgesMoltorino)
         ->addKeywords({"moltorino", "supporter", "top donor", "developer"})
         ->setTooltip(

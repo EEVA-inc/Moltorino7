@@ -274,6 +274,7 @@ private:
     quint64 saveSevenTVAuthGeneration_ = 0;
     bool layoutTouched_ = false;
     bool layoutNeedsSync_ = false;
+    bool syncJilChatSlot_ = true;
     int layoutRevision_ = 0;
     bool autoPinnedForSave_ = false;
     bool paintChoicesBuilt_ = false;

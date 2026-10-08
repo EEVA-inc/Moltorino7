@@ -68,6 +68,11 @@ public:
         return nullptr;
     }
 
+    JilChatBadges *getJilChatBadges() override
+    {
+        return nullptr;
+    }
+
     PotatCommands *getPotatCommands() override
     {
         return nullptr;

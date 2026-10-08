@@ -71,7 +71,7 @@ bool isValidVanitySlotKey(const QString &value)
         QStringLiteral("tp"), QStringLiteral("c"),  QStringLiteral("ff"),
         QStringLiteral("fa"), QStringLiteral("bt"), QStringLiteral("m"),
         QStringLiteral("7"),  QStringLiteral("hs"), QStringLiteral("hc"),
-        QStringLiteral("bl"),
+        QStringLiteral("bl"), QStringLiteral("jc"),
     };
     return slots.contains(value);
 }
@@ -602,6 +602,10 @@ MoltorinoVanityLayout normalizeLayout(MoltorinoVanityLayout layout)
         order.insert(std::ranges::find(order, QStringLiteral("m")),
                      QStringLiteral("bl"));
     }
+    if (present.insert(QStringLiteral("jc")).second)
+    {
+        order.push_back(QStringLiteral("jc"));
+    }
     layout.order = std::move(order);
 
     std::unordered_set<QString> hidden;
@@ -761,9 +765,27 @@ bool shouldSaveProfile(const MoltorinoVanityLayout &original,
            normalizeLayout(original) != normalizeLayout(current);
 }
 
+MoltorinoVanityLayout withoutDeviceOnlyKeys(MoltorinoVanityLayout layout)
+{
+    std::erase(layout.order, QStringLiteral("jc"));
+    layout.hidden.erase(QStringLiteral("jc"));
+    return layout;
+}
+
 bool shouldClearLocalLayout(const MoltorinoVanityLayout &local,
                             const std::optional<MoltorinoVanityLayout> &remote)
 {
+    if (remote && *remote == local)
+    {
+        return true;
+    }
+    // The server may not store the JilChat slot. A layout that moves or hides
+    // it then only exists on this device and has to stay.
+    if (local.hidden.contains(QStringLiteral("jc")) ||
+        (!local.order.empty() && local.order.back() != QStringLiteral("jc")))
+    {
+        return false;
+    }
     if (remote)
     {
         return *remote == local;

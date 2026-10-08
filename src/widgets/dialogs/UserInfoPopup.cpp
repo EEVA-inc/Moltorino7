@@ -30,6 +30,7 @@
 #include "providers/ffzap/FfzApBadges.hpp"
 #include "providers/homies/HomiesBadges.hpp"
 #include "providers/IvrApi.hpp"
+#include "providers/jilchat/JilChatBadges.hpp"
 #include "providers/kick/KickAccount.hpp"
 #include "providers/kick/KickApi.hpp"
 #include "providers/kick/KickChatServer.hpp"
@@ -2463,6 +2464,12 @@ UserInfoPopup::UserInfoPopup(bool closeAutomatically, Split *split)
             [this] { this->refreshIdentityBadges(); });
     }
     if (auto *provider = getApp()->getBluzyrinoBadges())
+    {
+        this->signalHolder_.managedConnect(
+            provider->badgesUpdated,
+            [this] { this->refreshIdentityBadges(); });
+    }
+    if (auto *provider = getApp()->getJilChatBadges())
     {
         this->signalHolder_.managedConnect(
             provider->badgesUpdated,
@@ -6302,6 +6309,14 @@ void UserInfoPopup::refreshIdentityBadges()
                                 index == 0
                                     ? MessageElementFlag::BadgeHomiesCustom
                                     : MessageElementFlag::BadgeHomiesSupporter);
+                        }
+                    }
+                    if (auto *provider = getApp()->getJilChatBadges())
+                    {
+                        for (const auto &badge : provider->getBadges({userID}))
+                        {
+                            appendBadge(badge,
+                                        MessageElementFlag::BadgeJilChat);
                         }
                     }
                 }
