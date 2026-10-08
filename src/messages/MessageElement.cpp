@@ -1713,7 +1713,8 @@ void TextElement::addToContainer(MessageLayoutContainer &container,
 
 void TextElement::addWordsToContainer(const QStringList &words,
                                       MessageLayoutContainer &container,
-                                      const MessageLayoutContext &ctx)
+                                      const MessageLayoutContext &ctx,
+                                      bool spaceBetweenWords)
 {
     auto *app = getApp();
 
@@ -1793,8 +1794,12 @@ void TextElement::addWordsToContainer(const QStringList &words,
             !this->getFlags().has(MessageElementFlag::IgnoreExactMatch) &&
             !this->getFlags().has(MessageElementFlag::RepliedMessage);
 
-        for (const auto &word : words)
+        for (qsizetype wordIndex = 0; wordIndex < words.size(); ++wordIndex)
         {
+            const auto &word = words[wordIndex];
+            const bool trailingSpace =
+                this->hasTrailingSpace() ||
+                (spaceBetweenWords && wordIndex + 1 < words.size());
             auto wordId = container.nextWordId();
             const auto messageTextRange =
                 tracksMessageText
@@ -1872,8 +1877,8 @@ void TextElement::addWordsToContainer(const QStringList &words,
             // see if the text fits in the current line
             if (container.fitsInLine(width))
             {
-                container.addElementNoLineBreak(getTextLayoutElement(
-                    word, size, this->hasTrailingSpace()));
+                container.addElementNoLineBreak(
+                    getTextLayoutElement(word, size, trailingSpace));
                 continue;
             }
 
@@ -1884,8 +1889,8 @@ void TextElement::addWordsToContainer(const QStringList &words,
 
                 if (container.fitsInLine(width))
                 {
-                    container.addElementNoLineBreak(getTextLayoutElement(
-                        word, size, this->hasTrailingSpace()));
+                    container.addElementNoLineBreak(
+                        getTextLayoutElement(word, size, trailingSpace));
                     continue;
                 }
             }
@@ -1972,8 +1977,7 @@ void TextElement::addWordsToContainer(const QStringList &words,
                     currentSize.setWidth(currentWidth.toReal());
                 }
                 container.addElementNoLineBreak(getTextLayoutElement(
-                    currentText, currentSize,
-                    !needsBreak && this->hasTrailingSpace()));
+                    currentText, currentSize, !needsBreak && trailingSpace));
                 if (needsBreak)
                 {
                     container.breakLine();
@@ -2046,8 +2050,8 @@ void TextElement::addWordsToContainer(const QStringList &words,
             {
                 currentSize.setWidth(width);
             }
-            container.addElementNoLineBreak(getTextLayoutElement(
-                currentText, currentSize, this->hasTrailingSpace()));
+            container.addElementNoLineBreak(
+                getTextLayoutElement(currentText, currentSize, trailingSpace));
 #endif
         }
     }
@@ -2457,7 +2461,7 @@ void LinkElement::addToContainer(MessageLayoutContainer &container,
         QStringList allButLast = segments.mid(0, segments.size() - 1);
         QString lastWord = segments.last();
 
-        this->addWordsToContainer(allButLast, container, ctx);
+        this->addWordsToContainer(allButLast, container, ctx, false);
 
         // Lay out the last segment with the original trailing space setting
         this->trailingSpace = originalTrailingSpace;

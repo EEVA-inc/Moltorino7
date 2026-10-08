@@ -325,7 +325,8 @@ protected:
     void setText(QString text);
     void addWordsToContainer(const QStringList &words,
                              MessageLayoutContainer &container,
-                             const MessageLayoutContext &ctx);
+                             const MessageLayoutContext &ctx,
+                             bool spaceBetweenWords = true);
 
     QString text_;
     bool hasWords_ = false;
