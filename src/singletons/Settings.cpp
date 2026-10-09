@@ -554,6 +554,10 @@ Settings::Settings(const Modes &modes, const Args &args,
     }
 
 #ifdef USEWINSDK
+    if (!settingsArgs.isTest)
+    {
+        repairStartupRegistration();
+    }
     this->autorun = isRegisteredForStartup();
     this->autorun.connect(
         [](bool autorun) {

@@ -9,7 +9,9 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QDir>
 #include <QFileInfo>
+#include <QProcess>
 #include <QSettings>
 
 #ifdef USEWINSDK
@@ -59,6 +61,64 @@ void flushClipboard()
 const QString RUN_KEY =
     uR"(HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run)"_s;
 
+namespace detail {
+
+QString windowsStartupCommand(const QString &exePath)
+{
+    const QFileInfo executable(exePath);
+    auto launcher = executable.absoluteFilePath();
+    auto directory = executable.absoluteDir();
+    if (directory.dirName().compare("current", Qt::CaseInsensitive) == 0 &&
+        directory.cdUp())
+    {
+        const auto stub = directory.filePath(executable.fileName());
+        if (QFileInfo(stub).isFile() &&
+            QFileInfo(directory.filePath("Update.exe")).isFile())
+        {
+            launcher = stub;
+        }
+    }
+    return '"' + QDir::toNativeSeparators(launcher) + "\" --autorun";
+}
+
+void repairStartupRegistration(QSettings &settings, const QString &exePath)
+{
+    const auto command = settings.value("Chatterino").toString();
+    const auto arguments = QProcess::splitCommand(command);
+    const QFileInfo executable(exePath);
+    const auto replacement = windowsStartupCommand(exePath);
+    const auto directCommand =
+        '"' + QDir::toNativeSeparators(executable.absoluteFilePath()) +
+        "\" --autorun";
+    if (replacement == directCommand || arguments.size() != 2 ||
+        arguments.at(1) != "--autorun" || command == replacement)
+    {
+        return;
+    }
+    const auto registeredPath =
+        QDir::cleanPath(QDir::fromNativeSeparators(arguments.first()));
+    if (registeredPath.compare(QDir::cleanPath(executable.absoluteFilePath()),
+                               Qt::CaseInsensitive) != 0)
+    {
+        return;
+    }
+    settings.setValue("Chatterino", replacement);
+}
+
+}
+
+void repairStartupRegistration()
+{
+    auto *app = tryGetApp();
+    if (app && app->isTest())
+    {
+        return;
+    }
+    QSettings settings(RUN_KEY, QSettings::NativeFormat);
+    detail::repairStartupRegistration(settings,
+                                      QCoreApplication::applicationFilePath());
+}
+
 bool isRegisteredForStartup()
 {
     QSettings settings(RUN_KEY, QSettings::NativeFormat);
@@ -78,11 +138,9 @@ void setRegisteredForStartup(bool isRegistered)
 
     if (isRegistered)
     {
-        auto exePath = QFileInfo(QCoreApplication::applicationFilePath())
-                           .absoluteFilePath()
-                           .replace('/', '\\');
-
-        settings.setValue("Chatterino", "\"" + exePath + "\" --autorun");
+        settings.setValue("Chatterino",
+                          detail::windowsStartupCommand(
+                              QCoreApplication::applicationFilePath()));
     }
     else
     {

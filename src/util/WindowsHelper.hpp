@@ -11,6 +11,8 @@
 
 #    include <optional>
 
+class QSettings;
+
 namespace chatterino {
 
 enum class AssociationQueryType { Protocol, FileExtension };
@@ -20,6 +22,12 @@ void flushClipboard();
 
 bool isRegisteredForStartup();
 void setRegisteredForStartup(bool isRegistered);
+void repairStartupRegistration();
+
+namespace detail {
+QString windowsStartupCommand(const QString &exePath);
+void repairStartupRegistration(QSettings &settings, const QString &exePath);
+}
 
 QString getAssociatedExecutable(AssociationQueryType queryType, LPCWSTR query);
 
