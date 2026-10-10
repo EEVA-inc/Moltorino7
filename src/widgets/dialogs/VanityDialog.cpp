@@ -6,6 +6,7 @@
 #include "controllers/accounts/AccountController.hpp"
 #include "messages/Image.hpp"
 #include "providers/bluzyrino/BluzyrinoBadges.hpp"
+#include "providers/jilchat/JilChatBadges.hpp"
 #include "providers/bttv/BttvBadges.hpp"
 #include "providers/chatterino/ChatterinoBadges.hpp"
 #include "providers/ffz/FfzBadges.hpp"
@@ -1889,6 +1890,13 @@ VanityDialog::VanityDialog(std::shared_ptr<TwitchChannel> channel,
                                                      this->refreshPreview();
                                                  });
     }
+    if (auto *provider = getApp()->getJilChatBadges())
+    {
+        this->managedConnections_.managedConnect(provider->badgesUpdated,
+                                                 [this] {
+                                                     this->refreshPreview();
+                                                 });
+    }
     this->refreshMoltorinoBadgeAvailability();
 
     this->originalColor_ = account->color();
@@ -3501,7 +3509,10 @@ void VanityDialog::loadLayoutState()
             {
                 this->useLoadedLayout(local.value_or(remoteLayout));
             }
-            if (remoteNeedsRepair || (local && *local != remoteLayout))
+            if (remoteNeedsRepair ||
+                (local && vanity::detail::withoutDeviceOnlyKeys(*local) !=
+                              vanity::detail::withoutDeviceOnlyKeys(
+                                  remoteLayout)))
             {
                 this->layoutNeedsSync_ = true;
                 this->layoutHintLabel_->setText(
@@ -4853,6 +4864,14 @@ void VanityDialog::refreshPreview()
             addBadge(QStringLiteral("bl"), QStringLiteral("Bluzyrino"), badge);
         }
     }
+    if (auto *provider = getApp()->getJilChatBadges();
+        provider != nullptr && getSettings()->showBadgesJilChat)
+    {
+        for (const auto &badge : provider->getBadges({this->accountUserId_}))
+        {
+            addBadge(QStringLiteral("jc"), QStringLiteral("JilChat"), badge);
+        }
+    }
     if (getApp()->getMoltorinoSupporterBadges() != nullptr)
     {
         const bool previewingLockedBadge =
@@ -5438,14 +5457,19 @@ void VanityDialog::saveLayout(bool forceOnlineSync)
     this->layoutTouched_ = false;
     this->layoutNeedsSync_ = true;
 
+    // The JilChat slot is sent along, but the server may not know it. If it
+    // rejects the layout because of it, the slot stays on this device.
+    const auto syncedLayout =
+        this->syncJilChatSlot_ ? layout
+                               : vanity::detail::withoutDeviceOnlyKeys(layout);
     QJsonArray order;
-    for (const auto &key : layout.order)
+    for (const auto &key : syncedLayout.order)
     {
         order.append(key);
     }
     QJsonArray hidden;
     QStringList hiddenKeys;
-    for (const auto &key : layout.hidden)
+    for (const auto &key : syncedLayout.hidden)
     {
         hiddenKeys.push_back(key);
     }
@@ -5475,7 +5499,9 @@ void VanityDialog::saveLayout(bool forceOnlineSync)
             const auto revision = profileObject.value("revision").toInt(-1);
             const bool confirmed =
                 profileObject.value("layoutSchemaVersion").toInt() == 1 &&
-                returnedLayout == layout && revision >= 0;
+                vanity::detail::withoutDeviceOnlyKeys(returnedLayout) ==
+                    vanity::detail::withoutDeviceOnlyKeys(layout) &&
+                revision >= 0;
             if (!confirmed)
             {
                 this->layoutNeedsSync_ = true;
@@ -5529,6 +5555,13 @@ void VanityDialog::saveLayout(bool forceOnlineSync)
                 this->populateCurrentTab();
                 this->refreshPreview();
 
+                this->saveLayout(true);
+                return;
+            }
+            const auto status = result.status().value_or(0);
+            if (this->syncJilChatSlot_ && (status == 400 || status == 422))
+            {
+                this->syncJilChatSlot_ = false;
                 this->saveLayout(true);
                 return;
             }
@@ -5820,6 +5853,10 @@ QString VanityDialog::layoutDisplayName(const QString &key) const
     if (key == QStringLiteral("bl"))
     {
         return QStringLiteral("Bluzyrino");
+    }
+    if (key == QStringLiteral("jc"))
+    {
+        return QStringLiteral("JilChat");
     }
     if (key == QStringLiteral("7"))
     {

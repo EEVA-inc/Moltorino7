@@ -32,6 +32,7 @@
 #include "providers/ffz/FfzBadges.hpp"
 #include "providers/ffz/FfzEmotes.hpp"
 #include "providers/ffzap/FfzApBadges.hpp"
+#include "providers/jilchat/JilChatBadges.hpp"
 #include "providers/homies/HomiesBadges.hpp"
 #include "providers/links/LinkResolver.hpp"
 #include "providers/moltorino/MoltorinoSupporterBadges.hpp"
@@ -2037,6 +2038,7 @@ std::pair<MessagePtrMut, HighlightAlert> MessageBuilder::makeIrcMessage(
     builder.appendFfzApBadge(userID);
     builder.appendBttvBadges(userID);
     builder.appendBluzyrinoBadges(userID);
+    builder.appendJilChatBadges(userID);
     builder.appendMoltorinoBadges(userID);
     builder.appendSeventvBadges(userID);
     builder.appendHomiesBadges(userID, senderIsCurrentUser);
@@ -3474,6 +3476,10 @@ void MessageBuilder::applyVanityBadgeLayout(const QString &userID,
         {
             return QStringLiteral("bl");
         }
+        if (flags.has(MessageElementFlag::BadgeJilChat))
+        {
+            return QStringLiteral("jc");
+        }
         if (flags.has(MessageElementFlag::BadgeSevenTV))
         {
             return QStringLiteral("7");
@@ -3523,9 +3529,9 @@ void MessageBuilder::applyVanityBadgeLayout(const QString &userID,
     }
     const auto customRankCount = requestedRanks.size();
     const auto defaultRank = [](const QString &slot) {
-        static constexpr std::array<QStringView, 13> order{
+        static constexpr std::array<QStringView, 14> order{
             u"ta", u"ts", u"tv", u"tp", u"c",  u"ff", u"fa",
-            u"bt", u"bl", u"m",  u"7",  u"hc", u"hs",
+            u"bt", u"bl", u"m",  u"7",  u"hc", u"hs", u"jc",
         };
         return static_cast<int>(std::ranges::find(order, slot) - order.begin());
     };
@@ -3610,6 +3616,20 @@ void MessageBuilder::appendBluzyrinoBadges(const QString &userID)
     for (const auto &badge : provider->getBadges({userID}))
     {
         this->emplace<BadgeElement>(badge, MessageElementFlag::BadgeBluzyrino);
+        this->message().externalBadges.emplace_back(badge->name.string);
+    }
+}
+
+void MessageBuilder::appendJilChatBadges(const QString &userID)
+{
+    auto *provider = getApp()->getJilChatBadges();
+    if (provider == nullptr)
+    {
+        return;
+    }
+    for (const auto &badge : provider->getBadges({userID}))
+    {
+        this->emplace<BadgeElement>(badge, MessageElementFlag::BadgeJilChat);
         this->message().externalBadges.emplace_back(badge->name.string);
     }
 }

@@ -476,6 +476,9 @@ set(SOURCE_FILES
         providers/irc/IrcConnection2.cpp
         providers/irc/IrcConnection2.hpp
 
+        providers/jilchat/JilChatBadges.cpp
+        providers/jilchat/JilChatBadges.hpp
+
         providers/kick/KickAccount.cpp
         providers/kick/KickAccount.hpp
         providers/kick/KickAccountManager.cpp

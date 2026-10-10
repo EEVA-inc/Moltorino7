@@ -355,6 +355,7 @@ public:
     BoolSetting showBadgesFfz = {"/appearance/badges/ffz", true};
     BoolSetting showBadgesFfzAp = {"/appearance/badges/ffzap", true};
     BoolSetting showBadgesBluzyrino = {"/appearance/badges/bluzyrino", true};
+    BoolSetting showBadgesJilChat = {"/appearance/badges/jilchat", true};
     BoolSetting useCustomFfzModeratorBadges = {
         "/appearance/badges/useCustomFfzModeratorBadges", true};
     BoolSetting useCustomFfzVipBadges = {

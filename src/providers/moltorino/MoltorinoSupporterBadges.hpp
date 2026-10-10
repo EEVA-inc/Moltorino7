@@ -46,6 +46,8 @@ void appendMissingBadgeKeys(MoltorinoVanityLayout &layout,
                             const std::vector<QString> &keys);
 void replaceActiveBadgeOrder(MoltorinoVanityLayout &layout,
                              const std::vector<QString> &keys);
+/// Removes the slots the layout API may not store (JilChat).
+MoltorinoVanityLayout withoutDeviceOnlyKeys(MoltorinoVanityLayout layout);
 bool shouldSaveProfile(const MoltorinoVanityLayout &original,
                        const MoltorinoVanityLayout &current,
                        bool forceOnlineSync = false);
