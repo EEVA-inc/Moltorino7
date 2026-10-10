@@ -155,7 +155,6 @@ struct GroupHeaderGeometry {
     int iconGap{};
     int arrowInset{};
     int arrowSize{};
-    int statusStep{};
     int trailing{};
 
     int textLeft(bool hasIcon) const
@@ -164,7 +163,7 @@ struct GroupHeaderGeometry {
     }
 };
 
-GroupHeaderGeometry groupHeaderGeometry(float scale, int statusCount)
+GroupHeaderGeometry groupHeaderGeometry(float scale)
 {
     GroupHeaderGeometry result{
         .edgeInset = std::max(2, static_cast<int>(std::round(5 * scale))),
@@ -172,18 +171,11 @@ GroupHeaderGeometry groupHeaderGeometry(float scale, int statusCount)
         .iconGap = std::max(1, static_cast<int>(std::round(3 * scale))),
         .arrowInset = std::max(4, static_cast<int>(std::round(8 * scale))),
         .arrowSize = std::max(1, static_cast<int>(std::round(3 * scale))),
-        .statusStep = std::max(4, static_cast<int>(std::round(9 * scale))),
     };
     const auto contentGap =
         std::max(1, static_cast<int>(std::round(3 * scale)));
-    result.trailing = result.arrowInset + result.arrowSize + contentGap +
-                      statusCount * result.statusStep;
+    result.trailing = result.arrowInset + result.arrowSize + contentGap;
     return result;
-}
-
-int groupHeaderStatusCount(bool selected, HighlightState highlightState)
-{
-    return selected && highlightState != HighlightState::None ? 1 : 0;
 }
 
 QImage trimTransparentMargins(QImage image)
@@ -775,9 +767,7 @@ int NotebookTab::normalTabWidthForHeight(int height) const
     if (this->role_ == Role::GroupHeader)
     {
         const auto hasIcon = this->groupIcon_ != "none";
-        const auto statusCount =
-            groupHeaderStatusCount(this->selected_, this->highlightState_);
-        const auto geometry = groupHeaderGeometry(scale, statusCount);
+        const auto geometry = groupHeaderGeometry(scale);
         width = metrics.horizontalAdvance(this->getTitle()) +
                 geometry.textLeft(hasIcon) + geometry.trailing;
     }
@@ -946,17 +936,12 @@ bool NotebookTab::setGroupHeaderState(
                                         icon == "none" || icon == "custom"
                                     ? icon
                                     : QStringLiteral("folder");
-    const auto oldStatusCount =
-        groupHeaderStatusCount(this->selected_, this->highlightState_);
-    const auto newStatusCount =
-        groupHeaderStatusCount(selected, highlightState);
     const bool iconChanged = forceCustomIconReload ||
                              this->groupIcon_ != normalizedIcon ||
                              this->groupCustomIconPath_ != customIconPath;
     const bool sizeChanged = this->defaultTitle_ != title ||
                              this->groupMemberCount_ != memberCount ||
-                             this->groupIcon_ != normalizedIcon ||
-                             oldStatusCount != newStatusCount;
+                             this->groupIcon_ != normalizedIcon;
     this->defaultTitle_ = title;
     this->groupMemberCount_ = memberCount;
     this->groupCollapsed_ = collapsed;
@@ -1722,9 +1707,17 @@ void NotebookTab::paintEvent(QPaintEvent *)
     // draw color indicator line
     auto lineThickness =
         ceil((tabLineWidth + (this->selected_ ? 1 : 0)) * scale);
-    auto lineColor = this->mouseOver_ ? colors.line.hover
-                                      : (windowFocused ? colors.line.regular
-                                                       : colors.line.unfocused);
+    const auto &lineColors =
+        this->role_ == Role::GroupHeader && this->selected_ &&
+                this->highlightState_ != HighlightState::None
+            ? (this->highlightState_ == HighlightState::Highlighted
+                   ? this->theme->tabs.highlighted
+                   : this->theme->tabs.newMessage)
+            : colors;
+    auto lineColor = this->mouseOver_
+                         ? lineColors.line.hover
+                         : (windowFocused ? lineColors.line.regular
+                                          : lineColors.line.unfocused);
     if (this->highlightState_ == HighlightState::Highlighted &&
         getSettings()->colorTabHighlightsByMessage && this->highlightColor_)
     {
@@ -1758,9 +1751,7 @@ void NotebookTab::paintEvent(QPaintEvent *)
     painter.fillRect(lineRect, lineColor);
     painter.restore();
 
-    const auto groupStatusCount =
-        groupHeaderStatusCount(this->selected_, this->highlightState_);
-    const auto groupGeometry = groupHeaderGeometry(scale, groupStatusCount);
+    const auto groupGeometry = groupHeaderGeometry(scale);
 
     // draw live indicator
     if ((this->isLive_ || this->isRerun_) && getSettings()->showTabLive)
@@ -1789,26 +1780,6 @@ void NotebookTab::paintEvent(QPaintEvent *)
         translateRectForLocation(liveIndicatorRect, this->tabLocation_,
                                  this->selected_ ? 0 : -1);
         painter.drawEllipse(liveIndicatorRect);
-    }
-
-    if (this->role_ == Role::GroupHeader && this->selected_ &&
-        this->highlightState_ != HighlightState::None)
-    {
-        const bool liveDotVisible =
-            (this->isLive_ || this->isRerun_) && getSettings()->showTabLive;
-        const auto &stateColors =
-            this->highlightState_ == HighlightState::Highlighted
-                ? this->theme->tabs.highlighted
-                : this->theme->tabs.newMessage;
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(stateColors.line.regular);
-        const auto diameter = std::max(3, static_cast<int>(4 * scale));
-        const auto statusIndex = liveDotVisible ? 2 : 1;
-        const auto center = this->width() - groupGeometry.arrowInset -
-                            statusIndex * groupGeometry.statusStep;
-        const auto x = center - diameter / 2;
-        const auto y = (height - diameter) / 2;
-        painter.drawEllipse(QRect(x, y, diameter, diameter));
     }
 
     // set the pen color

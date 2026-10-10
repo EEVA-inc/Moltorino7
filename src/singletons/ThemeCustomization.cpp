@@ -1335,9 +1335,6 @@ QJsonObject buildCustomizedTheme(const ThemeCustomizationProfile &input)
     const qreal headerContrast = profile.channelBarContrast / 100.0;
     const QColor channelBar =
         mix(effectiveSurface, effectiveRaisedSurface, headerContrast * 0.52);
-    const QColor focusedChannelBar =
-        profile.foundation == ThemeFoundation::MoltorinoPolished ? channelBar
-                                                                 : selected;
     const QColor messageRegular = profile.hasWallpaper()
                                       ? alpha(profile.chatBackground, 0)
                                       : profile.chatBackground;
@@ -1422,7 +1419,7 @@ QJsonObject buildCustomizedTheme(const ThemeCustomizationProfile &input)
              {u"header"_s,
               QJsonObject{{u"background"_s, encoded(channelBar)},
                           {u"border"_s, encoded(border)},
-                          {u"focusedBackground"_s, encoded(focusedChannelBar)},
+                          {u"focusedBackground"_s, encoded(channelBar)},
                           {u"focusedBorder"_s, encoded(border)},
                           {u"focusedText"_s, encoded(profile.text)},
                           {u"text"_s, encoded(profile.text)}}},
@@ -1531,8 +1528,25 @@ QJsonObject buildCustomizedTheme(const ThemeCustomizationProfile &input)
     {
         const auto original =
             validatedThemeColors(profile.originalColors, colors);
-        const auto reference =
+        auto reference =
             validatedThemeColors(profile.originalGeneratedColors, colors);
+        auto splits = reference.value(u"splits"_s).toObject();
+        auto header = splits.value(u"header"_s).toObject();
+        const auto selectedBackground = reference.value(u"tabs"_s)
+                                            .toObject()
+                                            .value(u"selected"_s)
+                                            .toObject()
+                                            .value(u"backgrounds"_s)
+                                            .toObject()
+                                            .value(u"regular"_s);
+        if (header.contains(u"focusedBackground"_s) &&
+            header.value(u"focusedBackground"_s) == selectedBackground)
+        {
+            header.insert(u"focusedBackground"_s,
+                          header.value(u"background"_s));
+            splits.insert(u"header"_s, header);
+            reference.insert(u"splits"_s, splits);
+        }
         customization.insert(u"originalColors"_s, original);
         customization.insert(u"originalGeneratedColors"_s, reference);
         colors = preserveUnchangedThemeColors(colors, reference, original);
