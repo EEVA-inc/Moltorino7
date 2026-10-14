@@ -84,7 +84,7 @@ QString pusherUrl(QStringView appKey, QStringView cluster)
 {
     if (!validPusherCredential(appKey) || !validPusherCredential(cluster))
     {
-        appKey = u"32cbd69e4b950bf97679";
+        appKey = u"34bf7a0ff419a2a775b9";
         cluster = u"us2";
     }
     return u"wss://ws-" % cluster % u".pusher.com/app/" % appKey %
